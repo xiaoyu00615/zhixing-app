@@ -1,0 +1,37 @@
+@import 'tailwindcss';
+@import './tokens.css';
+@import './theme.css';
+
+:root {
+  color-scheme: light;
+  font-size: var(--root-font-size);
+}
+
+/* 默认边框色统一指向 Semantic Token */
+* {
+  border-color: var(--border-default);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-14);
+  line-height: var(--line-height-22);
+  color: var(--text-primary);
+  background-color: var(--bg-app);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 焦点环：规范禁止只写 outline:none 而无替代 Focus Ring */
+:focus-visible {
+  outline: none;
+  border-color: var(--focus-color);
+  box-shadow: var(--focus-ring);
+}

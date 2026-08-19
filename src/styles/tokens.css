@@ -1,0 +1,192 @@
+/* ============================================================
+ * 知行｜Design Tokens
+ * 依据：UI设计规范 V1.2（FROZEN）
+ * 结构：Primitive/Foundation → Semantic
+ * 用途：组件优先使用 Semantic Token，禁止硬编码色值/间距/圆角
+ * ============================================================ */
+
+/* ============================================================
+ * 第一层：Primitive / Foundation Tokens
+ * 原始值，不携带语义；不直接在组件中使用
+ * ============================================================ */
+:root {
+  /* ---- 中性色 ---- */
+  --neutral-900: #18181b;
+  --neutral-600: #52525b;
+  --neutral-500: #8a8f98;
+  --neutral-400: #b4b8c1;
+  --neutral-100: #e7e9ee;
+  --neutral-50: #f6f7f9;
+  --neutral-30: #fafafb;
+  --neutral-10: #f7f8fa;
+  --white: #ffffff;
+
+  /* ---- 主色 / Brand ---- */
+  --indigo-600: #565de8;
+  --indigo-500: #6269f2;
+  --indigo-400: #7b81f5;
+  --indigo-100: #edeeff;
+  --indigo-50: #f5f5ff;
+
+  /* ---- 状态色 ---- */
+  --red-500: #e5484d;
+  --red-50: #fff1f1;
+  --amber-500: #d97706;
+  --amber-50: #fff7e8;
+  --green-500: #2e9b64;
+  --green-50: #eef9f3;
+  --blue-500: #3e73dc;
+  --blue-50: #eff5ff;
+
+  /* ---- 交互行状态 ---- */
+  --row-hover: #f8f9fb;
+  --row-selected: #f3f4ff;
+
+  /* ---- 间距（4px Grid）---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* ---- 字号 ---- */
+  --font-size-12: 12px;
+  --font-size-13: 13px;
+  --font-size-14: 14px;
+  --font-size-16: 16px;
+  --font-size-18: 18px;
+  --font-size-24: 24px;
+  --font-size-28: 28px;
+  --font-size-32: 32px;
+
+  /* ---- 行高 ---- */
+  --line-height-16: 16px;
+  --line-height-18: 18px;
+  --line-height-20: 20px;
+  --line-height-22: 22px;
+  --line-height-24: 24px;
+  --line-height-26: 26px;
+  --line-height-32: 32px;
+  --line-height-36: 36px;
+  --line-height-40: 40px;
+
+  /* ---- 字重 ---- */
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+
+  /* ---- 字体族 ---- */
+  --font-family-sans: Inter, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+
+  /* ---- 圆角 ---- */
+  --radius-6: 6px;
+  --radius-8: 8px;
+  --radius-9: 9px;
+  --radius-10: 10px;
+  --radius-12: 12px;
+  --radius-14: 14px;
+  --radius-16: 16px;
+
+  /* ---- 阴影（Elevation）---- */
+  --elevation-1: 0 1px 2px 0 rgba(0, 0, 0, 0.04);
+  --elevation-2: 0 2px 4px -1px rgba(0, 0, 0, 0.05);
+  --elevation-3: 0 4px 12px -2px rgba(0, 0, 0, 0.06), 0 2px 4px -1px rgba(0, 0, 0, 0.04);
+  --elevation-4: 0 12px 32px -4px rgba(0, 0, 0, 0.08), 0 4px 12px -2px rgba(0, 0, 0, 0.04);
+
+  /* ---- 布局 ---- */
+  --sidebar-width: 224px;
+  --topbar-height: 60px;
+  --page-padding: 24px;
+  --page-padding-lg: 32px;
+  --base-grid: 4px;
+  --root-font-size: 16px;
+
+  /* ---- 控件尺寸 ---- */
+  --control-sm: 30px;
+  --control-md: 36px;
+  --control-lg: 40px;
+  --control-search: 38px;
+  --control-checkbox: 16px;
+  --control-checkbox-lg: 18px;
+  --control-tag: 24px;
+  --table-header: 40px;
+  --table-row: 50px;
+
+  /* ---- Z-Index ---- */
+  --z-base: 0;
+  --z-sticky: 100;
+  --z-dropdown: 300;
+  --z-drawer: 500;
+  --z-modal: 600;
+  --z-toast: 700;
+  --z-tooltip: 800;
+
+  /* ---- 动效 ---- */
+  --duration-hover: 140ms;
+  --duration-modal: 200ms;
+  --duration-drawer: 220ms;
+  --ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* ============================================================
+   * 第二层：Semantic Tokens
+   * 携带语义，组件优先使用；Dark Mode 可覆盖此层
+   * ============================================================ */
+
+  /* ---- 背景 / Surface ---- */
+  --bg-app: var(--neutral-10);
+  --bg-sidebar: var(--neutral-30);
+  --bg-surface: var(--white);
+  --bg-surface-secondary: var(--neutral-50);
+  --bg-hover: var(--row-hover);
+  --bg-selected: var(--row-selected);
+  --bg-primary: var(--indigo-500);
+  --bg-primary-hover: var(--indigo-400);
+  --bg-primary-pressed: var(--indigo-600);
+  --bg-primary-soft: var(--indigo-100);
+  --bg-primary-softest: var(--indigo-50);
+
+  /* ---- 边框 ---- */
+  --border-default: var(--neutral-100);
+  --border-primary: var(--indigo-500);
+
+  /* ---- 文字 ---- */
+  --text-primary: var(--neutral-900);
+  --text-secondary: var(--neutral-600);
+  --text-tertiary: var(--neutral-500);
+  --text-disabled: var(--neutral-400);
+  --text-on-primary: var(--white);
+  --text-primary-brand: var(--indigo-500);
+
+  /* ---- 主色 ---- */
+  --primary: var(--indigo-500);
+  --primary-hover: var(--indigo-400);
+  --primary-pressed: var(--indigo-600);
+  --primary-soft: var(--indigo-100);
+  --primary-softest: var(--indigo-50);
+
+  /* ---- 状态色 ---- */
+  --status-danger: var(--red-500);
+  --status-danger-soft: var(--red-50);
+  --status-warning: var(--amber-500);
+  --status-warning-soft: var(--amber-50);
+  --status-success: var(--green-500);
+  --status-success-soft: var(--green-50);
+  --status-info: var(--blue-500);
+  --status-info-soft: var(--blue-50);
+
+  /* ---- Focus Ring ---- */
+  --focus-color: var(--indigo-500);
+  --focus-ring: 0 0 0 3px rgba(98, 105, 242, 0.12);
+
+  /* ---- 字体（语义）---- */
+  --font-sans: var(--font-family-sans);
+
+  /* ---- 阴影（语义）---- */
+  --shadow-card: var(--elevation-2);
+  --shadow-overlay: var(--elevation-3);
+  --shadow-modal: var(--elevation-4);
+}

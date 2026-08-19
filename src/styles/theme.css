@@ -1,0 +1,91 @@
+/* ============================================================
+ * Tailwind 4 Theme Mapping
+ * 将 Semantic Tokens 映射到 Tailwind 工具类命名空间
+ * 使用 @theme inline：值以 var() 内联，支持运行时覆盖（Dark Mode 预留）
+ * 禁止退回 tailwind.config.ts
+ * ============================================================ */
+
+@theme inline {
+  /* ---- 颜色 → bg-* / text-* / border-* ---- */
+  --color-background: var(--bg-app);
+  --color-sidebar: var(--bg-sidebar);
+  --color-surface: var(--bg-surface);
+  --color-surface-secondary: var(--bg-surface-secondary);
+  --color-hover: var(--bg-hover);
+  --color-selected: var(--bg-selected);
+
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-pressed: var(--primary-pressed);
+  --color-primary-soft: var(--primary-soft);
+  --color-primary-softest: var(--primary-softest);
+
+  --color-foreground: var(--text-primary);
+  --color-foreground-secondary: var(--text-secondary);
+  --color-foreground-tertiary: var(--text-tertiary);
+  --color-foreground-disabled: var(--text-disabled);
+  --color-on-primary: var(--text-on-primary);
+
+  --color-border: var(--border-default);
+
+  --color-danger: var(--status-danger);
+  --color-danger-soft: var(--status-danger-soft);
+  --color-warning: var(--status-warning);
+  --color-warning-soft: var(--status-warning-soft);
+  --color-success: var(--status-success);
+  --color-success-soft: var(--status-success-soft);
+  --color-info: var(--status-info);
+  --color-info-soft: var(--status-info-soft);
+
+  /* ---- 字号 → text-* ---- */
+  --text-caption: var(--font-size-12);
+  --text-caption--line-height: var(--line-height-18);
+  --text-tag: var(--font-size-12);
+  --text-tag--line-height: var(--line-height-16);
+  --text-auxiliary: var(--font-size-13);
+  --text-auxiliary--line-height: var(--line-height-20);
+  --text-body: var(--font-size-14);
+  --text-body--line-height: var(--line-height-22);
+  --text-subtitle: var(--font-size-16);
+  --text-subtitle--line-height: var(--line-height-24);
+  --text-module: var(--font-size-18);
+  --text-module--line-height: var(--line-height-26);
+  --text-title: var(--font-size-24);
+  --text-title--line-height: var(--line-height-32);
+  --text-hero: var(--font-size-28);
+  --text-hero--line-height: var(--line-height-36);
+  --text-kpi: var(--font-size-32);
+  --text-kpi--line-height: var(--line-height-40);
+
+  /* ---- 字体族 → font-* ---- */
+  --font-sans: var(--font-family-sans);
+
+  /* ---- 圆角 → rounded-* ---- */
+  --radius-xs: var(--radius-6);
+  --radius-sm: var(--radius-8);
+  --radius-button: var(--radius-9);
+  --radius-md: var(--radius-10);
+  --radius-lg: var(--radius-12);
+  --radius-xl: var(--radius-14);
+  --radius-2xl: var(--radius-16);
+
+  /* ---- 阴影 → shadow-* ---- */
+  --shadow-card: var(--shadow-card);
+  --shadow-overlay: var(--shadow-overlay);
+  --shadow-modal: var(--shadow-modal);
+
+  /* ---- Z-Index → z-* ---- */
+  --z-sticky: var(--z-sticky);
+  --z-dropdown: var(--z-dropdown);
+  --z-drawer: var(--z-drawer);
+  --z-modal: var(--z-modal);
+  --z-toast: var(--z-toast);
+  --z-tooltip: var(--z-tooltip);
+
+  /* ---- 间距基准（4px Grid，p-1=4px / p-6=24px / p-8=32px）---- */
+  --spacing: var(--space-1);
+
+  /* ---- 布局变量（供 @theme 直接暴露为 CSS 变量）---- */
+  --container-sidebar: var(--sidebar-width);
+  --container-topbar: var(--topbar-height);
+}
