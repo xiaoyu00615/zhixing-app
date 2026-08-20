@@ -2,6 +2,15 @@
 @import './tokens.css';
 @import './theme.css';
 
+/*
+ * Theme 基础约定
+ * - Phase 1A 仅 light theme
+ * - 根节点在 index.html <html data-theme="light">
+ * - 所有 Token 在 :root 定义（light 值）
+ * - 未来扩展 dark 时通过 [data-theme="dark"] 覆盖 Semantic Token 即可
+ *   Primitive Token 保持不变，Dark Mode 不在本阶段实现
+ */
+
 :root {
   color-scheme: light;
   font-size: var(--root-font-size);

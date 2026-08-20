@@ -7,6 +7,8 @@
  * - AppShell 在路由切换时保持挂载，不发生重新挂载；
  *   NavLink / useLocation 会根据 location 正常 re-render；
  *   Shell 几何结构保持稳定，不造成布局抖动
+ * - Theme 根节点在 index.html <html data-theme="light">，
+ *   保证 Portal 内容（Dialog/Dropdown/Tooltip/Select）继承同一 Theme
  */
 
 import type { ReactNode } from "react"
