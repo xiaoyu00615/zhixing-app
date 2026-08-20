@@ -74,13 +74,16 @@
   --shadow-overlay: var(--shadow-overlay);
   --shadow-modal: var(--shadow-modal);
 
-  /* ---- Z-Index → z-* ---- */
-  --z-sticky: var(--z-sticky);
-  --z-dropdown: var(--z-dropdown);
-  --z-drawer: var(--z-drawer);
-  --z-modal: var(--z-modal);
-  --z-toast: var(--z-toast);
-  --z-tooltip: var(--z-tooltip);
+  /* ---- Z-Index → z-* ----
+   * Tailwind 4 z-index 工具类命名空间为 --z-index-*
+   * 例：--z-index-modal 生成 .z-modal { z-index: var(--z-index-modal) }
+   */
+  --z-index-sticky: var(--z-sticky);
+  --z-index-dropdown: var(--z-dropdown);
+  --z-index-drawer: var(--z-drawer);
+  --z-index-modal: var(--z-modal);
+  --z-index-toast: var(--z-toast);
+  --z-index-tooltip: var(--z-tooltip);
 
   /* ---- 间距基准（4px Grid，p-1=4px / p-6=24px / p-8=32px）---- */
   --spacing: var(--space-1);
@@ -88,4 +91,30 @@
   /* ---- 布局变量（供 @theme 直接暴露为 CSS 变量）---- */
   --container-sidebar: var(--sidebar-width);
   --container-topbar: var(--topbar-height);
+
+  /* ============================================================
+   * shadcn Semantic Compatibility Bridge
+   * 将 shadcn 标准语义变量映射到 Step 2 已冻结 Token
+   * 不新建第三套设计系统，仅做别名指向
+   * ============================================================ */
+
+  /* ---- 颜色别名（shadcn 通用语义）---- */
+  --color-muted: var(--bg-surface-secondary);
+  --color-muted-foreground: var(--text-tertiary);
+  --color-accent: var(--bg-hover);
+  --color-accent-foreground: var(--text-primary);
+  --color-popover: var(--bg-surface);
+  --color-popover-foreground: var(--text-primary);
+  --color-secondary: var(--bg-surface-secondary);
+  --color-secondary-foreground: var(--text-primary);
+  --color-destructive: var(--status-danger);
+  --color-input: var(--border-default);
+  --color-ring: var(--focus-color);
+
+  /* ---- Sonner 直接读取的无前缀变量别名 ---- */
+  /* Sonner 内部读取 --popover / --foreground / --border / --radius */
+  --popover: var(--bg-surface);
+  --foreground: var(--text-primary);
+  --border: var(--border-default);
+  --radius: var(--radius-12);
 }
