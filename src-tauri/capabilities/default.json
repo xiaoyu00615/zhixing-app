@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Step 7 最小能力：不开放 core/plugin 任何权限，仅依赖 Builder 自身注册的 invoke_handler（native_ping）。窗口由 tauri.conf.json 直接创建，无需 core:default。",
+  "windows": ["main"],
+  "permissions": []
+}
