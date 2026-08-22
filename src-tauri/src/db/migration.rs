@@ -384,28 +384,46 @@ fn validate_history_structure(conn: &Connection) -> Result<(), MigrationError> {
     req!("checksum_sha256", "TEXT", 1, 0);
     req!("applied_at_ms", "INTEGER", 1, 0);
 
-    // id UNIQUE 索引必须存在
+    // id 必须由单列 UNIQUE index 保证唯一；其它列或复合 UNIQUE 不能替代。
     let mut idx_stmt = conn
         .prepare("PRAGMA index_list('schema_migrations')")
         .map_err(|e| HistoryCorrupt(format!("prepare index_list: {e}")))?;
     // PRAGMA index_list('schema_migrations') 固定列：
     //   0:seq INTEGER, 1:name TEXT, 2:unique INTEGER (0/1), 3:origin TEXT ('u'=UNIQUE 等), 4:partial INTEGER
-    let idxs: Vec<(String, i64, String)> = idx_stmt
+    let idxs: Vec<(String, i64, i64)> = idx_stmt
         .query_map([], |r| {
             Ok((
                 r.get::<_, String>(1)?, // name
                 r.get::<_, i64>(2)?,    // unique (0/1)
-                r.get::<_, String>(3)?, // origin ('u'=user-defined UNIQUE, 'pk'=PRIMARY KEY, 'c'=CREATE INDEX)
+                r.get::<_, i64>(4)?,    // partial (0/1)
             ))
         })
         .map_err(|e| HistoryCorrupt(format!("query index_list: {e}")))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| HistoryCorrupt(format!("row index_list: {e}")))?;
-    let id_unique =
-        // SQLite 自动命名 UNIQUE 索引：sqlite_autoindex_schema_migrations_N
-        idxs.iter().any(|(name, uniq, origin)| {
-            *uniq == 1 && (origin == "u" || name.starts_with("sqlite_autoindex_schema_migrations_"))
-        });
+
+    let mut id_unique = false;
+    for (index_name, unique, partial) in idxs {
+        if unique != 1 || partial != 0 {
+            continue;
+        }
+
+        // Table-valued PRAGMA 等价于 PRAGMA index_info('<index_name>')，并允许安全绑定名称。
+        // index_info 只返回 key columns；必须严格为单列 ["id"]。
+        let mut info_stmt = conn
+            .prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")
+            .map_err(|e| HistoryCorrupt(format!("prepare index_info for {index_name}: {e}")))?;
+        let key_columns: Vec<Option<String>> = info_stmt
+            .query_map([&index_name], |r| r.get::<_, Option<String>>(0))
+            .map_err(|e| HistoryCorrupt(format!("query index_info for {index_name}: {e}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| HistoryCorrupt(format!("row index_info for {index_name}: {e}")))?;
+
+        if key_columns == [Some("id".to_string())] {
+            id_unique = true;
+            break;
+        }
+    }
     if !id_unique {
         return Err(HistoryCorrupt(
             "schema_migrations column id must be UNIQUE".into(),
@@ -591,6 +609,92 @@ mod tests {
         let d = t.path().join("backup");
         fs::create_dir_all(&d).unwrap();
         (t, d)
+    }
+
+    #[test]
+    fn metadata_runner_created_id_unique_passes_validation() {
+        let t = tempdir().unwrap();
+        let conn = new_conn(&t.path().join("x.db"));
+        bootstrap_history_table(&conn).unwrap();
+
+        validate_history_structure(&conn).unwrap();
+    }
+
+    #[test]
+    fn metadata_checksum_unique_does_not_replace_id_unique() {
+        let t = tempdir().unwrap();
+        let conn = new_conn(&t.path().join("x.db"));
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (
+                version         INTEGER PRIMARY KEY NOT NULL,
+                id              TEXT    NOT NULL,
+                checksum_sha256 TEXT    NOT NULL UNIQUE,
+                applied_at_ms   INTEGER NOT NULL
+            )",
+        )
+        .unwrap();
+
+        let err = validate_history_structure(&conn).unwrap_err();
+        assert!(matches!(err, MigrationError::HistoryCorrupt(_)), "{err:?}");
+        assert!(err.to_string().contains("id must be UNIQUE"), "{err}");
+    }
+
+    #[test]
+    fn metadata_composite_id_unique_does_not_replace_single_id_unique() {
+        let t = tempdir().unwrap();
+        let conn = new_conn(&t.path().join("x.db"));
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (
+                version         INTEGER PRIMARY KEY NOT NULL,
+                id              TEXT    NOT NULL,
+                checksum_sha256 TEXT    NOT NULL,
+                applied_at_ms   INTEGER NOT NULL,
+                UNIQUE(id, checksum_sha256)
+            )",
+        )
+        .unwrap();
+
+        let err = validate_history_structure(&conn).unwrap_err();
+        assert!(matches!(err, MigrationError::HistoryCorrupt(_)), "{err:?}");
+        assert!(err.to_string().contains("id must be UNIQUE"), "{err}");
+    }
+
+    #[test]
+    fn metadata_standalone_single_id_unique_index_passes_validation() {
+        let t = tempdir().unwrap();
+        let conn = new_conn(&t.path().join("x.db"));
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (
+                version         INTEGER PRIMARY KEY NOT NULL,
+                id              TEXT    NOT NULL,
+                checksum_sha256 TEXT    NOT NULL,
+                applied_at_ms   INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX schema_migrations_id_unique
+                ON schema_migrations(id);",
+        )
+        .unwrap();
+
+        validate_history_structure(&conn).unwrap();
+    }
+
+    #[test]
+    fn metadata_missing_id_unique_is_history_corrupt() {
+        let t = tempdir().unwrap();
+        let conn = new_conn(&t.path().join("x.db"));
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (
+                version         INTEGER PRIMARY KEY NOT NULL,
+                id              TEXT    NOT NULL,
+                checksum_sha256 TEXT    NOT NULL,
+                applied_at_ms   INTEGER NOT NULL
+            )",
+        )
+        .unwrap();
+
+        let err = validate_history_structure(&conn).unwrap_err();
+        assert!(matches!(err, MigrationError::HistoryCorrupt(_)), "{err:?}");
+        assert!(err.to_string().contains("id must be UNIQUE"), "{err}");
     }
 
     // ---------- [1] empty MIGRATIONS → version 0 ----------
