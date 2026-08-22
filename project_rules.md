@@ -62,10 +62,10 @@
 
 以下四批设计理解已经冻结：
 
-- Batch 01：`01_基础UI.png` + `02_首页.png`；
-- Batch 02：`03_任务.png` + `04_画布.png`；
-- Batch 03：`05_日记-笔记.png` + `06_搜索.png`；
-- Batch 04：`07_设置.png`。
+- Batch 01：`design/1.基础UI.png` + `design/2.首页.png`；
+- Batch 02：`design/3.任务.png` + `design/4.画布.png`；
+- Batch 03：`design/5.日记 - 笔记.png` + `design/6.搜索.png`；
+- Batch 04：`design/7.设置.png`。
 
 设计图片只用于视觉与交互结构参考。禁止根据 PNG/JPG 文件实际像素反推 CSS 尺寸。
 

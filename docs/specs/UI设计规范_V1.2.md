@@ -520,12 +520,12 @@ Mobile 后续单独设计，不把 Desktop 等比缩小。
 
 # 29. 设计稿交付映射
 
-- `01_基础UI.png`：组件视觉母版；
-- `02_首页.png`：首页与 App Shell；
-- `03_任务.png`：Task 功能展示板；
-- `04_画布.png`：Canvas 功能展示板，正式实现需拆列表 / 编辑器；
-- `05_日记-笔记.png`：Diary / Note；
-- `06_搜索.png`：Global Search / Tag / Archive / Trash；
-- `07_设置.png`：Settings / Storage / Backup / Sync。
+- `design/1.基础UI.png`：组件视觉母版；
+- `design/2.首页.png`：首页与 App Shell；
+- `design/3.任务.png`：Task 功能展示板；
+- `design/4.画布.png`：Canvas 功能展示板，正式实现需拆列表 / 编辑器；
+- `design/5.日记 - 笔记.png`：Diary / Note；
+- `design/6.搜索.png`：Global Search / Tag / Archive / Trash；
+- `design/7.设置.png`：Settings / Storage / Backup / Sync。
 
 所有四批 UI 已 FROZEN。若后续重大视觉或交互变更，必须先升级规范版本，再进入开发。
