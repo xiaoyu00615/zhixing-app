@@ -140,7 +140,7 @@ impl From<storage::error::DataRootError> for Issue {
 impl From<db::error::DbError> for Issue {
     fn from(err: db::error::DbError) -> Self {
         use db::error::DbError::*;
-        let (kind, path) = match &err {
+        let (kind, path): (&str, Option<std::path::PathBuf>) = match &err {
             SqliteOpen { path, .. } => ("SqliteOpen", Some(std::path::PathBuf::from(path))),
             DatabaseParentMissing(p) => {
                 ("DatabaseParentMissing", Some(std::path::PathBuf::from(p)))
@@ -152,6 +152,16 @@ impl From<db::error::DbError> for Issue {
             PragmaRead { .. } => ("PragmaRead", None),
             SanityCheck { .. } => ("SanityCheck", None),
             SanityCheckValue(_) => ("SanityCheckValue", None),
+            // 收口 5：Migration 分支 → 单一 authoritative kind() 调用；
+            // 不再复制 16-way match。链路：MigrationError.kind() → Issue.kind。
+            Migration(me) => {
+                return Issue {
+                    subsystem: "migration",
+                    kind: me.kind().into(),
+                    path: None,
+                    message: me.to_string(),
+                };
+            }
         };
         Self {
             subsystem: "database",
@@ -205,29 +215,71 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-/// 启动流水线（可独立 unit test；无 Tauri 依赖；按冻结 4 修订）。
-fn run_bootstrap_pipeline(app_config_dir: &std::path::Path, app_local_data_dir: &std::path::Path) -> RuntimeStatus {
+/// 启动流水线（可独立 unit test；无 Tauri 依赖；Step 9 FirstBoot 顺序 + Existing 接入）。
+fn run_bootstrap_pipeline(
+    app_config_dir: &std::path::Path,
+    app_local_data_dir: &std::path::Path,
+) -> RuntimeStatus {
+    use db::definitions::MIGRATIONS;
+    use db::snapshot::SqliteBackupSnapshot;
+    // 收口 1：生产入口直接使用生产 MIGRATIONS + SqliteBackupSnapshot；
+    // 测试通过内部 run_with_migrations 注入自定义切片，不改 API / 不加 Tauri command。
+    run_bootstrap_pipeline_with_migrations::<SqliteBackupSnapshot>(
+        app_config_dir,
+        app_local_data_dir,
+        MIGRATIONS,
+        SqliteBackupSnapshot,
+    )
+}
+
+/// Private bootstrap implementation helper.
+/// Production uses frozen MIGRATIONS + SqliteBackupSnapshot;
+/// tests may inject custom migrations / SnapshotProvider.
+fn run_bootstrap_pipeline_with_migrations<S: db::snapshot::SnapshotProvider>(
+    app_config_dir: &std::path::Path,
+    app_local_data_dir: &std::path::Path,
+    migrations: &[db::migration::MigrationDefinition],
+    snapshot: S,
+) -> RuntimeStatus {
     let default_data_root = storage_paths::default_data_root(app_local_data_dir);
 
     match BootstrapService::load(&BootstrapService::bootstrap_path(app_config_dir)) {
         BootstrapState::Missing { bootstrap_path } => {
-            // FirstBoot：Candidate 内存，延迟提交。
+            // FirstBoot Step 9 冻结顺序（审核三）：
+            // 1. Candidate 内存；2. DataRoot initialize；3. open_configured_connection 成功；
+            // 4. candidate.commit bootstrap.json；5. MigrationRunner.run → Healthy / Degraded
             let candidate = BootstrapService::new_candidate(bootstrap_path, default_data_root);
             match DataRootService::get_and_ensure(&candidate.data_root, InitMode::FirstBoot) {
                 Ok((data_root, manifest)) => {
                     let db_path = DataRootService::resolve_database_path(&data_root, &manifest);
-                    match db::bootstrap::boot_db(&db_path) {
-                        Ok(_) => match candidate.commit() {
-                            Ok(_) => RuntimeStatus::Healthy,
-                            Err(e) => {
-                                RuntimeStatus::Degraded(DegradedCause::Bootstrap(e.into()))
+                    // Step 9 顺序 (3)：先 open + PRAGMA，失败时 Degraded，不 commit bootstrap。
+                    match db::policy::open_configured_connection(&db_path) {
+                        Ok(mut conn) => {
+                            // Step 9 顺序 (4)：Location/DataRoot/Open 全部 OK → commit bootstrap.json。
+                            match candidate.commit() {
+                                Ok(_loaded) => {
+                                    // Step 9 顺序 (5)：MigrationRunner（调用方注入 migrations + snapshot）。
+                                    let snapshot_dir = data_root.join("backup");
+                                    let runner = db::migration::MigrationRunner::new(migrations, snapshot);
+                                    match runner.run(&mut conn, &snapshot_dir) {
+                                        Ok(_result) => RuntimeStatus::Healthy,
+                                        Err(migration_err) => {
+                                            RuntimeStatus::Degraded(
+                                                DegradedCause::Database(migration_err.into()),
+                                            )
+                                        }
+                                    }
+                                }
+                                Err(commit_err) => {
+                                    drop(conn);
+                                    RuntimeStatus::Degraded(DegradedCause::Bootstrap(
+                                        commit_err.into(),
+                                    ))
+                                }
                             }
-                        },
-                        Err(e) => {
-                            // 冻结 2：DB Bootstrap Error 必须 Degraded，禁止 ? 让 setup 失败。
-                            // 冻结 1 新测试：first_boot_db_failure_does_not_commit_bootstrap
-                            // 因 commit() 从未被调用，bootstrap.json 保持 Missing。
-                            RuntimeStatus::Degraded(DegradedCause::Database(e.into()))
+                        }
+                        Err(db_err) => {
+                            RuntimeStatus::Degraded(DegradedCause::Database(db_err.into()))
                         }
                     }
                 }
@@ -236,15 +288,25 @@ fn run_bootstrap_pipeline(app_config_dir: &std::path::Path, app_local_data_dir: 
         }
 
         BootstrapState::Valid(loaded) => {
-            // Existing Valid：DataRoot InitMode=Existing（禁止 initialize 新建空库/覆盖）。
-            // 🔒 实际读取 bootstrap_path 字段（消除 "field is never read"，并保持派生信息）。
+            // Existing：每次启动都跑 Runner；上次 ApplyFailed 因 Tx rollback 自动重试 pending。
             let _bp = &loaded.bootstrap_path;
             match DataRootService::get_and_ensure(&loaded.data_root, InitMode::Existing) {
                 Ok((data_root, manifest)) => {
                     let db_path = DataRootService::resolve_database_path(&data_root, &manifest);
-                    match db::bootstrap::boot_db(&db_path) {
-                        Ok(_) => RuntimeStatus::Healthy,
-                        Err(e) => RuntimeStatus::Degraded(DegradedCause::Database(e.into())),
+                    match db::policy::open_configured_connection(&db_path) {
+                        Ok(mut conn) => {
+                            let snapshot_dir = data_root.join("backup");
+                            let runner = db::migration::MigrationRunner::new(migrations, snapshot);
+                            match runner.run(&mut conn, &snapshot_dir) {
+                                Ok(_result) => RuntimeStatus::Healthy,
+                                Err(me) => RuntimeStatus::Degraded(
+                                    DegradedCause::Database(me.into()),
+                                ),
+                            }
+                        }
+                        Err(db_err) => {
+                            RuntimeStatus::Degraded(DegradedCause::Database(db_err.into()))
+                        }
                     }
                 }
                 Err(e) => RuntimeStatus::Degraded(DegradedCause::DataRoot(e.into())),
@@ -252,7 +314,6 @@ fn run_bootstrap_pipeline(app_config_dir: &std::path::Path, app_local_data_dir: 
         }
 
         BootstrapState::Degraded(e) => {
-            // 不删/不覆盖/不重建 device_id；直接级联 Degraded。
             RuntimeStatus::Degraded(DegradedCause::Bootstrap(e.into()))
         }
     }
@@ -577,8 +638,8 @@ mod tests {
         fs::remove_dir_all(parent).unwrap();
         fs::write(parent, "block").unwrap();
 
-        // boot_db 应失败
-        let err = db::bootstrap::boot_db(&db_path).unwrap_err();
+        // open_configured_connection 应失败（validate_parent 报错：DatabaseParentIsFile）
+        let err = db::policy::open_configured_connection(&db_path).unwrap_err();
         assert!(
             matches!(err, db::error::DbError::DatabaseParentIsFile(_)),
             "{:?}",
@@ -600,4 +661,289 @@ mod tests {
 
     // -------- 快速：Rust 侧不包含 sqlite_master count > 0 的"初始化"代码 --------
     // 已被 #8 覆盖。
+
+    // ============================================================
+    // Step 9 Boot Pipeline Integration（冻结六 18 + 19）
+    // ============================================================
+
+    // --- [18] FirstBoot integration：runner=[] 仍然 Healthy，bootstrap 被 commit，Data Root 齐全 ---
+    #[test]
+    fn step9_first_boot_pipeline_integration() {
+        let (_t, cfg, local) = sandbox();
+        let status = run_bootstrap_pipeline(&cfg, &local);
+        assert!(matches!(status, RuntimeStatus::Healthy), "{:?}", status);
+        // 🔒 bootstrap.json 必须已 commit（Step 9 顺序: init→open→commit→Runner）
+        let bp = cfg.join(BOOTSTRAP_FILENAME);
+        assert!(bp.exists(), "FirstBoot 成功后 bootstrap.json 必须存在");
+        let loaded = load_bootstrap(&cfg);
+        let data_root = loaded.data_root.clone();
+        // Data Root 结构
+        assert!(data_root.join(MANIFEST_FILENAME).is_file());
+        assert!(data_root.join("database/zhixing.db").is_file());
+        assert!(data_root.join("backup").is_dir());
+        // DB 打开 → 应有 schema_migrations 表（Runner metadata）但 0 条 applied 记录
+        let conn = db::policy::open_configured_connection(&data_root.join("database/zhixing.db")).unwrap();
+        let cnt_meta: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cnt_meta, 1, "Runner 必须自举 schema_migrations");
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0, "Step 9 禁止业务 migration 被写入");
+        // 无业务表（除 schema_migrations 以外）
+        let others: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name!='schema_migrations'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(others, 0, "Step 9 禁止任何业务表");
+    }
+
+    // --- [19] Existing / retry / failure integration：
+    // 先 FirstBoot → 手动破坏 history 使其产生 MigrationError（HistoryGap）→
+    // 下次 Existing 启动返回 Degraded(Database)，**bootstrap/Data Root 不被删除/修改**。
+    #[test]
+    fn step9_existing_retry_failure_preserves_everything() {
+        let (_t, cfg, local) = sandbox();
+        // (1) FirstBoot 正常
+        assert!(matches!(
+            run_bootstrap_pipeline(&cfg, &local),
+            RuntimeStatus::Healthy
+        ));
+        let loaded1 = load_bootstrap(&cfg);
+        let device_id_1 = loaded1.device_id.as_str().to_string();
+        let data_root = loaded1.data_root.clone();
+        let db_path = data_root.join("database/zhixing.db");
+        let bootstrap_bytes_before = fs::read(cfg.join(BOOTSTRAP_FILENAME)).unwrap();
+        let manifest_bytes_before =
+            fs::read(data_root.join(MANIFEST_FILENAME)).unwrap();
+
+        // (2) 手工植入 applied history = [1,3] 造成 HistoryGap（模拟未来被手动污染）
+        {
+            let conn = db::policy::open_configured_connection(&db_path).unwrap();
+            conn.execute_batch(
+                "INSERT INTO schema_migrations(version,id,checksum_sha256,applied_at_ms) \
+                 VALUES(1,'m1','sha1',100);\
+                 INSERT INTO schema_migrations(version,id,checksum_sha256,applied_at_ms) \
+                 VALUES(3,'m3','sha3',101);",
+            )
+            .unwrap();
+        }
+
+        // (3) Existing 启动 → Degraded(Database)
+        let status = run_bootstrap_pipeline(&cfg, &local);
+        assert!(
+            matches!(
+                status,
+                RuntimeStatus::Degraded(DegradedCause::Database(ref issue))
+                if issue.kind == "HistoryGap"
+            ),
+            "Expected Degraded(Database::HistoryGap), got {:?}",
+            status
+        );
+
+        // 🔒 bootstrap/Data Root 保留不变（不删/不覆盖/不重建）
+        let bootstrap_bytes_after = fs::read(cfg.join(BOOTSTRAP_FILENAME)).unwrap();
+        assert_eq!(
+            bootstrap_bytes_before, bootstrap_bytes_after,
+            "Existing migration failure 不得改 bootstrap.json"
+        );
+        let manifest_bytes_after =
+            fs::read(data_root.join(MANIFEST_FILENAME)).unwrap();
+        assert_eq!(
+            manifest_bytes_before, manifest_bytes_after,
+            "Existing migration failure 不得改 manifest"
+        );
+        let loaded2 = load_bootstrap(&cfg);
+        assert_eq!(device_id_1.as_str(), loaded2.device_id.as_str());
+        assert!(db_path.exists(), "失败不得删 zhixing.db");
+
+        // (4) 修复（手工清空 history 表：version=1,3 都删掉）→ 再 run 应 Healthy（重试语义）
+        {
+            let conn = db::policy::open_configured_connection(&db_path).unwrap();
+            conn.execute_batch("DELETE FROM schema_migrations;")
+                .unwrap();
+        }
+        let status = run_bootstrap_pipeline(&cfg, &local);
+        assert!(matches!(status, RuntimeStatus::Healthy), "{:?}", status);
+        // 再次确认 bootstrap/manifest 字节不变
+        let bootstrap_bytes_after2 = fs::read(cfg.join(BOOTSTRAP_FILENAME)).unwrap();
+        assert_eq!(bootstrap_bytes_before, bootstrap_bytes_after2);
+    }
+
+    // ============================================================
+    // 收口 1：FirstBoot migration failure → Existing retry 真正集成测试
+    // ============================================================
+    // （非手工污染 history 模式；通过真实 M_bad 触发 Tx rollback → bootstrap 已提交 → 失败 → 第二次启动 Existing 路径用修正 migration 重试成功）
+
+    use db::migration::MigrationDefinition;
+    use db::snapshot::SqliteBackupSnapshot;
+
+    /// bad migration：第一次 migrate 时失败（同 Tx 内 rollback schema + history）。
+    const FAIL_M1: MigrationDefinition = MigrationDefinition {
+        version: 1,
+        id: "20250101_bad_dup_t1",
+        sql_up: "CREATE TABLE t1(id INTEGER); CREATE TABLE t1(id INTEGER);", // duplicate → ApplyFailed
+        high_risk: false,
+    };
+
+    /// good migration（修正后的版本）：相同 id 不同 SQL 是另一种 corruption，这里用同一「执行意图」的正确 version 1 + 不同 id → 形成 proper migration series [GOOD_M1, GOOD_M2]。
+    /// 因为 FirstBoot failure 后 history 为空，直接把 GOOD_M1 id 设为不同即可（失败的 FAIL_M1 作为 pending 仍未执行；把 Runner 换成 [GOOD_M1] 就会成功）。
+    const GOOD_M1: MigrationDefinition = MigrationDefinition {
+        version: 1,
+        id: "20250101_fixed_create_t1",
+        sql_up: "CREATE TABLE t1(id INTEGER PRIMARY KEY NOT NULL);",
+        high_risk: false,
+    };
+    const GOOD_M2: MigrationDefinition = MigrationDefinition {
+        version: 2,
+        id: "20250102_create_t2",
+        sql_up: "CREATE TABLE t2(v TEXT NOT NULL);",
+        high_risk: false,
+    };
+
+    fn file_mtime(p: &std::path::Path) -> Option<std::time::SystemTime> {
+        fs::metadata(p).ok().and_then(|m| m.modified().ok())
+    }
+
+    /// 收口 1｜真正 FirstBoot failure → Existing retry：
+    ///   1) Missing → init → open → commit bootstrap → Runner.run(FAIL_M1) ApplyFailed
+    ///      → Degraded(Database ApplyFailed)
+    ///   2) bootstrap.json 已存在（device_id 已知，字节保存，mtime 保存）；
+    ///      failed schema t1 不存在；schema_migrations 0 成功行；
+    ///      zhixing.db / Data Root / manifest 不被删。
+    ///   3) 模拟第二次启动：Bootstrap Valid → Existing → Runner.run([GOOD_M1, GOOD_M2])
+    ///      → Healthy；bootstrap 内容和 mtime 不被重写；device_id 不变。
+    #[test]
+    fn step9_closeout_first_boot_failure_existing_retry() {
+        let (_t, cfg, local) = sandbox();
+
+        // ─── (1) FirstBoot 用 [FAIL_M1] → migration 应失败 ───
+        let s1 = run_bootstrap_pipeline_with_migrations::<SqliteBackupSnapshot>(
+            &cfg,
+            &local,
+            &[FAIL_M1],
+            SqliteBackupSnapshot,
+        );
+        match &s1 {
+            RuntimeStatus::Degraded(DegradedCause::Database(issue)) => {
+                assert_eq!(issue.subsystem, "migration");
+                assert_eq!(issue.kind, "ApplyFailed");
+            }
+            other => panic!("Expected Degraded(Database ApplyFailed), got {other:?}"),
+        }
+
+        // ─── (2) 失败后状态：bootstrap 已存在且字节保存；failed schema 无；history 0 行 ───
+        let bp = cfg.join(BOOTSTRAP_FILENAME);
+        assert!(bp.exists(), "FirstBoot: commit+失败 后 bootstrap.json 必须已写入");
+        let loaded1 = load_bootstrap(&cfg);
+        let device_id_1 = loaded1.device_id.as_str().to_string();
+        let data_root = loaded1.data_root.clone();
+        let db_path = data_root.join("database/zhixing.db");
+
+        let bootstrap_bytes_before = fs::read(&bp).unwrap();
+        let manifest_bytes_before =
+            fs::read(data_root.join(MANIFEST_FILENAME)).unwrap();
+        let bootstrap_mtime_before = file_mtime(&bp);
+
+        // t1 不存在（整 Tx rollback）
+        {
+            let conn = db::policy::open_configured_connection(&db_path).unwrap();
+            let cnt: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='t1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(cnt, 0, "ApplyFailed 后 t1 不该存在（Tx rollback）");
+            let hist: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap();
+            assert_eq!(hist, 0, "ApplyFailed 后 history 0 成功行");
+        }
+
+        // DataRoot / manifest / zhixing.db 不被删除（Known Deferred Edge：仅 bootstrap+Data Root 成功后不删）
+        assert!(data_root.join(MANIFEST_FILENAME).exists());
+        assert!(db_path.exists());
+
+        // ─── (3) 第二次启动：Existing 路径 + GOOD migrations → Healthy ───
+        let s2 = run_bootstrap_pipeline_with_migrations::<SqliteBackupSnapshot>(
+            &cfg,
+            &local,
+            &[GOOD_M1, GOOD_M2],
+            SqliteBackupSnapshot,
+        );
+        assert!(matches!(s2, RuntimeStatus::Healthy), "{:?}", s2);
+
+        // bootstrap 字节和 mtime 不被重写；device_id 不变
+        let bootstrap_bytes_after = fs::read(&bp).unwrap();
+        assert_eq!(
+            bootstrap_bytes_before, bootstrap_bytes_after,
+            "Existing retry 不得重写 bootstrap.json"
+        );
+        if let Some(before) = bootstrap_mtime_before {
+            let after = file_mtime(&bp).unwrap();
+            assert_eq!(after, before, "Existing retry 不得更新 bootstrap mtime");
+        }
+        let manifest_bytes_after =
+            fs::read(data_root.join(MANIFEST_FILENAME)).unwrap();
+        assert_eq!(
+            manifest_bytes_before, manifest_bytes_after,
+            "Existing retry 不得改 manifest"
+        );
+        let loaded2 = load_bootstrap(&cfg);
+        assert_eq!(device_id_1.as_str(), loaded2.device_id.as_str());
+
+        // GOOD_M1 + GOOD_M2 应生效：t1、t2 表存在；history 两行；version = 2
+        {
+            let conn = db::policy::open_configured_connection(&db_path).unwrap();
+            assert!(table_exists2(&conn, "t1"));
+            assert!(table_exists2(&conn, "t2"));
+            assert!(table_exists2(&conn, "schema_migrations"));
+            let hist: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap();
+            assert_eq!(hist, 2, "两次成功 migration 历史 2 行");
+            let maxv: i64 = conn
+                .query_row(
+                    "SELECT MAX(version) FROM schema_migrations",
+                    [],
+                    |r| r.get::<_, Option<i64>>(0),
+                )
+                .unwrap()
+                .unwrap_or(0);
+            assert_eq!(maxv, 2, "current_version = 2");
+        }
+    }
+
+    fn table_exists2(conn: &rusqlite::Connection, name: &str) -> bool {
+        let cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        cnt > 0
+    }
 }

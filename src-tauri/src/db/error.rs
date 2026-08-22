@@ -3,6 +3,8 @@
 use rusqlite::Error as RusqliteError;
 use thiserror::Error;
 
+use super::migration::MigrationError;
+
 #[derive(Debug, Error)]
 pub enum DbError {
     #[error("SQLite 打开失败 (code={code}): {path}: {source}")]
@@ -51,4 +53,9 @@ pub enum DbError {
 
     #[error("SELECT 1 返回值 != 1，实际: {0}")]
     SanityCheckValue(i64),
+
+    /// 收口 5：SnapshotError 只作为 MigrationError::SnapshotFailed.source 存在，不再单独进入 DbError。
+    /// 单一链路：MigrationError → DbError::Migration → Issue → DegradedCause::Database。
+    #[error("MigrationRunner 执行失败: {0}")]
+    Migration(#[from] MigrationError),
 }

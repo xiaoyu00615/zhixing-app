@@ -161,12 +161,6 @@ impl DataRootService {
     pub fn resolve_database_path(data_root: &Path, manifest: &DataRootManifest) -> PathBuf {
         manifest.resolve_database_path(data_root)
     }
-
-    /// 仅用于测试：暴露 MANIFEST_KIND 给测试命名空间。
-    #[cfg(test)]
-    pub const fn manifest_kind() -> &'static str {
-        super::manifest::MANIFEST_KIND
-    }
 }
 
 // -------- 内部辅助：条目的种类分类 --------
