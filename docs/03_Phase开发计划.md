@@ -62,6 +62,20 @@
 - UUID / 时间工具；
 - Test Foundation。
 
+### Foundation 提取原则
+
+依赖真实领域与 caller 的 Repository、Application Service、Adapter、Error Model、UUID / Time 和 UI Store，不为了 Phase 清单形式完整而提前创建空接口、placeholder 或 generic abstraction。
+
+禁止预先建立：
+
+- `Repository<T>`；
+- `ApplicationService<T>`；
+- generic `DatabaseAdapter` / CRUD API；
+- generic command bus；
+- 向上层暴露 SQL 的 generic Worker API。
+
+这些能力应从首个真实 vertical slice 的 use case 中提取。Phase 1A Foundation-Building Mode 可以在工程安全底座充分、但上述能力尚无真实 caller 时退出；Deferred、Blocked 或 Needs More Design 项不得因此写成 COMPLETED。
+
 ### 不做
 
 - Task 业务 CRUD；
@@ -79,7 +93,7 @@
 - App Shell / Router / Token 工作；
 - Native SQLite 建库 / 写入 / 重启持久化；
 - Migration 可执行；
-- Repository Interface 可注入 Test Adapter；
+- 不以空 Repository Interface 或 placeholder Test Adapter 作为退出门槛；真实 Repository contract 由首个 vertical slice 提取并通过跨平台 contract tests 验证；
 - 无关键 Console / Rust 错误。
 
 ---
@@ -90,25 +104,35 @@
 
 在进入 Task 业务前，让浏览器版本也拥有真实本地持久化，不依赖 Mock 作为主数据。
 
+首个真实 persistence contract 由经批准的 Task V1 domain / persistence contract 提供。允许在 Phase 1B 前置冻结该 contract，并在 Phase 1B 建立必要的 Native Task persistence reference slice；这属于跨平台 persistence enablement，不表示 Phase 2 Application Service 或 Task 产品 UI 已开始。
+
 ### 内容
 
 - SQLite WASM；
 - OPFS；
-- Worker 数据库执行层；
-- Web Database Adapter；
-- Web Repository Adapter；
+- Dedicated Worker 数据库执行层；
+- 基于真实 Task capability 的 Worker protocol；
+- Native Task persistence reference implementation；
+- `WebTaskRepository`；
 - Capability Detection；
 - OPFS 不可用时的明确兼容提示 / 受限模式；
-- 与 Native 共用 Repository Contract；
+- Native / Web 共用 `TaskRepository` Contract；
+- Native / Web contract parity；
 - Web 持久化重启测试。
+
+Phase 1B 不创建 generic Web CRUD、generic `DatabaseAdapter` 或向 Application / UI 暴露的 SQL query / execute API。Web Worker 内部可以执行实现已批准 Task capability 与 Migration 所必需的 SQL，但平台外部边界必须保持 capability-specific。
 
 ### 验收门槛
 
-Phase 1A + 1B 均通过后，才能进入 Phase 2。
+Phase 1A + 1B 均通过后，才能进入 Phase 2。Phase 1B COMPLETE 还要求 Task V1 contract 已批准、Native / Web persistence 已验证、浏览器真实重启持久化通过，且 OPFS 不可用时不得静默降级为易丢失的主数据存储。
 
 ---
 
 ## Phase 2｜Task
+
+### Entry Boundary
+
+Phase 2 只在 Phase 1B COMPLETE 后开始。Phase 1B 负责基于 Task contract 的跨平台 persistence enablement；Phase 2 才正式实现 Task Application Service、产品 UI 与业务交互。
 
 ### 内容
 
