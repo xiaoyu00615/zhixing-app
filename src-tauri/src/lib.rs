@@ -10,9 +10,10 @@
 //!     Valid   → DataRoot(Existing) get_and_ensure → boot_db → Healthy / Degraded
 //!     Degraded→ 级联降级
 //!
-//! 边界：
-//! - 不把 rusqlite::Connection 放入 Tauri managed State（推迟 Step 9）。
-//! - 新增 Tauri commands = 0，仅保留 Step 7 native_ping。
+//! 边界演进：
+//! - 不把 rusqlite::Connection 放入 Tauri managed State；Phase 1B Task commands
+//!   只通过 Existing bootstrap/Data Root 打开短生命周期 existing-only connection。
+//! - Step 8 只保留 native_ping；Phase 1B 增加批准的 capability-specific Task commands。
 //! - Step 8 无 UI，Degraded 仅 Rust 内部状态模型。
 //!
 //! ⚠️ 永久安全约束（本项目所有自动化 / CI 测试必须遵守）：
@@ -30,6 +31,7 @@ mod commands;
 mod db;
 mod diagnostics;
 mod storage;
+mod task;
 
 use bootstrap::{BootstrapService, BootstrapState};
 use storage::{paths as storage_paths, DataRootService, InitMode};
@@ -178,7 +180,13 @@ pub fn run() {
     diagnostics::init_tracing();
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![commands::native_ping])
+        .invoke_handler(tauri::generate_handler![
+            commands::native_ping,
+            commands::task_create,
+            commands::task_list,
+            commands::task_rename,
+            commands::task_change_status
+        ])
         .setup(|app| {
             // 🔒 冻结 §3：路径统一通过 PathResolver。
             let runtime_status = match (app.path().app_config_dir(), app.path().app_local_data_dir()) {
@@ -670,7 +678,7 @@ mod tests {
     // Step 9 Boot Pipeline Integration（冻结六 18 + 19）
     // ============================================================
 
-    // --- [18] FirstBoot integration：runner=[] 仍然 Healthy，bootstrap 被 commit，Data Root 齐全 ---
+    // --- [18] FirstBoot integration：production Migration 1 applies through the Runner ---
     #[test]
     fn step9_first_boot_pipeline_integration() {
         let (_t, cfg, local) = sandbox();
@@ -685,7 +693,7 @@ mod tests {
         assert!(data_root.join(MANIFEST_FILENAME).is_file());
         assert!(data_root.join("database/zhixing.db").is_file());
         assert!(data_root.join("backup").is_dir());
-        // DB 打开 → 应有 schema_migrations 表（Runner metadata）但 0 条 applied 记录
+        // DB 打开 → schema_migrations + the approved tasks table are present.
         let conn = db::policy::open_configured_connection(&data_root.join("database/zhixing.db")).unwrap();
         let cnt_meta: i64 = conn
             .query_row(
@@ -702,16 +710,25 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(rows, 0, "Step 9 禁止业务 migration 被写入");
-        // 无业务表（除 schema_migrations 以外）
-        let others: i64 = conn
+        assert_eq!(rows, 1, "Production Migration 1 必须写入 history");
+        let task_table: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name!='schema_migrations'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(others, 0, "Step 9 禁止任何业务表");
+        assert_eq!(task_table, 1, "Migration 1 必须创建 tasks");
+        // No unapproved business tables exist.
+        let others: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='table' AND name NOT IN ('schema_migrations', 'tasks')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(others, 0, "不得创建未批准业务表");
     }
 
     // --- [19] Existing / retry / failure integration：
@@ -733,13 +750,11 @@ mod tests {
         let manifest_bytes_before =
             fs::read(data_root.join(MANIFEST_FILENAME)).unwrap();
 
-        // (2) 手工植入 applied history = [1,3] 造成 HistoryGap（模拟未来被手动污染）
+        // (2) Production already applied v1; insert v3 to create history [1,3].
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
             conn.execute_batch(
                 "INSERT INTO schema_migrations(version,id,checksum_sha256,applied_at_ms) \
-                 VALUES(1,'m1','sha1',100);\
-                 INSERT INTO schema_migrations(version,id,checksum_sha256,applied_at_ms) \
                  VALUES(3,'m3','sha3',101);",
             )
             .unwrap();
@@ -773,10 +788,10 @@ mod tests {
         assert_eq!(device_id_1.as_str(), loaded2.device_id.as_str());
         assert!(db_path.exists(), "失败不得删 zhixing.db");
 
-        // (4) 修复（手工清空 history 表：version=1,3 都删掉）→ 再 run 应 Healthy（重试语义）
+        // (4) Remove only the injected v3 row; approved v1 remains intact.
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
-            conn.execute_batch("DELETE FROM schema_migrations;")
+            conn.execute_batch("DELETE FROM schema_migrations WHERE version = 3;")
                 .unwrap();
         }
         let status = run_bootstrap_pipeline(&cfg, &local);

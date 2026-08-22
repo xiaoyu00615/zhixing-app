@@ -4,7 +4,7 @@
 //!
 //! 冻结 §4：validate_database_parent_exists 纯验证，不得 create_dir_all。
 
-use rusqlite::{Connection, ToSql};
+use rusqlite::{Connection, OpenFlags, ToSql};
 use std::path::{Path, PathBuf};
 
 use super::error::DbError;
@@ -45,6 +45,31 @@ pub fn open_configured_connection<P: AsRef<Path>>(database_path: P) -> Result<Co
         source,
     })?;
 
+    configure_connection(conn)
+}
+
+/// 打开已经存在的 SQLite 主库，严格禁止 CREATE。
+///
+/// Runtime business commands must use this entry point after validating an
+/// existing bootstrap and Data Root. A missing database fails closed and must
+/// not create a replacement file.
+pub fn open_existing_configured_connection<P: AsRef<Path>>(
+    database_path: P,
+) -> Result<Connection, DbError> {
+    let database_path = database_path.as_ref();
+
+    let _parent = validate_database_parent_exists(database_path)?;
+    let conn = Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|source| DbError::SqliteOpen {
+            path: database_path.display().to_string(),
+            code: sqlite_code(&source),
+            source,
+        })?;
+
+    configure_connection(conn)
+}
+
+fn configure_connection(conn: Connection) -> Result<Connection, DbError> {
     // 3. PRAGMA 写入 + read-back（严格 Policy）
     apply_pragma(&conn, "journal_mode", "WAL", &["wal"])?;
     apply_pragma(&conn, "synchronous", "NORMAL", &["1", "normal"])?;

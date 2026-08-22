@@ -1,1 +1,1 @@
-export * from './native';
+export type { TaskRepository } from '@/task/repository'
