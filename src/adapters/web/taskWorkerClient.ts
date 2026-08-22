@@ -1,0 +1,184 @@
+import type {
+  ChangeTaskStatusInput,
+  CreateTaskInput,
+  RenameTaskInput,
+  TaskRepositoryErrorCode,
+} from '@/task/repository'
+import {
+  parseTaskWorkerResponse,
+  parseWebPersistenceCapability,
+  type TaskWorkerRequest,
+  type WebPersistenceCapability,
+} from '@/adapters/web/taskWorkerProtocol'
+
+export interface TaskWorkerEndpoint {
+  onmessage: ((event: MessageEvent<unknown>) => void) | null
+  onerror: ((event: ErrorEvent) => void) | null
+  onmessageerror: ((event: MessageEvent<unknown>) => void) | null
+  postMessage(message: TaskWorkerRequest): void
+  terminate(): void
+}
+
+interface PendingRequest {
+  readonly resolve: (value: unknown) => void
+  readonly reject: (error: TaskWorkerClientError) => void
+}
+
+export class TaskWorkerClientError extends Error {
+  readonly code: TaskRepositoryErrorCode
+
+  constructor(code: TaskRepositoryErrorCode) {
+    super('Task persistence worker request failed.')
+    this.name = 'TaskWorkerClientError'
+    this.code = code
+  }
+}
+
+export function createTaskPersistenceWorker(): TaskWorkerEndpoint {
+  return new Worker(new URL('./taskPersistence.worker.ts', import.meta.url), {
+    type: 'module',
+    name: 'zhixing-task-persistence',
+  })
+}
+
+export class TaskWorkerClient {
+  readonly #worker: TaskWorkerEndpoint
+  readonly #pending = new Map<number, PendingRequest>()
+  #nextRequestId = 1
+  #initializePromise: Promise<WebPersistenceCapability> | null = null
+  #terminated = false
+
+  constructor(worker: TaskWorkerEndpoint) {
+    this.#worker = worker
+    worker.onmessage = (event) => {
+      this.handleMessage(event.data)
+    }
+    worker.onerror = () => {
+      this.failAll('PERSISTENCE_UNAVAILABLE')
+    }
+    worker.onmessageerror = () => {
+      this.failAll('PERSISTENCE_UNAVAILABLE')
+    }
+  }
+
+  initialize(): Promise<WebPersistenceCapability> {
+    this.#initializePromise ??= this.send((requestId) => ({
+      requestId,
+      type: 'initialize',
+    })).then((value) => {
+      const capability = parseWebPersistenceCapability(value)
+      if (capability === null) {
+        throw new TaskWorkerClientError('PERSISTENCE_FAILED')
+      }
+      return capability
+    })
+    return this.#initializePromise
+  }
+
+  createTask(input: CreateTaskInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'task.create',
+      input,
+    }))
+  }
+
+  listTasks(): Promise<unknown> {
+    return this.send((requestId) => ({ requestId, type: 'task.list' }))
+  }
+
+  renameTask(input: RenameTaskInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'task.rename',
+      input,
+    }))
+  }
+
+  changeTaskStatus(input: ChangeTaskStatusInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'task.changeStatus',
+      input,
+    }))
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.#terminated) {
+      return
+    }
+    try {
+      await this.send((requestId) => ({ requestId, type: 'shutdown' }))
+    } finally {
+      this.terminate()
+    }
+  }
+
+  terminate(): void {
+    if (this.#terminated) {
+      return
+    }
+    this.#terminated = true
+    this.#worker.terminate()
+    this.rejectPending('PERSISTENCE_UNAVAILABLE')
+  }
+
+  private send(
+    createRequest: (requestId: number) => TaskWorkerRequest,
+  ): Promise<unknown> {
+    if (this.#terminated) {
+      return Promise.reject(
+        new TaskWorkerClientError('PERSISTENCE_UNAVAILABLE'),
+      )
+    }
+
+    const requestId = this.#nextRequestId
+    this.#nextRequestId += 1
+    return new Promise((resolve, reject) => {
+      this.#pending.set(requestId, { resolve, reject })
+      try {
+        this.#worker.postMessage(createRequest(requestId))
+      } catch {
+        this.#pending.delete(requestId)
+        reject(new TaskWorkerClientError('PERSISTENCE_UNAVAILABLE'))
+      }
+    })
+  }
+
+  private handleMessage(value: unknown): void {
+    const response = parseTaskWorkerResponse(value)
+    if (response === null) {
+      this.failAll('PERSISTENCE_FAILED')
+      return
+    }
+
+    const pending = this.#pending.get(response.requestId)
+    if (pending === undefined) {
+      this.failAll('PERSISTENCE_FAILED')
+      return
+    }
+    this.#pending.delete(response.requestId)
+
+    if (response.ok) {
+      pending.resolve(response.result)
+    } else {
+      pending.reject(new TaskWorkerClientError(response.error.code))
+    }
+  }
+
+  private failAll(code: TaskRepositoryErrorCode): void {
+    this.rejectPending(code)
+    this.#initializePromise = null
+    if (!this.#terminated) {
+      this.#terminated = true
+      this.#worker.terminate()
+    }
+  }
+
+  private rejectPending(code: TaskRepositoryErrorCode): void {
+    for (const pending of this.#pending.values()) {
+      pending.reject(new TaskWorkerClientError(code))
+    }
+    this.#pending.clear()
+  }
+}

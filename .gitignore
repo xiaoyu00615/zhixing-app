@@ -3,6 +3,8 @@ node_modules/
 
 # 构建产物
 dist/
+test-results/
+playwright-report/
 
 # TypeScript 增量构建缓存
 *.tsbuildinfo
