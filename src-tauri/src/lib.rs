@@ -28,6 +28,7 @@
 mod bootstrap;
 mod commands;
 mod db;
+mod diagnostics;
 mod storage;
 
 use bootstrap::{BootstrapService, BootstrapState};
@@ -174,6 +175,8 @@ impl From<db::error::DbError> for Issue {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    diagnostics::init_tracing();
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![commands::native_ping])
         .setup(|app| {
@@ -208,6 +211,7 @@ pub fn run() {
                     RuntimeStatus::Degraded(DegradedCause::PathResolver(issue))
                 }
             };
+            diagnostics::record_startup_status(&runtime_status);
             app.manage(runtime_status);
             Ok(())
         })
