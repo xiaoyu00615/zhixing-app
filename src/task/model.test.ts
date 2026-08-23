@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'vitest'
 
 import {
+  DEFAULT_TASK_FILTER,
   TASK_STATUSES,
   TASK_STATUS_OPERATIONS,
   buildTaskCalendarMonth,
+  filterTasks,
   isCanonicalLowercaseUuid,
   getDaysInLocalMonth,
   getTaskDateGroup,
@@ -553,5 +555,132 @@ describe('Task calendar derivation', () => {
     expect(days.find((day) => day.date === '2026-08-24')?.tasks).toEqual([])
     expect(days.find((day) => day.date === '2026-09-01')?.tasks).toEqual([])
     expect(days.flatMap((day) => day.tasks)).not.toContain(withoutDeadline)
+  })
+})
+
+describe('Task filter derivation', () => {
+  const projectId = '00000000-0000-4000-8000-000000000101'
+  const tagId = '00000000-0000-4000-8000-000000000201'
+  const tasks: readonly Task[] = [
+    {
+      ...TASK,
+      id: '00000000-0000-4000-8000-000000000041',
+      title: 'Matching overdue task',
+      status: 'doing',
+      isImportant: true,
+      dueDate: '2026-08-22',
+      projectId,
+      tagIds: [tagId],
+    },
+    {
+      ...TASK,
+      id: '00000000-0000-4000-8000-000000000042',
+      title: 'Today task',
+      dueDate: '2026-08-23',
+    },
+    {
+      ...TASK,
+      id: '00000000-0000-4000-8000-000000000043',
+      title: 'Upcoming urgent task',
+      isUrgent: true,
+      dueDate: '2026-08-24',
+    },
+    {
+      ...TASK,
+      id: '00000000-0000-4000-8000-000000000044',
+      title: 'Completed past task',
+      status: 'completed',
+      dueDate: '2026-08-22',
+    },
+    {
+      ...TASK,
+      id: '00000000-0000-4000-8000-000000000045',
+      title: 'Cancelled undated urgent task',
+      status: 'cancelled',
+      isUrgent: true,
+    },
+  ]
+
+  test.each([
+    ['status', { status: 'doing' }, ['Matching overdue task']],
+    ['importance', { importance: 'yes' }, ['Matching overdue task']],
+    [
+      'effective urgency',
+      { urgency: 'yes' },
+      [
+        'Matching overdue task',
+        'Upcoming urgent task',
+        'Cancelled undated urgent task',
+      ],
+    ],
+    ['today', { date: 'today' }, ['Today task']],
+    ['upcoming', { date: 'upcoming' }, ['Upcoming urgent task']],
+    ['overdue', { date: 'overdue' }, ['Matching overdue task']],
+    ['no deadline', { date: 'none' }, ['Cancelled undated urgent task']],
+    ['project', { project: projectId }, ['Matching overdue task']],
+    [
+      'no project',
+      { project: 'none' },
+      [
+        'Today task',
+        'Upcoming urgent task',
+        'Completed past task',
+        'Cancelled undated urgent task',
+      ],
+    ],
+    ['tag', { tag: tagId }, ['Matching overdue task']],
+    [
+      'no tag',
+      { tag: 'none' },
+      [
+        'Today task',
+        'Upcoming urgent task',
+        'Completed past task',
+        'Cancelled undated urgent task',
+      ],
+    ],
+  ] as const)('filters by %s', (_name, partial, expectedTitles) => {
+    expect(
+      filterTasks(
+        tasks,
+        { ...DEFAULT_TASK_FILTER, ...partial },
+        '2026-08-23',
+      ).map((task) => task.title),
+    ).toEqual(expectedTitles)
+  })
+
+  test('combines every dimension with AND without mutating source tasks', () => {
+    const result = filterTasks(
+      tasks,
+      {
+        status: 'doing',
+        importance: 'yes',
+        urgency: 'yes',
+        date: 'overdue',
+        project: projectId,
+        tag: tagId,
+      },
+      '2026-08-23',
+    )
+
+    expect(result).toEqual([tasks[0]])
+    expect(tasks).toHaveLength(5)
+  })
+
+  test('does not classify completed/cancelled deadlines as active date groups', () => {
+    expect(
+      filterTasks(
+        tasks,
+        { ...DEFAULT_TASK_FILTER, date: 'overdue' },
+        '2026-08-23',
+      ),
+    ).not.toContain(tasks[3])
+    expect(
+      filterTasks(
+        tasks,
+        { ...DEFAULT_TASK_FILTER, status: 'cancelled', urgency: 'yes' },
+        '2026-08-23',
+      ),
+    ).toEqual([tasks[4]])
   })
 })

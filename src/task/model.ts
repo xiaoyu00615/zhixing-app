@@ -48,6 +48,28 @@ export type TaskDateGroup = (typeof TASK_DATE_GROUPS)[number]
 
 export type TasksByDateGroup = Readonly<Record<TaskDateGroup, readonly Task[]>>
 
+export type TaskBooleanFilter = 'all' | 'yes' | 'no'
+export type TaskDateFilter = 'all' | TaskDateGroup | 'none'
+export type TaskRelationFilter = string
+
+export interface TaskFilter {
+  readonly status: 'all' | TaskStatus
+  readonly importance: TaskBooleanFilter
+  readonly urgency: TaskBooleanFilter
+  readonly date: TaskDateFilter
+  readonly project: TaskRelationFilter
+  readonly tag: TaskRelationFilter
+}
+
+export const DEFAULT_TASK_FILTER: TaskFilter = {
+  status: 'all',
+  importance: 'all',
+  urgency: 'all',
+  date: 'all',
+  project: 'all',
+  tag: 'all',
+}
+
 export interface LocalMonth {
   readonly year: number
   readonly month: number
@@ -239,6 +261,59 @@ export function groupTasksByDate(
   }
 
   return groups
+}
+
+export function matchesTaskFilter(
+  task: Task,
+  filter: TaskFilter,
+  today: LocalDate,
+): boolean {
+  if (filter.status !== 'all' && task.status !== filter.status) return false
+  if (
+    filter.importance !== 'all' &&
+    task.isImportant !== (filter.importance === 'yes')
+  ) {
+    return false
+  }
+  if (
+    filter.urgency !== 'all' &&
+    isTaskEffectivelyUrgent(task, today) !== (filter.urgency === 'yes')
+  ) {
+    return false
+  }
+  if (filter.date === 'none' && task.dueDate !== null) return false
+  if (
+    filter.date !== 'all' &&
+    filter.date !== 'none' &&
+    getTaskDateGroup(task, today) !== filter.date
+  ) {
+    return false
+  }
+  if (filter.project === 'none' && task.projectId !== null) return false
+  if (
+    filter.project !== 'all' &&
+    filter.project !== 'none' &&
+    task.projectId !== filter.project
+  ) {
+    return false
+  }
+  if (filter.tag === 'none' && task.tagIds.length !== 0) return false
+  if (
+    filter.tag !== 'all' &&
+    filter.tag !== 'none' &&
+    !task.tagIds.includes(filter.tag)
+  ) {
+    return false
+  }
+  return true
+}
+
+export function filterTasks(
+  tasks: readonly Task[],
+  filter: TaskFilter,
+  today: LocalDate,
+): readonly Task[] {
+  return tasks.filter((task) => matchesTaskFilter(task, filter, today))
 }
 
 export function localMonthFromLocalDate(

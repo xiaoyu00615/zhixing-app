@@ -304,7 +304,11 @@ describe('TasksPage Project V1 UI', () => {
     )
     await screen.findByText('项目任务')
 
-    await user.click(screen.getByRole('button', { name: '工作' }))
+    await user.click(screen.getByRole('button', { name: '筛选' }))
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '筛选项目' }),
+      WORK.id,
+    )
     expect(screen.getByText('项目任务')).toBeInTheDocument()
     expect(screen.queryByText('无项目任务')).not.toBeInTheDocument()
 
@@ -369,8 +373,8 @@ describe('TasksPage Project V1 UI', () => {
         today="2026-08-23"
       />,
     )
-    await screen.findByRole('button', { name: '新建项目' })
-    await user.click(screen.getByRole('button', { name: '新建项目' }))
+    await user.click(await screen.findByRole('button', { name: '项目管理' }))
+    await user.click(screen.getByRole('menuitem', { name: '新建项目' }))
     await user.type(
       screen.getByRole('textbox', { name: '项目名称' }),
       ' 新项目 ',
@@ -381,7 +385,8 @@ describe('TasksPage Project V1 UI', () => {
       screen.queryByRole('button', { name: /删除项目/ }),
     ).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: '重命名项目：工作' }))
+    await user.click(screen.getByRole('button', { name: '项目管理' }))
+    await user.click(screen.getByRole('menuitem', { name: '重命名项目：工作' }))
     const nameInput = screen.getByRole('textbox', { name: '项目名称' })
     await user.clear(nameInput)
     await user.type(nameInput, '工作项目')
@@ -422,8 +427,15 @@ describe('TasksPage Tag V1 UI', () => {
     )
     await screen.findByText(matching.title)
 
-    await user.click(screen.getByRole('button', { name: '工作' }))
-    await user.click(screen.getByRole('button', { name: '专注' }))
+    await user.click(screen.getByRole('button', { name: '筛选' }))
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '筛选项目' }),
+      WORK.id,
+    )
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '筛选标签' }),
+      FOCUS.id,
+    )
     expect(screen.getByText(matching.title)).toBeInTheDocument()
     expect(screen.queryByText(wrongProject.title)).not.toBeInTheDocument()
     expect(screen.queryByText(untagged.title)).not.toBeInTheDocument()
@@ -457,14 +469,18 @@ describe('TasksPage Tag V1 UI', () => {
     await user.click(
       screen.getByRole('button', { name: `查看任务详情：${task.title}` }),
     )
-    await user.click(screen.getByRole('button', { name: `添加标签：${FOCUS.name}` }))
+    await user.click(
+      screen.getByRole('button', { name: `添加标签：${FOCUS.name}` }),
+    )
     expect(fake.addTaskTag).toHaveBeenCalledWith(task.id, FOCUS.id)
     await waitFor(() =>
       expect(
         screen.getByRole('button', { name: `移除标签：${FOCUS.name}` }),
       ).toBeInTheDocument(),
     )
-    await user.click(screen.getByRole('button', { name: `移除标签：${FOCUS.name}` }))
+    await user.click(
+      screen.getByRole('button', { name: `移除标签：${FOCUS.name}` }),
+    )
     expect(fake.removeTaskTag).toHaveBeenCalledWith(task.id, FOCUS.id)
   })
 
@@ -478,14 +494,19 @@ describe('TasksPage Tag V1 UI', () => {
         today="2026-08-23"
       />,
     )
-    await screen.findByRole('button', { name: '新建标签' })
-    await user.click(screen.getByRole('button', { name: '新建标签' }))
+    await user.click(await screen.findByRole('button', { name: '标签管理' }))
+    await user.click(screen.getByRole('menuitem', { name: '新建标签' }))
     await user.type(screen.getByRole('textbox', { name: '标签名称' }), ' Work ')
     await user.click(screen.getByRole('button', { name: '创建标签' }))
     expect(current.createTag).toHaveBeenCalledWith(' Work ')
-    expect(screen.queryByRole('button', { name: /删除标签/ })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: /删除标签/ }),
+    ).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: `重命名标签：${FOCUS.name}` }))
+    await user.click(screen.getByRole('button', { name: '标签管理' }))
+    await user.click(
+      screen.getByRole('menuitem', { name: `重命名标签：${FOCUS.name}` }),
+    )
     const input = screen.getByRole('textbox', { name: '标签名称' })
     await user.clear(input)
     await user.type(input, '深度工作')
@@ -531,6 +552,163 @@ describe('TasksPage Tag V1 UI', () => {
         FOCUS.name,
       ),
     ).toBeInTheDocument()
+  })
+})
+
+describe('TasksPage unified filters', () => {
+  const PROJECT: Project = {
+    id: '00000000-0000-4000-8000-000000000301',
+    name: '知行',
+    createdAtMs: 100,
+    updatedAtMs: 100,
+  }
+  const TAG: Tag = {
+    id: '00000000-0000-4000-8000-000000000302',
+    name: 'AI',
+    createdAtMs: 100,
+    updatedAtMs: 100,
+  }
+
+  test('applies one AND-composed result to list, quadrant, date, and calendar', async () => {
+    const user = userEvent.setup()
+    const matching = taskFixture(301, '六维匹配任务', {
+      status: 'doing',
+      isImportant: true,
+      dueDate: '2026-08-22',
+      projectId: PROJECT.id,
+      tagIds: [TAG.id],
+    })
+    const wrongImportance = taskFixture(302, '非重要任务', {
+      status: 'doing',
+      dueDate: '2026-08-22',
+      projectId: PROJECT.id,
+      tagIds: [TAG.id],
+    })
+    const wrongDate = taskFixture(303, '未来任务', {
+      status: 'doing',
+      isImportant: true,
+      isUrgent: true,
+      dueDate: '2026-08-24',
+      projectId: PROJECT.id,
+      tagIds: [TAG.id],
+    })
+    const fake = createServiceDouble([matching, wrongImportance, wrongDate])
+    const current = createRuntime(fake.service, [PROJECT], [TAG])
+    render(
+      <TasksPage
+        openRuntime={vi.fn(() => Promise.resolve(current.runtime))}
+        today="2026-08-23"
+      />,
+    )
+    await screen.findByText(matching.title)
+
+    await user.click(screen.getByRole('button', { name: '筛选' }))
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '筛选状态' }),
+      'doing',
+    )
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '筛选重要性' }),
+      'yes',
+    )
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '筛选紧急性' }),
+      'yes',
+    )
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '筛选日期' }),
+      'overdue',
+    )
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '筛选项目' }),
+      PROJECT.id,
+    )
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '筛选标签' }),
+      TAG.id,
+    )
+
+    expect(screen.getByText(matching.title)).toBeInTheDocument()
+    expect(screen.queryByText(wrongImportance.title)).not.toBeInTheDocument()
+    expect(screen.queryByText(wrongDate.title)).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('tab', { name: '四象限' }))
+    expect(
+      within(screen.getByRole('region', { name: '任务四象限' })).getByText(
+        matching.title,
+      ),
+    ).toBeInTheDocument()
+
+    await user.click(screen.getByRole('tab', { name: '日期' }))
+    const dateView = screen.getByRole('region', { name: '任务日期视图' })
+    await user.click(
+      within(dateView).getByRole('button', { name: '已逾期，1 项任务' }),
+    )
+    expect(within(dateView).getByText(matching.title)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('tab', { name: '日历' }))
+    expect(
+      within(screen.getByRole('grid', { name: '2026年8月任务月历' })).getByRole(
+        'button',
+        { name: `查看任务详情：${matching.title}，截止日期 2026-08-22` },
+      ),
+    ).toBeInTheDocument()
+  })
+
+  test('clears one filter or all filters and closes detail when it stops matching', async () => {
+    const user = userEvent.setup()
+    const important = taskFixture(304, '重要进行中任务', {
+      status: 'doing',
+      isImportant: true,
+    })
+    const ordinary = taskFixture(305, '普通进行中任务', { status: 'doing' })
+    const completed = taskFixture(306, '已完成任务', { status: 'completed' })
+    const fake = createServiceDouble([important, ordinary, completed])
+    const completedImportant = { ...important, status: 'completed' as const }
+    fake.listTasks
+      .mockResolvedValueOnce([important, ordinary, completed])
+      .mockResolvedValueOnce([completedImportant, ordinary, completed])
+    const current = createRuntime(fake.service)
+    render(
+      <TasksPage
+        openRuntime={vi.fn(() => Promise.resolve(current.runtime))}
+        today="2026-08-23"
+      />,
+    )
+    await screen.findByText(important.title)
+    await user.click(screen.getByRole('button', { name: '筛选' }))
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '筛选状态' }),
+      'doing',
+    )
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '筛选重要性' }),
+      'yes',
+    )
+    expect(screen.queryByText(ordinary.title)).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '清除筛选：重要' }))
+    expect(screen.getByText(ordinary.title)).toBeInTheDocument()
+
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '筛选重要性' }),
+      'yes',
+    )
+    await user.click(
+      screen.getByRole('button', { name: `查看任务详情：${important.title}` }),
+    )
+    const detail = screen.getByRole('dialog', {
+      name: `任务详情：${important.title}`,
+    })
+    await user.click(within(detail).getByRole('button', { name: '完成' }))
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('dialog', { name: `任务详情：${important.title}` }),
+      ).not.toBeInTheDocument(),
+    )
+    await user.click(screen.getByRole('button', { name: '清除全部' }))
+    expect(screen.getByText(important.title)).toBeInTheDocument()
+    expect(screen.getByText(ordinary.title)).toBeInTheDocument()
+    expect(screen.getByText(completed.title)).toBeInTheDocument()
   })
 })
 

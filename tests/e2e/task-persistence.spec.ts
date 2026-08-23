@@ -248,7 +248,9 @@ test('persists Task operations in OPFS across a browser restart', async ({
     expect(missingTagError).toMatchObject({ code: 'NOT_FOUND' })
     await expect(
       page.evaluate(() =>
-        (window as unknown as HarnessWindow).__taskPersistenceHarness.listTasks(),
+        (
+          window as unknown as HarnessWindow
+        ).__taskPersistenceHarness.listTasks(),
       ),
     ).resolves.toEqual([])
 
@@ -355,13 +357,13 @@ test('persists Task operations in OPFS across a browser restart', async ({
     )
     await page.evaluate(
       ({ id }) =>
-        (
-          window as unknown as HarnessWindow
-        ).__taskPersistenceHarness.renameTag({
-          id,
-          name: '专注力',
-          updatedAtMs: 103,
-        }),
+        (window as unknown as HarnessWindow).__taskPersistenceHarness.renameTag(
+          {
+            id,
+            name: '专注力',
+            updatedAtMs: 103,
+          },
+        ),
       { id: TAG_IDS.focus },
     )
 
@@ -442,7 +444,9 @@ test('persists Task operations in OPFS across a browser restart', async ({
     ])
     await expect(
       page.evaluate(() =>
-        (window as unknown as HarnessWindow).__taskPersistenceHarness.listTags(),
+        (
+          window as unknown as HarnessWindow
+        ).__taskPersistenceHarness.listTags(),
       ),
     ).resolves.toEqual([
       {
@@ -473,7 +477,11 @@ test('persists Task operations in OPFS across a browser restart', async ({
 
     await page.goto(`${configuredBaseURL}/tasks`)
     await expect(page.getByText('Third', { exact: true })).toBeVisible()
-    await page.getByRole('button', { name: '专注力', exact: true }).click()
+    await page.getByRole('button', { name: '筛选', exact: true }).click()
+    await page
+      .getByRole('combobox', { name: '筛选标签' })
+      .selectOption(TAG_IDS.focus)
+    await page.getByRole('button', { name: /^筛选\s*1$/ }).click()
     await expect(page.getByText('Third', { exact: true })).toBeVisible()
     await expect(page.getByText('First', { exact: true })).toHaveCount(0)
     await page.getByRole('button', { name: '取消重要：Third' }).click()
