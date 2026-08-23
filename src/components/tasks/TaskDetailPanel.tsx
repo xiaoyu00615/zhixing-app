@@ -9,11 +9,12 @@ import {
   RotateCcw,
   Star,
   Tags,
+  Trash2,
   Zap,
   X,
 } from 'lucide-react'
 import { Dialog as DialogPrimitive } from 'radix-ui'
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 
 import type { TaskStatusAction } from '@/components/tasks/TaskList'
 import { Badge } from '@/components/ui/badge'
@@ -51,6 +52,7 @@ interface TaskDetailPanelProps {
   readonly onClearProject: (task: Task) => void
   readonly onAddTag: (task: Task, tagId: string) => void
   readonly onRemoveTag: (task: Task, tagId: string) => void
+  readonly onTrash: (task: Task) => void
 }
 
 const STATUS_PRESENTATION: Record<
@@ -123,7 +125,10 @@ export function TaskDetailPanel({
   onClearProject,
   onAddTag,
   onRemoveTag,
+  onTrash,
 }: TaskDetailPanelProps) {
+  const [confirmingTrash, setConfirmingTrash] = useState(false)
+
   if (task === null) {
     return null
   }
@@ -248,6 +253,47 @@ export function TaskDetailPanel({
                     <RotateCcw data-icon="inline-start" />
                     恢复
                   </Button>
+                )}
+              </div>
+              <div className="mt-4 border-t border-border/70 pt-4">
+                {!confirmingTrash ? (
+                  <Button
+                    className="text-danger hover:bg-danger-soft hover:text-danger"
+                    disabled={pending}
+                    onClick={() => setConfirmingTrash(true)}
+                    size="sm"
+                    type="button"
+                    variant="ghost"
+                  >
+                    <Trash2 data-icon="inline-start" />
+                    移入回收站
+                  </Button>
+                ) : (
+                  <div className="rounded-sm border border-danger/20 bg-danger-soft/40 p-3">
+                    <p className="text-sm text-foreground">
+                      任务将移入回收站，之后可以随时恢复。
+                    </p>
+                    <div className="mt-3 flex items-center justify-end gap-2">
+                      <Button
+                        disabled={pending}
+                        onClick={() => setConfirmingTrash(false)}
+                        size="sm"
+                        type="button"
+                        variant="ghost"
+                      >
+                        取消
+                      </Button>
+                      <Button
+                        className="bg-danger text-white hover:bg-danger/90"
+                        disabled={pending}
+                        onClick={() => onTrash(task)}
+                        size="sm"
+                        type="button"
+                      >
+                        确认移入回收站
+                      </Button>
+                    </div>
+                  </div>
                 )}
               </div>
             </section>

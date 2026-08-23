@@ -990,6 +990,7 @@ export function TasksPage({
       )}
 
       <TaskDetailPanel
+        key={detailTask?.id ?? 'closed'}
         projects={projects}
         tags={tags}
         onClearDeadline={(task) =>
@@ -1036,6 +1037,11 @@ export function TasksPage({
         onRemoveTag={(task, tagId) =>
           void runPlanningAction(task, (currentService) =>
             currentService.removeTaskTag(task.id, tagId),
+          )
+        }
+        onTrash={(task) =>
+          void runPlanningAction(task, (currentService) =>
+            currentService.trashTask(task.id),
           )
         }
         onStatusAction={(task, action) => void runStatusAction(task, action)}

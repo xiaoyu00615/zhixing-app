@@ -3,10 +3,12 @@ import type {
   ClearTaskDeadlineInput,
   CreateTaskInput,
   RenameTaskInput,
+  RestoreTaskInput,
   SetTaskDeadlineInput,
   SetTaskImportanceInput,
   SetTaskUrgencyInput,
   TaskRepositoryErrorCode,
+  TrashTaskInput,
 } from '@/task/repository'
 import type {
   CreateProjectInput,
@@ -94,6 +96,22 @@ export class TaskWorkerClient {
 
   listTasks(): Promise<unknown> {
     return this.send((requestId) => ({ requestId, type: 'task.list' }))
+  }
+
+  listTrashedTasks(): Promise<unknown> {
+    return this.send((requestId) => ({ requestId, type: 'task.listTrashed' }))
+  }
+
+  trashTask(input: TrashTaskInput): Promise<unknown> {
+    return this.send((requestId) => ({ requestId, type: 'task.trash', input }))
+  }
+
+  restoreTask(input: RestoreTaskInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'task.restore',
+      input,
+    }))
   }
 
   renameTask(input: RenameTaskInput): Promise<unknown> {

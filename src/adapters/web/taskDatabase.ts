@@ -18,7 +18,9 @@ import type {
   SetTaskDeadlineInput,
   SetTaskImportanceInput,
   SetTaskUrgencyInput,
+  RestoreTaskInput,
   TaskRepositoryErrorCode,
+  TrashTaskInput,
 } from '@/task/repository'
 import { isNonEmptyProjectName, type Project } from '@/project/model'
 import type {
@@ -43,7 +45,8 @@ export class TaskDatabaseError extends Error {
 }
 
 const TASK_COLUMNS = `id, title, status, created_at_ms, updated_at_ms,
-                      is_important, is_urgent, due_date, project_id`
+                      is_important, is_urgent, due_date, project_id,
+                      deleted_at_ms`
 const PROJECT_COLUMNS = 'id, name, created_at_ms, updated_at_ms'
 const TAG_COLUMNS = 'id, name, created_at_ms, updated_at_ms'
 
@@ -62,6 +65,7 @@ function parseTaskRow(row: Record<string, unknown> | undefined): Task | null {
     is_urgent: isUrgent,
     due_date: dueDate,
     project_id: projectId,
+    deleted_at_ms: deletedAtMs,
   } = row
   if (
     !isCanonicalLowercaseUuid(id) ||
@@ -73,7 +77,8 @@ function parseTaskRow(row: Record<string, unknown> | undefined): Task | null {
     (isImportant !== 0 && isImportant !== 1) ||
     (isUrgent !== 0 && isUrgent !== 1) ||
     (dueDate !== null && !isValidLocalDate(dueDate)) ||
-    (projectId !== null && !isCanonicalLowercaseUuid(projectId))
+    (projectId !== null && !isCanonicalLowercaseUuid(projectId)) ||
+    (deletedAtMs !== null && !isNonNegativeSafeIntegerMilliseconds(deletedAtMs))
   ) {
     throw new TaskDatabaseError('PERSISTENCE_FAILED')
   }
@@ -88,6 +93,7 @@ function parseTaskRow(row: Record<string, unknown> | undefined): Task | null {
     dueDate,
     projectId,
     tagIds: [],
+    deletedAtMs,
   }
 }
 
@@ -212,7 +218,9 @@ export class WebTaskDatabase {
       return this.#database
         .selectObjects(
           `SELECT ${TASK_COLUMNS}
-           FROM tasks ORDER BY updated_at_ms DESC, id ASC`,
+           FROM tasks
+           WHERE deleted_at_ms IS NULL
+           ORDER BY updated_at_ms DESC, id ASC`,
         )
         .map((row) => {
           const task = parseTaskRow(row)
@@ -229,13 +237,45 @@ export class WebTaskDatabase {
     }
   }
 
+  listTrashedTasks(): readonly Task[] {
+    try {
+      return this.#database
+        .selectObjects(
+          `SELECT ${TASK_COLUMNS}
+           FROM tasks
+           WHERE deleted_at_ms IS NOT NULL
+           ORDER BY deleted_at_ms DESC, id ASC`,
+        )
+        .map((row) => {
+          const task = parseTaskRow(row)
+          if (task === null) {
+            throw new TaskDatabaseError('PERSISTENCE_FAILED')
+          }
+          return this.withTaskTags(task)
+        })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  trashTask(input: TrashTaskInput): Task {
+    validatePlanningBaseInput(input)
+    return this.updateDeletedState(input, true)
+  }
+
+  restoreTask(input: RestoreTaskInput): Task {
+    validatePlanningBaseInput(input)
+    return this.updateDeletedState(input, false)
+  }
+
   renameTask(input: RenameTaskInput): Task {
     validateRenameInput(input)
     try {
       return this.#database.transaction(() => {
         this.#database.exec({
           sql: `UPDATE tasks SET title = ?, updated_at_ms = ?
-                WHERE id = ?`,
+                WHERE id = ? AND deleted_at_ms IS NULL`,
           bind: [input.title, input.updatedAtMs, input.id],
         })
         if (this.#database.changes() !== 1) {
@@ -266,7 +306,7 @@ export class WebTaskDatabase {
 
         this.#database.exec({
           sql: `UPDATE tasks SET status = ?, updated_at_ms = ?
-                WHERE id = ? AND status = ?`,
+                WHERE id = ? AND status = ? AND deleted_at_ms IS NULL`,
           bind: [nextStatus, input.updatedAtMs, input.id, current.status],
         })
         if (this.#database.changes() !== 1) {
@@ -370,7 +410,8 @@ export class WebTaskDatabase {
           bind: [input.id, input.tagId],
         })
         this.#database.exec({
-          sql: 'UPDATE tasks SET updated_at_ms = ? WHERE id = ?',
+          sql: `UPDATE tasks SET updated_at_ms = ?
+                WHERE id = ? AND deleted_at_ms IS NULL`,
           bind: [input.updatedAtMs, input.id],
         })
         return this.requireTask(input.id)
@@ -388,6 +429,7 @@ export class WebTaskDatabase {
     }
     try {
       return this.#database.transaction(() => {
+        this.requireTask(input.id)
         this.#database.exec({
           sql: 'DELETE FROM task_tags WHERE task_id = ? AND tag_id = ?',
           bind: [input.id, input.tagId],
@@ -396,7 +438,8 @@ export class WebTaskDatabase {
           throw new TaskDatabaseError('NOT_FOUND')
         }
         this.#database.exec({
-          sql: 'UPDATE tasks SET updated_at_ms = ? WHERE id = ?',
+          sql: `UPDATE tasks SET updated_at_ms = ?
+                WHERE id = ? AND deleted_at_ms IS NULL`,
           bind: [input.updatedAtMs, input.id],
         })
         if (this.#database.changes() !== 1) {
@@ -506,7 +549,8 @@ export class WebTaskDatabase {
     try {
       return this.#database.transaction(() => {
         this.#database.exec({
-          sql: `UPDATE tasks SET ${column} = ?, updated_at_ms = ? WHERE id = ?`,
+          sql: `UPDATE tasks SET ${column} = ?, updated_at_ms = ?
+                WHERE id = ? AND deleted_at_ms IS NULL`,
           bind: [value, updatedAtMs, id],
         })
         if (this.#database.changes() !== 1) {
@@ -522,11 +566,40 @@ export class WebTaskDatabase {
     }
   }
 
+  private updateDeletedState(
+    input: TrashTaskInput | RestoreTaskInput,
+    trash: boolean,
+  ): Task {
+    try {
+      return this.#database.transaction(() => {
+        this.#database.exec({
+          sql: trash
+            ? `UPDATE tasks
+               SET deleted_at_ms = ?, updated_at_ms = ?
+               WHERE id = ? AND deleted_at_ms IS NULL`
+            : `UPDATE tasks
+               SET deleted_at_ms = NULL, updated_at_ms = ?
+               WHERE id = ? AND deleted_at_ms IS NOT NULL`,
+          bind: trash
+            ? [input.updatedAtMs, input.updatedAtMs, input.id]
+            : [input.updatedAtMs, input.id],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+        return this.requireTaskByDeletedState(input.id, trash)
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
   private requireTask(id: string): Task {
     const task = parseTaskRow(
       this.#database.selectObject(
         `SELECT ${TASK_COLUMNS}
-         FROM tasks WHERE id = ?`,
+         FROM tasks WHERE id = ? AND deleted_at_ms IS NULL`,
         [id],
       ),
     )
@@ -536,13 +609,29 @@ export class WebTaskDatabase {
     return this.withTaskTags(task)
   }
 
+  private requireTaskByDeletedState(id: string, trashed: boolean): Task {
+    const task = parseTaskRow(
+      this.#database.selectObject(
+        `SELECT ${TASK_COLUMNS}
+         FROM tasks
+         WHERE id = ? AND deleted_at_ms IS ${trashed ? 'NOT NULL' : 'NULL'}`,
+        [id],
+      ),
+    )
+    if (task === null) throw new TaskDatabaseError('NOT_FOUND')
+    return this.withTaskTags(task)
+  }
+
   private withTaskTags(task: Task): Task {
     const tagIds: string[] = []
     for (const row of this.#database.selectObjects(
       'SELECT tag_id FROM task_tags WHERE task_id = ? ORDER BY tag_id ASC',
       [task.id],
     )) {
-      if (!isCanonicalLowercaseUuid(row.tag_id) || tagIds.includes(row.tag_id)) {
+      if (
+        !isCanonicalLowercaseUuid(row.tag_id) ||
+        tagIds.includes(row.tag_id)
+      ) {
         throw new TaskDatabaseError('PERSISTENCE_FAILED')
       }
       tagIds.push(row.tag_id)

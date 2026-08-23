@@ -133,6 +133,15 @@ async function handleRequest(value: unknown): Promise<void> {
       case 'task.list':
         success(request.requestId, state.database.listTasks())
         return
+      case 'task.listTrashed':
+        success(request.requestId, state.database.listTrashedTasks())
+        return
+      case 'task.trash':
+        success(request.requestId, state.database.trashTask(request.input))
+        return
+      case 'task.restore':
+        success(request.requestId, state.database.restoreTask(request.input))
+        return
       case 'task.rename':
         success(request.requestId, state.database.renameTask(request.input))
         return

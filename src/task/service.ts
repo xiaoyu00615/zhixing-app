@@ -237,6 +237,22 @@ export function createTaskService({
       return callRepository(() => repository.listTasks())
     },
 
+    listTrashedTasks(): Promise<readonly Task[]> {
+      return callRepository(() => repository.listTrashedTasks())
+    },
+
+    async trashTask(id: string): Promise<Task> {
+      validateTaskId(id)
+      const updatedAtMs = readNowMs(nowMs)
+      return callRepository(() => repository.trashTask({ id, updatedAtMs }))
+    },
+
+    async restoreTask(id: string): Promise<Task> {
+      validateTaskId(id)
+      const updatedAtMs = readNowMs(nowMs)
+      return callRepository(() => repository.restoreTask({ id, updatedAtMs }))
+    },
+
     async renameTask(input: {
       readonly id: string
       readonly title: string

@@ -29,6 +29,7 @@ export interface Task {
   readonly dueDate: LocalDate | null
   readonly projectId: string | null
   readonly tagIds: readonly string[]
+  readonly deletedAtMs: number | null
 }
 
 export const TASK_QUADRANTS = [
@@ -174,6 +175,7 @@ export function localDateFromDate(date: Date): LocalDate {
 
 export function isTaskOverdue(task: Task, today: LocalDate): boolean {
   return (
+    task.deletedAtMs === null &&
     isValidLocalDate(today) &&
     task.dueDate !== null &&
     isValidLocalDate(task.dueDate) &&
@@ -183,14 +185,19 @@ export function isTaskOverdue(task: Task, today: LocalDate): boolean {
 }
 
 export function isTaskEffectivelyUrgent(task: Task, today: LocalDate): boolean {
-  return task.isUrgent || isTaskOverdue(task, today)
+  return (
+    task.deletedAtMs === null && (task.isUrgent || isTaskOverdue(task, today))
+  )
 }
 
 export function getTaskQuadrant(
   task: Task,
   today: LocalDate,
 ): TaskQuadrant | null {
-  if (task.status !== 'todo' && task.status !== 'doing') {
+  if (
+    task.deletedAtMs !== null ||
+    (task.status !== 'todo' && task.status !== 'doing')
+  ) {
     return null
   }
 
@@ -228,6 +235,7 @@ export function getTaskDateGroup(
 ): TaskDateGroup | null {
   if (
     !isValidLocalDate(today) ||
+    task.deletedAtMs !== null ||
     task.dueDate === null ||
     !isValidLocalDate(task.dueDate) ||
     (task.status !== 'todo' && task.status !== 'doing')
@@ -268,6 +276,7 @@ export function matchesTaskFilter(
   filter: TaskFilter,
   today: LocalDate,
 ): boolean {
+  if (task.deletedAtMs !== null) return false
   if (filter.status !== 'all' && task.status !== filter.status) return false
   if (
     filter.importance !== 'all' &&
@@ -408,6 +417,7 @@ export function buildTaskCalendarMonth(
   for (const task of tasks) {
     if (
       task.dueDate === null ||
+      task.deletedAtMs !== null ||
       !isValidLocalDate(task.dueDate) ||
       (task.status !== 'todo' && task.status !== 'doing')
     ) {

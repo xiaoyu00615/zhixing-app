@@ -69,9 +69,22 @@ export interface RemoveTaskTagInput {
   readonly updatedAtMs: number
 }
 
+export interface TrashTaskInput {
+  readonly id: string
+  readonly updatedAtMs: number
+}
+
+export interface RestoreTaskInput {
+  readonly id: string
+  readonly updatedAtMs: number
+}
+
 export interface TaskRepository {
   createTask(input: CreateTaskInput): Promise<Task>
   listTasks(): Promise<readonly Task[]>
+  listTrashedTasks(): Promise<readonly Task[]>
+  trashTask(input: TrashTaskInput): Promise<Task>
+  restoreTask(input: RestoreTaskInput): Promise<Task>
   renameTask(input: RenameTaskInput): Promise<Task>
   changeTaskStatus(input: ChangeTaskStatusInput): Promise<Task>
   setTaskImportance(input: SetTaskImportanceInput): Promise<Task>
@@ -97,6 +110,9 @@ export type TaskRepositoryErrorCode =
 export type TaskRepositoryOperation =
   | 'createTask'
   | 'listTasks'
+  | 'listTrashedTasks'
+  | 'trashTask'
+  | 'restoreTask'
   | 'renameTask'
   | 'changeTaskStatus'
   | 'setTaskImportance'

@@ -24,6 +24,11 @@ interface PersistenceHarness {
   capability(): Promise<WebPersistenceCapability>
   createTask(input: CreateTaskInput): Promise<Task>
   listTasks(): Promise<readonly Task[]>
+  listTrashedTasks(): Promise<readonly Task[]>
+  trashTask(input: import('@/task/repository').TrashTaskInput): Promise<Task>
+  restoreTask(
+    input: import('@/task/repository').RestoreTaskInput,
+  ): Promise<Task>
   renameTask(input: RenameTaskInput): Promise<Task>
   changeTaskStatus(input: ChangeTaskStatusInput): Promise<Task>
   setTaskProject(
@@ -84,6 +89,15 @@ window.__taskPersistenceHarness = {
   },
   async listTasks() {
     return (await requireRepository()).listTasks()
+  },
+  async listTrashedTasks() {
+    return (await requireRepository()).listTrashedTasks()
+  },
+  async trashTask(input) {
+    return (await requireRepository()).trashTask(input)
+  },
+  async restoreTask(input) {
+    return (await requireRepository()).restoreTask(input)
   },
   async renameTask(input) {
     return (await requireRepository()).renameTask(input)

@@ -20,6 +20,7 @@ interface BrowserTask {
   readonly dueDate: string | null
   readonly projectId: string | null
   readonly tagIds: readonly string[]
+  readonly deletedAtMs: number | null
 }
 
 interface BrowserProject {
@@ -55,6 +56,9 @@ interface BrowserHarness {
     tagIds?: readonly string[]
   }): Promise<BrowserTask>
   listTasks(): Promise<readonly BrowserTask[]>
+  listTrashedTasks(): Promise<readonly BrowserTask[]>
+  trashTask(input: { id: string; updatedAtMs: number }): Promise<BrowserTask>
+  restoreTask(input: { id: string; updatedAtMs: number }): Promise<BrowserTask>
   renameTask(input: {
     id: string
     title: string
@@ -132,6 +136,7 @@ async function openHarnessPage(
 test('persists Task operations in OPFS across a browser restart', async ({
   browserName,
 }, testInfo) => {
+  test.setTimeout(90_000)
   expect(browserName).toBe('chromium')
   const configuredBaseURL = testInfo.project.use.baseURL
   if (typeof configuredBaseURL !== 'string') {
@@ -379,6 +384,7 @@ test('persists Task operations in OPFS across a browser restart', async ({
         dueDate: null,
         projectId: null,
         tagIds: [TAG_IDS.deep],
+        deletedAtMs: null,
       },
       {
         id: TASK_IDS.b,
@@ -391,6 +397,7 @@ test('persists Task operations in OPFS across a browser restart', async ({
         dueDate: null,
         projectId: null,
         tagIds: [],
+        deletedAtMs: null,
       },
       {
         id: TASK_IDS.c,
@@ -403,6 +410,7 @@ test('persists Task operations in OPFS across a browser restart', async ({
         dueDate: '2026-08-23',
         projectId: PROJECT_ID,
         tagIds: [TAG_IDS.focus],
+        deletedAtMs: null,
       },
     ]
     await expect(
@@ -526,6 +534,96 @@ test('persists Task operations in OPFS across a browser restart', async ({
       isUrgent: false,
       dueDate: '2026-09-30',
     })
+
+    const trashed = await page.evaluate(
+      ({ id }) =>
+        (window as unknown as HarnessWindow).__taskPersistenceHarness.trashTask(
+          { id, updatedAtMs: 2_000_000_000_000 },
+        ),
+      { id: TASK_IDS.c },
+    )
+    expect(trashed).toMatchObject({
+      id: TASK_IDS.c,
+      status: 'todo',
+      isImportant: false,
+      isUrgent: false,
+      dueDate: '2026-09-30',
+      projectId: PROJECT_ID,
+      tagIds: [TAG_IDS.focus],
+      updatedAtMs: 2_000_000_000_000,
+      deletedAtMs: 2_000_000_000_000,
+    })
+    expect(
+      (
+        await page.evaluate(() =>
+          (
+            window as unknown as HarnessWindow
+          ).__taskPersistenceHarness.listTasks(),
+        )
+      ).map((task) => task.id),
+    ).toEqual([TASK_IDS.a, TASK_IDS.b])
+    await expect(
+      page.evaluate(() =>
+        (
+          window as unknown as HarnessWindow
+        ).__taskPersistenceHarness.listTrashedTasks(),
+      ),
+    ).resolves.toEqual([trashed])
+
+    await context.close()
+    context = null
+    context = await chromium.launchPersistentContext(profilePath, {
+      channel: 'chromium',
+      headless: true,
+    })
+    page = await openHarnessPage(context, configuredBaseURL)
+    await expect(
+      page.evaluate(() =>
+        (
+          window as unknown as HarnessWindow
+        ).__taskPersistenceHarness.listTrashedTasks(),
+      ),
+    ).resolves.toEqual([trashed])
+
+    const restored = await page.evaluate(
+      ({ id }) =>
+        (
+          window as unknown as HarnessWindow
+        ).__taskPersistenceHarness.restoreTask({
+          id,
+          updatedAtMs: 2_000_000_000_001,
+        }),
+      { id: TASK_IDS.c },
+    )
+    expect(restored).toEqual({
+      ...trashed,
+      updatedAtMs: 2_000_000_000_001,
+      deletedAtMs: null,
+    })
+    await expect(
+      page.evaluate(() =>
+        (
+          window as unknown as HarnessWindow
+        ).__taskPersistenceHarness.listTrashedTasks(),
+      ),
+    ).resolves.toEqual([])
+
+    await context.close()
+    context = null
+    context = await chromium.launchPersistentContext(profilePath, {
+      channel: 'chromium',
+      headless: true,
+    })
+    page = await openHarnessPage(context, configuredBaseURL)
+    expect(
+      (
+        await page.evaluate(() =>
+          (
+            window as unknown as HarnessWindow
+          ).__taskPersistenceHarness.listTasks(),
+        )
+      ).find((task) => task.id === TASK_IDS.c),
+    ).toEqual(restored)
 
     await page.evaluate(() =>
       (window as unknown as HarnessWindow).__taskPersistenceHarness.shutdown(),

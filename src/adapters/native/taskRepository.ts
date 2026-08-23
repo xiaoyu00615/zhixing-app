@@ -16,11 +16,13 @@ import {
   type ClearTaskDeadlineInput,
   type CreateTaskInput,
   type RenameTaskInput,
+  type RestoreTaskInput,
   type SetTaskDeadlineInput,
   type SetTaskImportanceInput,
   type SetTaskUrgencyInput,
   type TaskRepository,
   type TaskRepositoryOperation,
+  type TrashTaskInput,
 } from '@/task/repository'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -46,6 +48,7 @@ function parseTaskDto(
     dueDate,
     projectId,
     tagIds,
+    deletedAtMs,
   } = value
   if (
     !isCanonicalLowercaseUuid(id) ||
@@ -60,7 +63,8 @@ function parseTaskDto(
     (projectId !== null && !isCanonicalLowercaseUuid(projectId)) ||
     !Array.isArray(tagIds) ||
     tagIds.some((tagId) => !isCanonicalLowercaseUuid(tagId)) ||
-    new Set(tagIds).size !== tagIds.length
+    new Set(tagIds).size !== tagIds.length ||
+    (deletedAtMs !== null && !isNonNegativeSafeIntegerMilliseconds(deletedAtMs))
   ) {
     throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
   }
@@ -76,6 +80,7 @@ function parseTaskDto(
     dueDate,
     projectId,
     tagIds,
+    deletedAtMs,
   }
 }
 
@@ -173,6 +178,23 @@ export class NativeTaskRepository implements TaskRepository {
       throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
     }
     return value.map((task) => parseTaskDto(task, operation))
+  }
+
+  async listTrashedTasks(): Promise<readonly Task[]> {
+    const operation = 'listTrashedTasks'
+    const value = await invokeTask<unknown>('task_list_trashed', operation)
+    if (!Array.isArray(value)) {
+      throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
+    }
+    return value.map((task) => parseTaskDto(task, operation))
+  }
+
+  trashTask(input: TrashTaskInput): Promise<Task> {
+    return this.invokeLifecycle('trashTask', 'task_trash', input)
+  }
+
+  restoreTask(input: RestoreTaskInput): Promise<Task> {
+    return this.invokeLifecycle('restoreTask', 'task_restore', input)
   }
 
   async renameTask(input: RenameTaskInput): Promise<Task> {
@@ -300,6 +322,17 @@ export class NativeTaskRepository implements TaskRepository {
     if (!valueIsValid) {
       throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
     }
+    const dto = await invokeTask<unknown>(command, operation, { input })
+    return parseTaskDto(dto, operation)
+  }
+
+  private async invokeLifecycle(
+    operation: 'trashTask' | 'restoreTask',
+    command: 'task_trash' | 'task_restore',
+    input: { readonly id: string; readonly updatedAtMs: number },
+  ): Promise<Task> {
+    validateId(input.id, operation)
+    validateTime(input.updatedAtMs, operation)
     const dto = await invokeTask<unknown>(command, operation, { input })
     return parseTaskDto(dto, operation)
   }

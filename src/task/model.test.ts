@@ -53,9 +53,33 @@ const TASK: Task = {
   dueDate: null,
   projectId: null,
   tagIds: [],
+  deletedAtMs: null,
 }
 
 describe('Task model persistence contract', () => {
+  test('excludes trashed tasks from active urgency, date, quadrant, calendar, and filters', () => {
+    const trashed: Task = {
+      ...TASK,
+      isImportant: true,
+      isUrgent: true,
+      dueDate: '2026-08-22',
+      deletedAtMs: 200,
+    }
+
+    expect(isTaskOverdue(trashed, '2026-08-23')).toBe(false)
+    expect(isTaskEffectivelyUrgent(trashed, '2026-08-23')).toBe(false)
+    expect(getTaskQuadrant(trashed, '2026-08-23')).toBeNull()
+    expect(getTaskDateGroup(trashed, '2026-08-23')).toBeNull()
+    expect(
+      buildTaskCalendarMonth([trashed], { year: 2026, month: 8 }).every(
+        (day) => day.tasks.length === 0,
+      ),
+    ).toBe(true)
+    expect(filterTasks([trashed], DEFAULT_TASK_FILTER, '2026-08-23')).toEqual(
+      [],
+    )
+  })
+
   test.each(LEGAL_TRANSITIONS)(
     '%s + %s transitions to %s',
     (current, operation, expected) => {

@@ -9,9 +9,9 @@ use crate::project::{
 use crate::tag::{CreateTagInput, RenameTagInput, TagDbService, TagError, TagRecord};
 use crate::task::{
     AddTaskTagInput, ChangeTaskStatusInput, ClearTaskDeadlineInput, ClearTaskProjectInput,
-    CreateTaskInput, RemoveTaskTagInput, RenameTaskInput, SetTaskDeadlineInput,
+    CreateTaskInput, RemoveTaskTagInput, RenameTaskInput, RestoreTaskInput, SetTaskDeadlineInput,
     SetTaskImportanceInput, SetTaskProjectInput, SetTaskUrgencyInput, TaskDbService, TaskError,
-    TaskRecord, TaskStatusOperation,
+    TaskRecord, TaskStatusOperation, TrashTaskInput,
 };
 use crate::RuntimeStatus;
 
@@ -111,6 +111,13 @@ pub(crate) struct TaskTagDto {
     updated_at_ms: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TaskLifecycleDto {
+    id: String,
+    updated_at_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TaskDto {
@@ -124,6 +131,7 @@ pub(crate) struct TaskDto {
     due_date: Option<String>,
     project_id: Option<String>,
     tag_ids: Vec<String>,
+    deleted_at_ms: Option<i64>,
 }
 
 impl From<TaskRecord> for TaskDto {
@@ -139,6 +147,7 @@ impl From<TaskRecord> for TaskDto {
             due_date: task.due_date,
             project_id: task.project_id,
             tag_ids: task.tag_ids,
+            deleted_at_ms: task.deleted_at_ms,
         }
     }
 }
@@ -205,6 +214,53 @@ pub(crate) fn task_list(
     TaskDbService::list(&connection)
         .map(|tasks| tasks.into_iter().map(TaskDto::from).collect())
         .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn task_list_trashed(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+) -> Result<Vec<TaskDto>, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    TaskDbService::list_trashed(&connection)
+        .map(|tasks| tasks.into_iter().map(TaskDto::from).collect())
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn task_trash(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: TaskLifecycleDto,
+) -> Result<TaskDto, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    TaskDbService::trash(
+        &connection,
+        TrashTaskInput {
+            id: input.id,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(TaskDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn task_restore(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: TaskLifecycleDto,
+) -> Result<TaskDto, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    TaskDbService::restore(
+        &connection,
+        RestoreTaskInput {
+            id: input.id,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(TaskDto::from)
+    .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -622,6 +678,7 @@ mod tests {
             due_date: Some("2026-08-23".into()),
             project_id: None,
             tag_ids: vec![],
+            deleted_at_ms: None,
         });
         assert_eq!(
             serde_json::to_value(output).unwrap(),
@@ -635,7 +692,20 @@ mod tests {
                 "isUrgent": false,
                 "dueDate": "2026-08-23",
                 "projectId": null,
-                "tagIds": []
+                "tagIds": [],
+                "deletedAtMs": null
+            })
+        );
+
+        let lifecycle = TaskLifecycleDto {
+            id: "00000000-0000-4000-8000-000000000001".into(),
+            updated_at_ms: 20,
+        };
+        assert_eq!(
+            serde_json::to_value(lifecycle).unwrap(),
+            serde_json::json!({
+                "id": "00000000-0000-4000-8000-000000000001",
+                "updatedAtMs": 20
             })
         );
     }

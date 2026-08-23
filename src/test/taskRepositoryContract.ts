@@ -16,12 +16,14 @@ import {
   type CreateTaskInput,
   type RenameTaskInput,
   type RemoveTaskTagInput,
+  type RestoreTaskInput,
   type SetTaskDeadlineInput,
   type SetTaskImportanceInput,
   type SetTaskUrgencyInput,
   type TaskRepository,
   type TaskRepositoryErrorCode,
   type TaskRepositoryOperation,
+  type TrashTaskInput,
 } from '@/task/repository'
 
 export const TASK_CONTRACT_IDS = {
@@ -105,6 +107,7 @@ export class TaskRepositoryContractBackend {
       dueDate: input.dueDate ?? null,
       projectId: input.projectId ?? null,
       tagIds: input.tagIds ?? [],
+      deletedAtMs: null,
     }
     this.#tasks.set(task.id, task)
     return { ...task }
@@ -113,6 +116,7 @@ export class TaskRepositoryContractBackend {
   listTasks(): readonly Task[] {
     this.consumeFailure()
     return [...this.#tasks.values()]
+      .filter((task) => task.deletedAtMs === null)
       .sort(
         (left, right) =>
           right.updatedAtMs - left.updatedAtMs ||
@@ -121,10 +125,49 @@ export class TaskRepositoryContractBackend {
       .map((task) => ({ ...task }))
   }
 
+  listTrashedTasks(): readonly Task[] {
+    this.consumeFailure()
+    return [...this.#tasks.values()]
+      .filter((task) => task.deletedAtMs !== null)
+      .sort(
+        (left, right) =>
+          right.deletedAtMs! - left.deletedAtMs! ||
+          left.id.localeCompare(right.id),
+      )
+      .map((task) => ({ ...task }))
+  }
+
+  trashTask(input: TrashTaskInput): Task {
+    this.consumeFailure()
+    const current = this.requireActive(input.id)
+    const changed = {
+      ...current,
+      deletedAtMs: input.updatedAtMs,
+      updatedAtMs: input.updatedAtMs,
+    }
+    this.#tasks.set(input.id, changed)
+    return { ...changed }
+  }
+
+  restoreTask(input: RestoreTaskInput): Task {
+    this.consumeFailure()
+    const current = this.#tasks.get(input.id)
+    if (current?.deletedAtMs === null || current === undefined) {
+      throw new TaskContractBackendError('NOT_FOUND', 'task not trashed')
+    }
+    const changed = {
+      ...current,
+      deletedAtMs: null,
+      updatedAtMs: input.updatedAtMs,
+    }
+    this.#tasks.set(input.id, changed)
+    return { ...changed }
+  }
+
   renameTask(input: RenameTaskInput): Task {
     this.consumeFailure()
     const current = this.#tasks.get(input.id)
-    if (current === undefined) {
+    if (current === undefined || current.deletedAtMs !== null) {
       throw new TaskContractBackendError(
         'NOT_FOUND',
         'C:\\private\\zhixing.db SQL=UPDATE tasks',
@@ -142,7 +185,7 @@ export class TaskRepositoryContractBackend {
   changeTaskStatus(input: ChangeTaskStatusInput): Task {
     this.consumeFailure()
     const current = this.#tasks.get(input.id)
-    if (current === undefined) {
+    if (current === undefined || current.deletedAtMs !== null) {
       throw new TaskContractBackendError(
         'NOT_FOUND',
         '/private/opfs/zhixing.db SQL=SELECT status FROM tasks',
@@ -205,7 +248,11 @@ export class TaskRepositoryContractBackend {
   addTaskTag(input: AddTaskTagInput): Task {
     this.consumeFailure()
     const task = this.#tasks.get(input.id)
-    if (task === undefined || !this.#tags.has(input.tagId)) {
+    if (
+      task === undefined ||
+      task.deletedAtMs !== null ||
+      !this.#tags.has(input.tagId)
+    ) {
       throw new TaskContractBackendError('NOT_FOUND', 'missing task or tag')
     }
     if (task.tagIds.includes(input.tagId)) {
@@ -223,7 +270,11 @@ export class TaskRepositoryContractBackend {
   removeTaskTag(input: RemoveTaskTagInput): Task {
     this.consumeFailure()
     const task = this.#tasks.get(input.id)
-    if (task === undefined || !task.tagIds.includes(input.tagId)) {
+    if (
+      task === undefined ||
+      task.deletedAtMs !== null ||
+      !task.tagIds.includes(input.tagId)
+    ) {
       throw new TaskContractBackendError('NOT_FOUND', 'missing task tag')
     }
     const changed = {
@@ -244,7 +295,7 @@ export class TaskRepositoryContractBackend {
   ): Task {
     this.consumeFailure()
     const current = this.#tasks.get(id)
-    if (current === undefined) {
+    if (current === undefined || current.deletedAtMs !== null) {
       throw new TaskContractBackendError(
         'NOT_FOUND',
         '/private/task planning SQL=UPDATE tasks',
@@ -253,6 +304,14 @@ export class TaskRepositoryContractBackend {
     const changed = { ...current, ...change, updatedAtMs }
     this.#tasks.set(id, changed)
     return { ...changed }
+  }
+
+  private requireActive(id: string): Task {
+    const task = this.#tasks.get(id)
+    if (task === undefined || task.deletedAtMs !== null) {
+      throw new TaskContractBackendError('NOT_FOUND', 'task not active')
+    }
+    return task
   }
 
   private consumeFailure(): void {
@@ -337,6 +396,7 @@ export function defineTaskRepositoryContract(
         dueDate: null,
         projectId: null,
         tagIds: [],
+        deletedAtMs: null,
       })
       await expectSafeError(
         repository.createTask({
@@ -531,6 +591,127 @@ export function defineTaskRepositoryContract(
         'NOT_FOUND',
         'clearTaskDeadline',
       )
+    })
+
+    test('trashes and restores without losing status, planning, project, or tags', async () => {
+      const { repository } = createFixture()
+      const tagId = '00000000-0000-4000-8000-000000000101'
+      const created = await repository.createTask({
+        id: TASK_CONTRACT_IDS.a,
+        title: 'Recoverable task',
+        createdAtMs: 100,
+        isImportant: true,
+        isUrgent: true,
+        dueDate: '2026-08-23',
+        projectId: '00000000-0000-4000-8000-000000000102',
+        tagIds: [tagId],
+      })
+      const started = await repository.changeTaskStatus({
+        id: created.id,
+        operation: 'start',
+        updatedAtMs: 150,
+      })
+      const trashed = await repository.trashTask({
+        id: created.id,
+        updatedAtMs: 200,
+      })
+      expect(trashed).toEqual({
+        ...started,
+        updatedAtMs: 200,
+        deletedAtMs: 200,
+      })
+      await expect(repository.listTasks()).resolves.toEqual([])
+      await expect(repository.listTrashedTasks()).resolves.toEqual([trashed])
+
+      await expectSafeError(
+        repository.renameTask({
+          id: created.id,
+          title: 'Hidden mutation',
+          updatedAtMs: 250,
+        }),
+        'NOT_FOUND',
+        'renameTask',
+      )
+      await expectSafeError(
+        repository.changeTaskStatus({
+          id: created.id,
+          operation: 'complete',
+          updatedAtMs: 250,
+        }),
+        'NOT_FOUND',
+        'changeTaskStatus',
+      )
+      await expectSafeError(
+        repository.setTaskImportance({
+          id: created.id,
+          isImportant: false,
+          updatedAtMs: 250,
+        }),
+        'NOT_FOUND',
+        'setTaskImportance',
+      )
+      await expectSafeError(
+        repository.clearTaskProject({ id: created.id, updatedAtMs: 250 }),
+        'NOT_FOUND',
+        'clearTaskProject',
+      )
+      await expectSafeError(
+        repository.removeTaskTag({
+          id: created.id,
+          tagId,
+          updatedAtMs: 250,
+        }),
+        'NOT_FOUND',
+        'removeTaskTag',
+      )
+      await expectSafeError(
+        repository.trashTask({ id: created.id, updatedAtMs: 250 }),
+        'NOT_FOUND',
+        'trashTask',
+      )
+
+      const restored = await repository.restoreTask({
+        id: created.id,
+        updatedAtMs: 300,
+      })
+      expect(restored).toEqual({
+        ...started,
+        updatedAtMs: 300,
+        deletedAtMs: null,
+      })
+      await expect(repository.listTasks()).resolves.toEqual([restored])
+      await expect(repository.listTrashedTasks()).resolves.toEqual([])
+      await expectSafeError(
+        repository.restoreTask({ id: created.id, updatedAtMs: 350 }),
+        'NOT_FOUND',
+        'restoreTask',
+      )
+    })
+
+    test('orders trash by deletedAtMs DESC and id ASC', async () => {
+      const { repository } = createFixture()
+      await createTask(repository, TASK_CONTRACT_IDS.c, 30)
+      await createTask(repository, TASK_CONTRACT_IDS.b, 20)
+      await createTask(repository, TASK_CONTRACT_IDS.a, 10)
+      await repository.trashTask({
+        id: TASK_CONTRACT_IDS.c,
+        updatedAtMs: 200,
+      })
+      await repository.trashTask({
+        id: TASK_CONTRACT_IDS.b,
+        updatedAtMs: 300,
+      })
+      await repository.trashTask({
+        id: TASK_CONTRACT_IDS.a,
+        updatedAtMs: 300,
+      })
+
+      const trashed = await repository.listTrashedTasks()
+      expect(trashed.map((task) => task.id)).toEqual([
+        TASK_CONTRACT_IDS.a,
+        TASK_CONTRACT_IDS.b,
+        TASK_CONTRACT_IDS.c,
+      ])
     })
 
     test('maps missing rename and status operations to NOT_FOUND', async () => {

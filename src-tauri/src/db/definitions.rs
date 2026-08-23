@@ -12,6 +12,8 @@ const ADD_TASK_PLANNING_FIELDS_SQL: &str =
     include_str!("../../migrations/0002_add_task_planning_fields.sql");
 const ADD_TASK_PROJECTS_SQL: &str = include_str!("../../migrations/0003_add_task_projects.sql");
 const ADD_TASK_TAGS_SQL: &str = include_str!("../../migrations/0004_add_task_tags.sql");
+const ADD_TASK_SOFT_DELETE_SQL: &str =
+    include_str!("../../migrations/0005_add_task_soft_delete.sql");
 
 pub const MIGRATIONS: &[MigrationDefinition] = &[
     MigrationDefinition {
@@ -36,6 +38,12 @@ pub const MIGRATIONS: &[MigrationDefinition] = &[
         version: 4,
         id: "0004_add_task_tags",
         sql_up: ADD_TASK_TAGS_SQL,
+        high_risk: false,
+    },
+    MigrationDefinition {
+        version: 5,
+        id: "0005_add_task_soft_delete",
+        sql_up: ADD_TASK_SOFT_DELETE_SQL,
         high_risk: false,
     },
 ];

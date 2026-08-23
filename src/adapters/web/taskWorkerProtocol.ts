@@ -11,10 +11,12 @@ import {
   type ClearTaskDeadlineInput,
   type CreateTaskInput,
   type RenameTaskInput,
+  type RestoreTaskInput,
   type SetTaskDeadlineInput,
   type SetTaskImportanceInput,
   type SetTaskUrgencyInput,
   type TaskRepositoryErrorCode,
+  type TrashTaskInput,
 } from '@/task/repository'
 import type {
   CreateProjectInput,
@@ -43,6 +45,17 @@ export type TaskWorkerRequest =
       readonly input: CreateTaskInput
     }
   | { readonly requestId: number; readonly type: 'task.list' }
+  | { readonly requestId: number; readonly type: 'task.listTrashed' }
+  | {
+      readonly requestId: number
+      readonly type: 'task.trash'
+      readonly input: TrashTaskInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'task.restore'
+      readonly input: RestoreTaskInput
+    }
   | {
       readonly requestId: number
       readonly type: 'task.rename'
@@ -240,6 +253,7 @@ export function parseTaskWorkerRequest(
   switch (value.type) {
     case 'initialize':
     case 'task.list':
+    case 'task.listTrashed':
     case 'project.list':
     case 'tag.list':
     case 'shutdown':
@@ -296,6 +310,8 @@ export function parseTaskWorkerRequest(
           }
         : null
     case 'task.clearDeadline':
+    case 'task.trash':
+    case 'task.restore':
       return isPlanningBaseInput(value.input)
         ? {
             requestId: value.requestId,

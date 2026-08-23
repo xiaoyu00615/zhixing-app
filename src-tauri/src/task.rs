@@ -102,6 +102,7 @@ pub(crate) struct TaskRecord {
     pub(crate) due_date: Option<String>,
     pub(crate) project_id: Option<String>,
     pub(crate) tag_ids: Vec<String>,
+    pub(crate) deleted_at_ms: Option<i64>,
 }
 
 pub(crate) struct CreateTaskInput {
@@ -173,6 +174,16 @@ pub(crate) struct RemoveTaskTagInput {
     pub(crate) updated_at_ms: i64,
 }
 
+pub(crate) struct TrashTaskInput {
+    pub(crate) id: String,
+    pub(crate) updated_at_ms: i64,
+}
+
+pub(crate) struct RestoreTaskInput {
+    pub(crate) id: String,
+    pub(crate) updated_at_ms: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(crate) enum TaskError {
     #[error("task not found")]
@@ -215,12 +226,16 @@ struct RawTaskRecord {
     is_urgent: i64,
     due_date: Option<String>,
     project_id: Option<String>,
+    deleted_at_ms: Option<i64>,
 }
 
 impl RawTaskRecord {
     fn into_task(self, tag_ids: Vec<String>) -> Result<TaskRecord, TaskError> {
         validate_timestamp(self.created_at_ms)?;
         validate_timestamp(self.updated_at_ms)?;
+        if let Some(deleted_at_ms) = self.deleted_at_ms {
+            validate_timestamp(deleted_at_ms)?;
+        }
         if self.updated_at_ms < self.created_at_ms
             || !matches!(self.is_important, 0 | 1)
             || !matches!(self.is_urgent, 0 | 1)
@@ -242,6 +257,7 @@ impl RawTaskRecord {
             due_date: self.due_date,
             project_id: self.project_id,
             tag_ids,
+            deleted_at_ms: self.deleted_at_ms,
         })
     }
 }
@@ -257,6 +273,7 @@ fn raw_task_from_row(row: &Row<'_>) -> rusqlite::Result<RawTaskRecord> {
         is_urgent: row.get(6)?,
         due_date: row.get(7)?,
         project_id: row.get(8)?,
+        deleted_at_ms: row.get(9)?,
     })
 }
 
@@ -431,7 +448,7 @@ impl TaskDbService {
                  id, title, created_at_ms, updated_at_ms, is_important, is_urgent, due_date, project_id \
              ) VALUES(?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7) \
              RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                       is_important, is_urgent, due_date, project_id",
+                       is_important, is_urgent, due_date, project_id, deleted_at_ms",
             params![
                 &input.id,
                 &input.title,
@@ -465,8 +482,9 @@ impl TaskDbService {
         let mut statement = conn
             .prepare(
                 "SELECT id, title, status, created_at_ms, updated_at_ms, \
-                        is_important, is_urgent, due_date, project_id \
-                 FROM tasks ORDER BY updated_at_ms DESC, id ASC",
+                        is_important, is_urgent, due_date, project_id, deleted_at_ms \
+                 FROM tasks WHERE deleted_at_ms IS NULL \
+                 ORDER BY updated_at_ms DESC, id ASC",
             )
             .map_err(|_| TaskError::PersistenceFailed)?;
         let rows = statement
@@ -483,6 +501,68 @@ impl TaskDbService {
         Ok(tasks)
     }
 
+    pub(crate) fn list_trashed(conn: &Connection) -> Result<Vec<TaskRecord>, TaskError> {
+        let mut statement = conn
+            .prepare(
+                "SELECT id, title, status, created_at_ms, updated_at_ms, \
+                        is_important, is_urgent, due_date, project_id, deleted_at_ms \
+                 FROM tasks WHERE deleted_at_ms IS NOT NULL \
+                 ORDER BY deleted_at_ms DESC, id ASC",
+            )
+            .map_err(|_| TaskError::PersistenceFailed)?;
+        let rows = statement
+            .query_map([], raw_task_from_row)
+            .map_err(|_| TaskError::PersistenceFailed)?;
+
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(task_from_raw(
+                conn,
+                row.map_err(|_| TaskError::PersistenceFailed)?,
+            )?);
+        }
+        Ok(tasks)
+    }
+
+    pub(crate) fn trash(conn: &Connection, input: TrashTaskInput) -> Result<TaskRecord, TaskError> {
+        validate_id(&input.id)?;
+        validate_timestamp(input.updated_at_ms)?;
+        let raw = conn
+            .query_row(
+                "UPDATE tasks \
+                 SET deleted_at_ms = ?1, updated_at_ms = ?1 \
+                 WHERE id = ?2 AND deleted_at_ms IS NULL \
+                 RETURNING id, title, status, created_at_ms, updated_at_ms, \
+                           is_important, is_urgent, due_date, project_id, deleted_at_ms",
+                params![input.updated_at_ms, input.id],
+                raw_task_from_row,
+            )
+            .optional()
+            .map_err(|_| TaskError::PersistenceFailed)?;
+        task_from_raw(conn, raw.ok_or(TaskError::NotFound)?)
+    }
+
+    pub(crate) fn restore(
+        conn: &Connection,
+        input: RestoreTaskInput,
+    ) -> Result<TaskRecord, TaskError> {
+        validate_id(&input.id)?;
+        validate_timestamp(input.updated_at_ms)?;
+        let raw = conn
+            .query_row(
+                "UPDATE tasks \
+                 SET deleted_at_ms = NULL, updated_at_ms = ?1 \
+                 WHERE id = ?2 AND deleted_at_ms IS NOT NULL \
+                 RETURNING id, title, status, created_at_ms, updated_at_ms, \
+                           is_important, is_urgent, due_date, project_id, deleted_at_ms",
+                params![input.updated_at_ms, input.id],
+                raw_task_from_row,
+            )
+            .optional()
+            .map_err(|_| TaskError::PersistenceFailed)?;
+        task_from_raw(conn, raw.ok_or(TaskError::NotFound)?)
+    }
+
     pub(crate) fn rename(
         conn: &Connection,
         input: RenameTaskInput,
@@ -493,9 +573,10 @@ impl TaskDbService {
 
         let task = conn
             .query_row(
-                "UPDATE tasks SET title = ?1, updated_at_ms = ?2 WHERE id = ?3 \
+                "UPDATE tasks SET title = ?1, updated_at_ms = ?2 \
+                 WHERE id = ?3 AND deleted_at_ms IS NULL \
                  RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                           is_important, is_urgent, due_date, project_id",
+                           is_important, is_urgent, due_date, project_id, deleted_at_ms",
                 params![input.title, input.updated_at_ms, input.id],
                 raw_task_from_row,
             )
@@ -517,7 +598,7 @@ impl TaskDbService {
             .map_err(|_| TaskError::PersistenceFailed)?;
         let current_raw = transaction
             .query_row(
-                "SELECT status FROM tasks WHERE id = ?1",
+                "SELECT status FROM tasks WHERE id = ?1 AND deleted_at_ms IS NULL",
                 [&input.id],
                 |row| row.get::<_, String>(0),
             )
@@ -549,9 +630,10 @@ impl TaskDbService {
         validate_timestamp(input.updated_at_ms)?;
         update_planning_value(
             conn,
-            "UPDATE tasks SET is_important = ?1, updated_at_ms = ?2 WHERE id = ?3 \
+            "UPDATE tasks SET is_important = ?1, updated_at_ms = ?2 \
+             WHERE id = ?3 AND deleted_at_ms IS NULL \
              RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                       is_important, is_urgent, due_date, project_id",
+                       is_important, is_urgent, due_date, project_id, deleted_at_ms",
             input.is_important,
             input.updated_at_ms,
             &input.id,
@@ -566,9 +648,10 @@ impl TaskDbService {
         validate_timestamp(input.updated_at_ms)?;
         update_planning_value(
             conn,
-            "UPDATE tasks SET is_urgent = ?1, updated_at_ms = ?2 WHERE id = ?3 \
+            "UPDATE tasks SET is_urgent = ?1, updated_at_ms = ?2 \
+             WHERE id = ?3 AND deleted_at_ms IS NULL \
              RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                       is_important, is_urgent, due_date, project_id",
+                       is_important, is_urgent, due_date, project_id, deleted_at_ms",
             input.is_urgent,
             input.updated_at_ms,
             &input.id,
@@ -584,9 +667,10 @@ impl TaskDbService {
         validate_due_date(&input.due_date)?;
         update_planning_value(
             conn,
-            "UPDATE tasks SET due_date = ?1, updated_at_ms = ?2 WHERE id = ?3 \
+            "UPDATE tasks SET due_date = ?1, updated_at_ms = ?2 \
+             WHERE id = ?3 AND deleted_at_ms IS NULL \
              RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                       is_important, is_urgent, due_date, project_id",
+                       is_important, is_urgent, due_date, project_id, deleted_at_ms",
             input.due_date,
             input.updated_at_ms,
             &input.id,
@@ -601,9 +685,10 @@ impl TaskDbService {
         validate_timestamp(input.updated_at_ms)?;
         let task = conn
             .query_row(
-                "UPDATE tasks SET due_date = NULL, updated_at_ms = ?1 WHERE id = ?2 \
+                "UPDATE tasks SET due_date = NULL, updated_at_ms = ?1 \
+                 WHERE id = ?2 AND deleted_at_ms IS NULL \
                  RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                           is_important, is_urgent, due_date, project_id",
+                           is_important, is_urgent, due_date, project_id, deleted_at_ms",
                 params![input.updated_at_ms, input.id],
                 raw_task_from_row,
             )
@@ -632,9 +717,10 @@ impl TaskDbService {
         }
         update_planning_value(
             conn,
-            "UPDATE tasks SET project_id = ?1, updated_at_ms = ?2 WHERE id = ?3 \
+            "UPDATE tasks SET project_id = ?1, updated_at_ms = ?2 \
+             WHERE id = ?3 AND deleted_at_ms IS NULL \
              RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                       is_important, is_urgent, due_date, project_id",
+                       is_important, is_urgent, due_date, project_id, deleted_at_ms",
             input.project_id,
             input.updated_at_ms,
             &input.id,
@@ -649,9 +735,10 @@ impl TaskDbService {
         validate_timestamp(input.updated_at_ms)?;
         let task = conn
             .query_row(
-                "UPDATE tasks SET project_id = NULL, updated_at_ms = ?1 WHERE id = ?2 \
+                "UPDATE tasks SET project_id = NULL, updated_at_ms = ?1 \
+                 WHERE id = ?2 AND deleted_at_ms IS NULL \
                  RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                           is_important, is_urgent, due_date, project_id",
+                           is_important, is_urgent, due_date, project_id, deleted_at_ms",
                 params![input.updated_at_ms, input.id],
                 raw_task_from_row,
             )
@@ -672,7 +759,11 @@ impl TaskDbService {
             .map_err(|_| TaskError::PersistenceFailed)?;
 
         let task_exists = transaction
-            .query_row("SELECT 1 FROM tasks WHERE id = ?1", [&input.id], |_| Ok(()))
+            .query_row(
+                "SELECT 1 FROM tasks WHERE id = ?1 AND deleted_at_ms IS NULL",
+                [&input.id],
+                |_| Ok(()),
+            )
             .optional()
             .map_err(|_| TaskError::PersistenceFailed)?;
         let tag_exists = transaction
@@ -693,9 +784,10 @@ impl TaskDbService {
             .map_err(|_| TaskError::PersistenceFailed)?;
         let raw = transaction
             .query_row(
-                "UPDATE tasks SET updated_at_ms = ?1 WHERE id = ?2 \
+                "UPDATE tasks SET updated_at_ms = ?1 \
+                 WHERE id = ?2 AND deleted_at_ms IS NULL \
                  RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                           is_important, is_urgent, due_date, project_id",
+                           is_important, is_urgent, due_date, project_id, deleted_at_ms",
                 params![input.updated_at_ms, &input.id],
                 raw_task_from_row,
             )
@@ -717,6 +809,17 @@ impl TaskDbService {
         let transaction = conn
             .unchecked_transaction()
             .map_err(|_| TaskError::PersistenceFailed)?;
+        let task_exists = transaction
+            .query_row(
+                "SELECT 1 FROM tasks WHERE id = ?1 AND deleted_at_ms IS NULL",
+                [&input.id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|_| TaskError::PersistenceFailed)?;
+        if task_exists.is_none() {
+            return Err(TaskError::NotFound);
+        }
         let removed = transaction
             .execute(
                 "DELETE FROM task_tags WHERE task_id = ?1 AND tag_id = ?2",
@@ -728,9 +831,10 @@ impl TaskDbService {
         }
         let raw = transaction
             .query_row(
-                "UPDATE tasks SET updated_at_ms = ?1 WHERE id = ?2 \
+                "UPDATE tasks SET updated_at_ms = ?1 \
+                 WHERE id = ?2 AND deleted_at_ms IS NULL \
                  RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                           is_important, is_urgent, due_date, project_id",
+                           is_important, is_urgent, due_date, project_id, deleted_at_ms",
                 params![input.updated_at_ms, &input.id],
                 raw_task_from_row,
             )
@@ -767,9 +871,9 @@ fn compare_and_set_status(
     let task = transaction
         .query_row(
             "UPDATE tasks SET status = ?1, updated_at_ms = ?2 \
-             WHERE id = ?3 AND status = ?4 \
+             WHERE id = ?3 AND status = ?4 AND deleted_at_ms IS NULL \
              RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                       is_important, is_urgent, due_date, project_id",
+                       is_important, is_urgent, due_date, project_id, deleted_at_ms",
             params![target.as_str(), updated_at_ms, id, previous.as_str()],
             raw_task_from_row,
         )
@@ -830,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn migrations_apply_exact_task_project_tag_schema_and_history() {
+    fn migrations_apply_exact_task_project_tag_soft_delete_schema_and_history() {
         let (_sandbox, _database_path, connection) = migrated_database();
 
         let mut history_statement = connection
@@ -848,6 +952,7 @@ mod tests {
                 (2, "0002_add_task_planning_fields".to_string()),
                 (3, "0003_add_task_projects".to_string()),
                 (4, "0004_add_task_tags".to_string()),
+                (5, "0005_add_task_soft_delete".to_string()),
             ]
         );
 
@@ -883,6 +988,7 @@ mod tests {
                 ("is_urgent".into(), "INTEGER".into(), 1, Some("0".into()), 0),
                 ("due_date".into(), "TEXT".into(), 0, None, 0),
                 ("project_id".into(), "TEXT".into(), 0, None, 0),
+                ("deleted_at_ms".into(), "INTEGER".into(), 0, None, 0),
             ]
         );
 
@@ -931,6 +1037,7 @@ mod tests {
                 due_date: None,
                 project_id: None,
                 tag_ids: vec![],
+                deleted_at_ms: None,
             }]
         );
         let history: Vec<i64> = connection
@@ -940,7 +1047,7 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(history, [1, 2, 3, 4]);
+        assert_eq!(history, [1, 2, 3, 4, 5]);
 
         let foreign_keys: Vec<(String, String, String)> = connection
             .prepare("PRAGMA foreign_key_list('tasks')")
@@ -962,6 +1069,179 @@ mod tests {
             )
             .unwrap();
         assert_eq!(junction_index_count, 1);
+    }
+
+    #[test]
+    fn existing_v4_database_migrates_tasks_to_active_soft_delete_state() {
+        let sandbox = tempdir().unwrap();
+        let database_dir = sandbox.path().join("database");
+        let backup_dir = sandbox.path().join("backup");
+        fs::create_dir_all(&database_dir).unwrap();
+        fs::create_dir_all(&backup_dir).unwrap();
+        let database_path = database_dir.join("zhixing.db");
+        let mut connection = open_configured_connection(&database_path).unwrap();
+        MigrationRunner::new(&MIGRATIONS[..4], SqliteBackupSnapshot)
+            .run(&mut connection, &backup_dir)
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO tasks(id, title, created_at_ms, updated_at_ms) \
+                 VALUES(?1, 'Existing v4 Task', 10, 10)",
+                [ID_A],
+            )
+            .unwrap();
+
+        MigrationRunner::new(MIGRATIONS, SqliteBackupSnapshot)
+            .run(&mut connection, &backup_dir)
+            .unwrap();
+
+        let deleted_at_ms: Option<i64> = connection
+            .query_row(
+                "SELECT deleted_at_ms FROM tasks WHERE id = ?1",
+                [ID_A],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(deleted_at_ms, None);
+        assert_eq!(TaskDbService::list(&connection).unwrap().len(), 1);
+        assert!(TaskDbService::list_trashed(&connection).unwrap().is_empty());
+    }
+
+    #[test]
+    fn trash_and_restore_preserve_task_relations_and_survive_restart() {
+        let (_sandbox, database_path, mut connection) = migrated_database();
+        connection
+            .execute(
+                "INSERT INTO projects(id, name, created_at_ms, updated_at_ms) \
+                 VALUES(?1, 'Project', 1, 1)",
+                [ID_B],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO tags(id, name, created_at_ms, updated_at_ms) \
+                 VALUES(?1, 'Tag', 1, 1)",
+                [ID_C],
+            )
+            .unwrap();
+        let created = TaskDbService::create(
+            &connection,
+            CreateTaskInput {
+                id: ID_A.into(),
+                title: "Recoverable".into(),
+                created_at_ms: 10,
+                is_important: true,
+                is_urgent: true,
+                due_date: Some("2026-08-31".into()),
+                project_id: Some(ID_B.into()),
+                tag_ids: vec![ID_C.into()],
+            },
+        )
+        .unwrap();
+        let started = TaskDbService::change_status(
+            &mut connection,
+            ChangeTaskStatusInput {
+                id: ID_A.into(),
+                operation: TaskStatusOperation::Start,
+                updated_at_ms: 20,
+            },
+        )
+        .unwrap();
+        assert_eq!(created.created_at_ms, started.created_at_ms);
+
+        let trashed = TaskDbService::trash(
+            &connection,
+            TrashTaskInput {
+                id: ID_A.into(),
+                updated_at_ms: 30,
+            },
+        )
+        .unwrap();
+        assert_eq!(trashed.deleted_at_ms, Some(30));
+        assert_eq!(trashed.updated_at_ms, 30);
+        assert_eq!(trashed.status, TaskStatus::Doing);
+        assert_eq!(trashed.project_id.as_deref(), Some(ID_B));
+        assert_eq!(trashed.tag_ids, [ID_C]);
+        assert_eq!(trashed.due_date.as_deref(), Some("2026-08-31"));
+        assert!(TaskDbService::list(&connection).unwrap().is_empty());
+        assert_eq!(TaskDbService::list_trashed(&connection).unwrap(), [trashed]);
+        assert_eq!(
+            TaskDbService::rename(
+                &connection,
+                RenameTaskInput {
+                    id: ID_A.into(),
+                    title: "Hidden rename".into(),
+                    updated_at_ms: 40,
+                },
+            ),
+            Err(TaskError::NotFound)
+        );
+        assert_eq!(
+            TaskDbService::trash(
+                &connection,
+                TrashTaskInput {
+                    id: ID_A.into(),
+                    updated_at_ms: 40,
+                },
+            ),
+            Err(TaskError::NotFound)
+        );
+
+        drop(connection);
+        let reopened = open_existing_configured_connection(&database_path).unwrap();
+        assert_eq!(TaskDbService::list_trashed(&reopened).unwrap().len(), 1);
+        let restored = TaskDbService::restore(
+            &reopened,
+            RestoreTaskInput {
+                id: ID_A.into(),
+                updated_at_ms: 50,
+            },
+        )
+        .unwrap();
+        assert_eq!(restored.deleted_at_ms, None);
+        assert_eq!(restored.updated_at_ms, 50);
+        assert_eq!(restored.created_at_ms, 10);
+        assert_eq!(restored.status, TaskStatus::Doing);
+        assert_eq!(restored.project_id.as_deref(), Some(ID_B));
+        assert_eq!(restored.tag_ids, [ID_C]);
+        assert_eq!(restored.due_date.as_deref(), Some("2026-08-31"));
+        assert!(TaskDbService::list_trashed(&reopened).unwrap().is_empty());
+        assert_eq!(TaskDbService::list(&reopened).unwrap(), [restored]);
+        assert_eq!(
+            TaskDbService::restore(
+                &reopened,
+                RestoreTaskInput {
+                    id: ID_A.into(),
+                    updated_at_ms: 60,
+                },
+            ),
+            Err(TaskError::NotFound)
+        );
+    }
+
+    #[test]
+    fn list_trashed_orders_by_deleted_timestamp_then_id() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_task(&connection, ID_C, "Third", 30);
+        create_task(&connection, ID_B, "Second", 20);
+        create_task(&connection, ID_A, "First", 10);
+        for (id, updated_at_ms) in [(ID_C, 200), (ID_B, 300), (ID_A, 300)] {
+            TaskDbService::trash(
+                &connection,
+                TrashTaskInput {
+                    id: id.into(),
+                    updated_at_ms,
+                },
+            )
+            .unwrap();
+        }
+
+        let ids: Vec<_> = TaskDbService::list_trashed(&connection)
+            .unwrap()
+            .into_iter()
+            .map(|task| task.id)
+            .collect();
+        assert_eq!(ids, [ID_A, ID_B, ID_C]);
     }
 
     #[test]
@@ -1022,6 +1302,7 @@ mod tests {
             "INSERT INTO tasks(id, title, status, created_at_ms, updated_at_ms, is_important) VALUES('e', 'Task', 'todo', 0, 0, 2)",
             "INSERT INTO tasks(id, title, status, created_at_ms, updated_at_ms, is_urgent) VALUES('f', 'Task', 'todo', 0, 0, -1)",
             "INSERT INTO tasks(id, title, status, created_at_ms, updated_at_ms, due_date) VALUES('g', 'Task', 'todo', 0, 0, '2026/08/23')",
+            "INSERT INTO tasks(id, title, status, created_at_ms, updated_at_ms, deleted_at_ms) VALUES('h', 'Task', 'todo', 0, 0, -1)",
         ] {
             assert!(connection.execute_batch(sql).is_err(), "accepted: {sql}");
         }
@@ -1748,6 +2029,7 @@ mod tests {
                 due_date: Some("2026-08-23".into()),
                 project_id: None,
                 tag_ids: vec![],
+                deleted_at_ms: None,
             }]
         );
     }

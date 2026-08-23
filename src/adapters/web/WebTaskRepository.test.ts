@@ -42,6 +42,7 @@ const TASK = {
   dueDate: null,
   projectId: null,
   tagIds: [],
+  deletedAtMs: null,
 } as const
 
 class FakeWorker implements TaskWorkerEndpoint {
@@ -107,6 +108,15 @@ class ContractWorker implements TaskWorkerEndpoint {
           break
         case 'task.list':
           result = this.backend.listTasks()
+          break
+        case 'task.listTrashed':
+          result = this.backend.listTrashedTasks()
+          break
+        case 'task.trash':
+          result = this.backend.trashTask(request.input)
+          break
+        case 'task.restore':
+          result = this.backend.restoreTask(request.input)
           break
         case 'task.rename':
           result = this.backend.renameTask(request.input)
@@ -374,7 +384,11 @@ describe('WebTaskRepository', () => {
     worker.respondToLast({ ...TASK, tagIds: [tagId], updatedAtMs: 800 })
     await expect(tagged).resolves.toMatchObject({ tagIds: [tagId] })
 
-    const untagged = repository.removeTaskTag({ id: ID, tagId, updatedAtMs: 900 })
+    const untagged = repository.removeTaskTag({
+      id: ID,
+      tagId,
+      updatedAtMs: 900,
+    })
     expect(worker.messages.at(-1)).toMatchObject({ type: 'task.removeTag' })
     worker.respondToLast({ ...TASK, tagIds: [], updatedAtMs: 900 })
     await expect(untagged).resolves.toMatchObject({ tagIds: [] })
@@ -519,10 +533,16 @@ describe('Web migrations', () => {
         checksumSha256: await sha256Hex(WEB_MIGRATIONS[3]?.sql ?? ''),
         appliedAtMs: 123,
       },
+      {
+        version: 5,
+        id: '0005_add_task_soft_delete',
+        checksumSha256: await sha256Hex(WEB_MIGRATIONS[4]?.sql ?? ''),
+        appliedAtMs: 123,
+      },
     ])
   })
 
-  test('upgrades an exact v1 prefix and is idempotent after v4', async () => {
+  test('upgrades an exact v1 prefix and is idempotent after v5', async () => {
     const store = new FakeMigrationStore()
     await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 1), () => 123)
     expect(store.history.map((row) => row.version)).toEqual([1])
@@ -532,15 +552,15 @@ describe('Web migrations', () => {
     expect(store.executedSql).toEqual(
       WEB_MIGRATIONS.map((migration) => migration.sql),
     )
-    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4])
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5])
   })
 
-  test('upgrades an exact v2 prefix through Tag migration 4', async () => {
+  test('upgrades an exact v2 prefix through soft-delete migration 5', async () => {
     const store = new FakeMigrationStore()
     await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 2), () => 123)
     expect(store.history.map((row) => row.version)).toEqual([1, 2])
     await runWebMigrations(store, WEB_MIGRATIONS, () => 456)
-    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4])
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5])
     expect(store.history[2]).toMatchObject({
       id: '0003_add_task_projects',
       appliedAtMs: 456,
@@ -549,17 +569,38 @@ describe('Web migrations', () => {
       id: '0004_add_task_tags',
       appliedAtMs: 456,
     })
+    expect(store.history[4]).toMatchObject({
+      id: '0005_add_task_soft_delete',
+      appliedAtMs: 456,
+    })
   })
 
-  test('upgrades an exact v3 prefix to Tag migration 4', async () => {
+  test('upgrades an exact v3 prefix through soft-delete migration 5', async () => {
     const store = new FakeMigrationStore()
     await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 3), () => 123)
     await runWebMigrations(store, WEB_MIGRATIONS, () => 456)
-    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4])
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5])
     expect(store.history[3]).toMatchObject({
       id: '0004_add_task_tags',
       appliedAtMs: 456,
     })
+    expect(store.history[4]).toMatchObject({
+      id: '0005_add_task_soft_delete',
+      appliedAtMs: 456,
+    })
+  })
+
+  test('upgrades an exact v4 prefix to soft-delete migration 5', async () => {
+    const store = new FakeMigrationStore()
+    await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 4), () => 123)
+    await runWebMigrations(store, WEB_MIGRATIONS, () => 456)
+
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5])
+    expect(store.history[4]).toMatchObject({
+      id: '0005_add_task_soft_delete',
+      appliedAtMs: 456,
+    })
+    expect(store.executedSql[4]).toBe(WEB_MIGRATIONS[4]?.sql)
   })
 
   test('fails closed on id and checksum mismatch', async () => {

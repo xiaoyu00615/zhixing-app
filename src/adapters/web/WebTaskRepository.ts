@@ -13,11 +13,13 @@ import {
   type ClearTaskDeadlineInput,
   type CreateTaskInput,
   type RenameTaskInput,
+  type RestoreTaskInput,
   type SetTaskDeadlineInput,
   type SetTaskImportanceInput,
   type SetTaskUrgencyInput,
   type TaskRepository,
   type TaskRepositoryOperation,
+  type TrashTaskInput,
 } from '@/task/repository'
 import {
   createTaskPersistenceWorker,
@@ -48,6 +50,7 @@ function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
     dueDate,
     projectId,
     tagIds,
+    deletedAtMs,
   } = value
   if (
     !isCanonicalLowercaseUuid(id) ||
@@ -62,7 +65,8 @@ function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
     (projectId !== null && !isCanonicalLowercaseUuid(projectId)) ||
     !Array.isArray(tagIds) ||
     tagIds.some((tagId) => !isCanonicalLowercaseUuid(tagId)) ||
-    new Set(tagIds).size !== tagIds.length
+    new Set(tagIds).size !== tagIds.length ||
+    (deletedAtMs !== null && !isNonNegativeSafeIntegerMilliseconds(deletedAtMs))
   ) {
     throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
   }
@@ -77,6 +81,7 @@ function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
     dueDate,
     projectId,
     tagIds,
+    deletedAtMs,
   }
 }
 
@@ -174,6 +179,31 @@ export class WebTaskRepository implements TaskRepository {
     } catch (error: unknown) {
       throw mapClientError(error, operation)
     }
+  }
+
+  async listTrashedTasks(): Promise<readonly Task[]> {
+    const operation = 'listTrashedTasks'
+    try {
+      const value = await this.#client.listTrashedTasks()
+      if (!Array.isArray(value)) {
+        throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
+      }
+      return value.map((task) => parseTask(task, operation))
+    } catch (error: unknown) {
+      throw mapClientError(error, operation)
+    }
+  }
+
+  trashTask(input: TrashTaskInput): Promise<Task> {
+    return this.callLifecycle('trashTask', input, () =>
+      this.#client.trashTask(input),
+    )
+  }
+
+  restoreTask(input: RestoreTaskInput): Promise<Task> {
+    return this.callLifecycle('restoreTask', input, () =>
+      this.#client.restoreTask(input),
+    )
   }
 
   async renameTask(input: RenameTaskInput): Promise<Task> {
@@ -303,6 +333,20 @@ export class WebTaskRepository implements TaskRepository {
     if (!valueIsValid) {
       throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
     }
+    try {
+      return parseTask(await call(), operation)
+    } catch (error: unknown) {
+      throw mapClientError(error, operation)
+    }
+  }
+
+  private async callLifecycle(
+    operation: 'trashTask' | 'restoreTask',
+    input: { readonly id: string; readonly updatedAtMs: number },
+    call: () => Promise<unknown>,
+  ): Promise<Task> {
+    validateId(input.id, operation)
+    validateTimestamp(input.updatedAtMs, operation)
     try {
       return parseTask(await call(), operation)
     } catch (error: unknown) {

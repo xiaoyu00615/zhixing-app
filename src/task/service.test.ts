@@ -35,6 +35,7 @@ const TASK: Task = {
   dueDate: null,
   projectId: null,
   tagIds: [],
+  deletedAtMs: null,
 }
 
 function createFakeRepository() {
@@ -48,6 +49,25 @@ function createFakeRepository() {
   )
   const listTasks = vi.fn((): Promise<readonly Task[]> =>
     Promise.resolve([TASK]),
+  )
+  const listTrashedTasks = vi.fn((): Promise<readonly Task[]> =>
+    Promise.resolve([]),
+  )
+  const trashTask = vi.fn(
+    (input: import('@/task/repository').TrashTaskInput): Promise<Task> =>
+      Promise.resolve({
+        ...TASK,
+        updatedAtMs: input.updatedAtMs,
+        deletedAtMs: input.updatedAtMs,
+      }),
+  )
+  const restoreTask = vi.fn(
+    (input: import('@/task/repository').RestoreTaskInput): Promise<Task> =>
+      Promise.resolve({
+        ...TASK,
+        updatedAtMs: input.updatedAtMs,
+        deletedAtMs: null,
+      }),
   )
   const renameTask = vi.fn((input: RenameTaskInput): Promise<Task> =>
     Promise.resolve({
@@ -125,6 +145,9 @@ function createFakeRepository() {
   const repository: TaskRepository = {
     createTask,
     listTasks,
+    listTrashedTasks,
+    trashTask,
+    restoreTask,
     renameTask,
     changeTaskStatus,
     setTaskImportance,
@@ -140,6 +163,9 @@ function createFakeRepository() {
     repository,
     createTask,
     listTasks,
+    listTrashedTasks,
+    trashTask,
+    restoreTask,
     renameTask,
     changeTaskStatus,
     setTaskImportance,
@@ -173,6 +199,9 @@ test('TaskService exposes only the approved business API and error codes', () =>
   expect(Object.keys(service)).toEqual([
     'createTask',
     'listTasks',
+    'listTrashedTasks',
+    'trashTask',
+    'restoreTask',
     'renameTask',
     'startTask',
     'completeTask',
@@ -621,6 +650,57 @@ describe('TaskService listTasks', () => {
   })
 })
 
+describe('TaskService trash lifecycle', () => {
+  test('generates one timestamp for trash and restore and delegates trash listing', async () => {
+    const fake = createFakeRepository()
+    const nowMs = vi.fn().mockReturnValueOnce(200).mockReturnValueOnce(300)
+    const service = createTaskService({ repository: fake.repository, nowMs })
+
+    await expect(service.listTrashedTasks()).resolves.toEqual([])
+    await service.trashTask(ID)
+    await service.restoreTask(ID)
+
+    expect(fake.listTrashedTasks).toHaveBeenCalledOnce()
+    expect(fake.trashTask).toHaveBeenCalledWith({ id: ID, updatedAtMs: 200 })
+    expect(fake.restoreTask).toHaveBeenCalledWith({ id: ID, updatedAtMs: 300 })
+    expect(nowMs).toHaveBeenCalledTimes(2)
+  })
+
+  test.each(['trashTask', 'restoreTask'] as const)(
+    '%s validates canonical id before reading the clock',
+    async (method) => {
+      const fake = createFakeRepository()
+      const nowMs = vi.fn(() => 200)
+      const service = createTaskService({ repository: fake.repository, nowMs })
+
+      await expectApplicationError(
+        service[method]('invalid'),
+        'VALIDATION',
+        'id',
+      )
+      expect(nowMs).not.toHaveBeenCalled()
+      expect(fake[method]).not.toHaveBeenCalled()
+    },
+  )
+
+  test('maps missing and persistence failures to the existing safe application errors', async () => {
+    const fake = createFakeRepository()
+    const service = createTaskService({
+      repository: fake.repository,
+      nowMs: () => 200,
+    })
+    fake.trashTask.mockRejectedValueOnce(
+      new TaskRepositoryError('NOT_FOUND', 'trashTask'),
+    )
+    fake.restoreTask.mockRejectedValueOnce(
+      new TaskRepositoryError('PERSISTENCE_FAILED', 'restoreTask'),
+    )
+
+    await expectApplicationError(service.trashTask(ID), 'NOT_FOUND')
+    await expectApplicationError(service.restoreTask(ID), 'UNAVAILABLE')
+  })
+})
+
 describe('TaskService project assignment', () => {
   test('creates with project in the single repository create call', async () => {
     const fake = createFakeRepository()
@@ -686,18 +766,33 @@ describe('TaskService tag assignment', () => {
     })
     await service.createTask({ title: ' Tagged task ', tagIds: [tagId] })
     expect(fake.createTask).toHaveBeenCalledWith(
-      expect.objectContaining({ id: ID, title: 'Tagged task', tagIds: [tagId] }),
+      expect.objectContaining({
+        id: ID,
+        title: 'Tagged task',
+        tagIds: [tagId],
+      }),
     )
     expect(fake.createTask).toHaveBeenCalledOnce()
   })
 
   test('adds and removes tags with service-owned timestamps', async () => {
     const fake = createFakeRepository()
-    const service = createTaskService({ repository: fake.repository, nowMs: () => 300 })
+    const service = createTaskService({
+      repository: fake.repository,
+      nowMs: () => 300,
+    })
     await service.addTaskTag(ID, tagId)
-    expect(fake.addTaskTag).toHaveBeenCalledWith({ id: ID, tagId, updatedAtMs: 300 })
+    expect(fake.addTaskTag).toHaveBeenCalledWith({
+      id: ID,
+      tagId,
+      updatedAtMs: 300,
+    })
     await service.removeTaskTag(ID, tagId)
-    expect(fake.removeTaskTag).toHaveBeenCalledWith({ id: ID, tagId, updatedAtMs: 300 })
+    expect(fake.removeTaskTag).toHaveBeenCalledWith({
+      id: ID,
+      tagId,
+      updatedAtMs: 300,
+    })
   })
 
   test('rejects invalid and duplicate tag ids before persistence', async () => {

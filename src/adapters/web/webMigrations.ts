@@ -4,6 +4,7 @@ import createTasksSql from '../../../src-tauri/migrations/0001_create_tasks.sql?
 import addTaskPlanningFieldsSql from '../../../src-tauri/migrations/0002_add_task_planning_fields.sql?raw'
 import addTaskProjectsSql from '../../../src-tauri/migrations/0003_add_task_projects.sql?raw'
 import addTaskTagsSql from '../../../src-tauri/migrations/0004_add_task_tags.sql?raw'
+import addTaskSoftDeleteSql from '../../../src-tauri/migrations/0005_add_task_soft_delete.sql?raw'
 
 export interface WebMigrationDefinition {
   readonly version: number
@@ -64,6 +65,12 @@ export const WEB_MIGRATIONS: readonly WebMigrationDefinition[] = [
     version: 4,
     id: '0004_add_task_tags',
     sql: addTaskTagsSql,
+    highRisk: false,
+  },
+  {
+    version: 5,
+    id: '0005_add_task_soft_delete',
+    sql: addTaskSoftDeleteSql,
     highRisk: false,
   },
 ]

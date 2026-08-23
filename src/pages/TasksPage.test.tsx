@@ -31,6 +31,7 @@ const TASK: Task = {
   dueDate: null,
   projectId: null,
   tagIds: [],
+  deletedAtMs: null,
 }
 
 function taskFixture(
@@ -51,6 +52,12 @@ function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
   createTask.mockResolvedValue(TASK)
   const listTasks = vi.fn<TaskService['listTasks']>()
   listTasks.mockResolvedValue(initialTasks)
+  const listTrashedTasks = vi.fn<TaskService['listTrashedTasks']>()
+  listTrashedTasks.mockResolvedValue([])
+  const trashTask = vi.fn<TaskService['trashTask']>()
+  trashTask.mockResolvedValue({ ...TASK, deletedAtMs: 200, updatedAtMs: 200 })
+  const restoreTask = vi.fn<TaskService['restoreTask']>()
+  restoreTask.mockResolvedValue(TASK)
   const renameTask = vi.fn<TaskService['renameTask']>()
   renameTask.mockResolvedValue(TASK)
   const startTask = vi.fn<TaskService['startTask']>()
@@ -81,6 +88,9 @@ function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
   const service: TaskService = {
     createTask,
     listTasks,
+    listTrashedTasks,
+    trashTask,
+    restoreTask,
     renameTask,
     startTask,
     completeTask,
@@ -99,6 +109,9 @@ function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
     service,
     createTask,
     listTasks,
+    listTrashedTasks,
+    trashTask,
+    restoreTask,
     renameTask,
     startTask,
     completeTask,
@@ -2058,5 +2071,33 @@ describe('TasksPage quadrant view', () => {
       changing.resolve(changed)
     })
     await waitFor(() => expect(fake.listTasks).toHaveBeenCalledTimes(2))
+  })
+
+  test('requires recoverable confirmation before trashing and closes stale detail after reload', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([TASK])
+    fake.listTasks.mockResolvedValueOnce([TASK]).mockResolvedValueOnce([])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: `查看任务详情：${TASK.title}`,
+      }),
+    )
+    await user.click(screen.getByRole('button', { name: '移入回收站' }))
+    expect(
+      screen.getByText('任务将移入回收站，之后可以随时恢复。'),
+    ).toBeInTheDocument()
+    expect(fake.trashTask).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: '确认移入回收站' }))
+
+    expect(fake.trashTask).toHaveBeenCalledWith(TASK.id)
+    await waitFor(() => expect(fake.listTasks).toHaveBeenCalledTimes(2))
+    expect(
+      screen.queryByLabelText(`任务详情：${TASK.title}`),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText(/永久删除/)).not.toBeInTheDocument()
   })
 })
