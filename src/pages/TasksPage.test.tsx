@@ -776,10 +776,137 @@ describe('TasksPage date view', () => {
       '2026-08-24',
     )
     expect(await screen.findByText('暂无今日任务')).toBeInTheDocument()
-    await user.click(
-      screen.getByRole('button', { name: '即将到期，1 项任务' }),
-    )
+    await user.click(screen.getByRole('button', { name: '即将到期，1 项任务' }))
     expect(await screen.findByText(todayTask.title)).toBeInTheDocument()
+    expect(fake.listTasks).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('TasksPage calendar view', () => {
+  test('renders active dated tasks in a real local month and navigates months', async () => {
+    const user = userEvent.setup()
+    const todayFirst = taskFixture(91, '今天的第一项任务', {
+      dueDate: '2026-08-23',
+    })
+    const todaySecond = taskFixture(92, '今天的第二项任务', {
+      status: 'doing',
+      dueDate: '2026-08-23',
+    })
+    const nextMonth = taskFixture(93, '九月任务', {
+      dueDate: '2026-09-02',
+    })
+    const withoutDeadline = taskFixture(94, '没有截止日期')
+    const completed = taskFixture(95, '已完成任务', {
+      status: 'completed',
+      dueDate: '2026-08-23',
+    })
+    const cancelled = taskFixture(96, '已取消任务', {
+      status: 'cancelled',
+      dueDate: '2026-08-24',
+    })
+    const fake = createServiceDouble([
+      todayFirst,
+      todaySecond,
+      nextMonth,
+      withoutDeadline,
+      completed,
+      cancelled,
+    ])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByRole('list', { name: '任务列表' })
+
+    await user.click(screen.getByRole('tab', { name: '日历' }))
+
+    const calendar = screen.getByRole('region', { name: '任务日历视图' })
+    const agenda = within(calendar).getByRole('complementary', {
+      name: '所选日期任务',
+    })
+    expect(screen.getByRole('tab', { name: '日历' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+    expect(
+      within(calendar).getByRole('grid', { name: '2026年8月任务月历' }),
+    ).toBeInTheDocument()
+    expect(
+      within(calendar).getByRole('button', {
+        name: '选择2026年8月23日，2 项任务',
+      }),
+    ).toBeInTheDocument()
+    expect(within(agenda).getByText(todayFirst.title)).toBeInTheDocument()
+    expect(within(agenda).getByText(todaySecond.title)).toBeInTheDocument()
+    expect(
+      within(calendar).queryByText(withoutDeadline.title),
+    ).not.toBeInTheDocument()
+    expect(
+      within(calendar).queryByText(completed.title),
+    ).not.toBeInTheDocument()
+    expect(
+      within(calendar).queryByText(cancelled.title),
+    ).not.toBeInTheDocument()
+
+    await user.click(within(calendar).getByRole('button', { name: '上一月' }))
+    expect(
+      within(calendar).getByRole('grid', { name: '2026年7月任务月历' }),
+    ).toBeInTheDocument()
+
+    await user.click(within(calendar).getByRole('button', { name: '下一月' }))
+    await user.click(within(calendar).getByRole('button', { name: '下一月' }))
+    expect(
+      within(calendar).getByRole('grid', { name: '2026年9月任务月历' }),
+    ).toBeInTheDocument()
+    expect(within(calendar).getByText(nextMonth.title)).toBeInTheDocument()
+
+    await user.click(within(calendar).getByRole('button', { name: '今天' }))
+    expect(
+      within(calendar).getByRole('grid', { name: '2026年8月任务月历' }),
+    ).toBeInTheDocument()
+    expect(within(agenda).getByText(todayFirst.title)).toBeInTheDocument()
+  })
+
+  test('re-derives calendar placement after changing a deadline through TaskService', async () => {
+    const user = userEvent.setup()
+    const todayTask = taskFixture(97, '月历中改期的任务', {
+      dueDate: '2026-08-23',
+    })
+    const movedTask = {
+      ...todayTask,
+      dueDate: '2026-08-24',
+      updatedAtMs: 200,
+    }
+    const fake = createServiceDouble([todayTask])
+    fake.setTaskDeadline.mockResolvedValueOnce(movedTask)
+    fake.listTasks
+      .mockResolvedValueOnce([todayTask])
+      .mockResolvedValueOnce([movedTask])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByText(todayTask.title)
+    await user.click(screen.getByRole('tab', { name: '日历' }))
+
+    const calendar = screen.getByRole('region', { name: '任务日历视图' })
+    const agenda = within(calendar).getByRole('complementary', {
+      name: '所选日期任务',
+    })
+    fireEvent.change(
+      within(agenda).getByLabelText(`任务截止日期：${todayTask.title}`),
+      { target: { value: '2026-08-24' } },
+    )
+
+    expect(fake.setTaskDeadline).toHaveBeenCalledWith(
+      todayTask.id,
+      '2026-08-24',
+    )
+    expect(
+      await within(agenda).findByText('当天暂无到期任务'),
+    ).toBeInTheDocument()
+    await user.click(
+      within(calendar).getByRole('button', {
+        name: '选择2026年8月24日，1 项任务',
+      }),
+    )
+    expect(await within(agenda).findByText(todayTask.title)).toBeInTheDocument()
     expect(fake.listTasks).toHaveBeenCalledTimes(2)
   })
 })
@@ -848,9 +975,7 @@ describe('TasksPage quadrant view', () => {
       name: '重要且紧急',
     })
     expect(within(urgentQuadrant).getByText('已逾期')).toBeInTheDocument()
-    expect(
-      within(urgentQuadrant).getByText('紧急（逾期）'),
-    ).toBeInTheDocument()
+    expect(within(urgentQuadrant).getByText('紧急（逾期）')).toBeInTheDocument()
     expect(within(board).queryByText(completed.title)).not.toBeInTheDocument()
     expect(within(board).queryByText(cancelled.title)).not.toBeInTheDocument()
   })
@@ -866,9 +991,7 @@ describe('TasksPage quadrant view', () => {
 
     await user.click(screen.getByRole('tab', { name: '四象限' }))
 
-    expect(
-      screen.getByText('当前没有待开始或进行中的任务'),
-    ).toBeInTheDocument()
+    expect(screen.getByText('当前没有待开始或进行中的任务')).toBeInTheDocument()
     expect(screen.getAllByText('暂无任务')).toHaveLength(4)
     for (const title of [
       '重要且紧急',
@@ -877,9 +1000,7 @@ describe('TasksPage quadrant view', () => {
       '不重要不紧急',
     ]) {
       expect(screen.getByRole('region', { name: title })).toBeInTheDocument()
-      expect(
-        screen.getByLabelText(`${title}任务数量 0`),
-      ).toBeInTheDocument()
+      expect(screen.getByLabelText(`${title}任务数量 0`)).toBeInTheDocument()
     }
   })
 
@@ -966,9 +1087,9 @@ describe('TasksPage quadrant view', () => {
 
     await waitFor(() =>
       expect(
-        within(
-          screen.getByRole('region', { name: '重要且紧急' }),
-        ).getByText(task.title),
+        within(screen.getByRole('region', { name: '重要且紧急' })).getByText(
+          task.title,
+        ),
       ).toBeInTheDocument(),
     )
     expect(fake.setTaskDeadline).toHaveBeenCalledWith(task.id, '2026-08-22')

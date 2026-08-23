@@ -1,5 +1,6 @@
 import {
   CalendarDays,
+  CalendarRange,
   LayoutGrid,
   ListTodo,
   Plus,
@@ -12,6 +13,7 @@ import {
   CreateTaskDialog,
   RenameTaskDialog,
 } from '@/components/tasks/TaskDialogs'
+import { TaskCalendarView } from '@/components/tasks/TaskCalendarView'
 import { TaskDateView } from '@/components/tasks/TaskDateView'
 import { TaskList, type TaskStatusAction } from '@/components/tasks/TaskList'
 import { TaskQuadrantView } from '@/components/tasks/TaskQuadrantView'
@@ -77,7 +79,9 @@ export function TasksPage({
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
   const [service, setService] = useState<TaskService | null>(null)
   const [tasks, setTasks] = useState<readonly Task[]>([])
-  const [view, setView] = useState<'list' | 'quadrant' | 'date'>('list')
+  const [view, setView] = useState<'list' | 'quadrant' | 'date' | 'calendar'>(
+    'list',
+  )
   const [feedback, setFeedback] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
   const [createTitle, setCreateTitle] = useState('')
@@ -445,6 +449,23 @@ export function TasksPage({
               <CalendarDays data-icon="inline-start" />
               日期
             </Button>
+            <Button
+              aria-controls="task-calendar-panel"
+              aria-selected={view === 'calendar'}
+              className={
+                view === 'calendar'
+                  ? 'h-16 rounded-none border-x-0 border-t-0 border-b-2 border-b-primary bg-transparent px-0 text-primary hover:bg-transparent'
+                  : 'h-16 rounded-none border-0 bg-transparent px-0 text-foreground-secondary hover:bg-transparent hover:text-foreground'
+              }
+              id="task-calendar-tab"
+              onClick={() => setView('calendar')}
+              role="tab"
+              type="button"
+              variant="ghost"
+            >
+              <CalendarRange data-icon="inline-start" />
+              日历
+            </Button>
           </div>
 
           <div className="flex items-center gap-3 pb-2.5">
@@ -580,6 +601,45 @@ export function TasksPage({
           role="tabpanel"
         >
           <TaskDateView
+            onClearDeadline={(task) =>
+              void runPlanningAction(task, (currentService) =>
+                currentService.clearTaskDeadline(task.id),
+              )
+            }
+            onCreate={openCreateDialog}
+            onRename={openRenameDialog}
+            onSetDeadline={(task, dueDate) =>
+              void runPlanningAction(task, (currentService) =>
+                currentService.setTaskDeadline(task.id, dueDate),
+              )
+            }
+            onSetImportance={(task, isImportant) =>
+              void runPlanningAction(task, (currentService) =>
+                currentService.setTaskImportance(task.id, isImportant),
+              )
+            }
+            onSetUrgency={(task, isUrgent) =>
+              void runPlanningAction(task, (currentService) =>
+                currentService.setTaskUrgency(task.id, isUrgent),
+              )
+            }
+            onStatusAction={(task, action) =>
+              void runStatusAction(task, action)
+            }
+            pendingTaskIds={pendingTaskIds}
+            tasks={tasks}
+            today={today}
+          />
+        </div>
+      )}
+
+      {phase === 'ready' && view === 'calendar' && (
+        <div
+          aria-labelledby="task-calendar-tab"
+          id="task-calendar-panel"
+          role="tabpanel"
+        >
+          <TaskCalendarView
             onClearDeadline={(task) =>
               void runPlanningAction(task, (currentService) =>
                 currentService.clearTaskDeadline(task.id),

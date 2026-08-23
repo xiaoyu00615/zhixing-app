@@ -3,7 +3,9 @@ import { describe, expect, test } from 'vitest'
 import {
   TASK_STATUSES,
   TASK_STATUS_OPERATIONS,
+  buildTaskCalendarMonth,
   isCanonicalLowercaseUuid,
+  getDaysInLocalMonth,
   getTaskDateGroup,
   getTaskQuadrant,
   groupTasksByDate,
@@ -16,7 +18,9 @@ import {
   isTaskStatusOperation,
   isValidLocalDate,
   localDateFromDate,
+  localMonthFromLocalDate,
   resolveTaskStatusTransition,
+  shiftLocalMonth,
   type Task,
   type TaskStatus,
   type TaskStatusOperation,
@@ -209,10 +213,7 @@ describe('Task quadrant derivation', () => {
     'maps todo importance=$isImportant urgency=$isUrgent to $expected',
     ({ isImportant, isUrgent, expected }) => {
       expect(
-        getTaskQuadrant(
-          { ...TASK, isImportant, isUrgent },
-          '2026-08-23',
-        ),
+        getTaskQuadrant({ ...TASK, isImportant, isUrgent }, '2026-08-23'),
       ).toBe(expected)
     },
   )
@@ -252,10 +253,7 @@ describe('Task quadrant derivation', () => {
     'keeps a non-base-urgent deadline $dueDate non-urgent',
     ({ dueDate, expected }) => {
       expect(
-        getTaskQuadrant(
-          { ...TASK, isImportant: true, dueDate },
-          '2026-08-23',
-        ),
+        getTaskQuadrant({ ...TASK, isImportant: true, dueDate }, '2026-08-23'),
       ).toBe(expected)
     },
   )
@@ -358,18 +356,15 @@ describe('Task date grouping', () => {
   ] as const)(
     'derives $expected for $status with deadline $dueDate',
     ({ dueDate, status, expected }) => {
-      expect(
-        getTaskDateGroup({ ...TASK, dueDate, status }, '2026-08-23'),
-      ).toBe(expected)
+      expect(getTaskDateGroup({ ...TASK, dueDate, status }, '2026-08-23')).toBe(
+        expected,
+      )
     },
   )
 
   test('rejects classification when today is not a valid local date', () => {
     expect(
-      getTaskDateGroup(
-        { ...TASK, dueDate: '2026-08-23' },
-        '2026-8-23',
-      ),
+      getTaskDateGroup({ ...TASK, dueDate: '2026-08-23' }, '2026-8-23'),
     ).toBeNull()
   })
 
@@ -437,5 +432,124 @@ describe('Task date grouping', () => {
       upcoming: [],
       overdue: [],
     })
+  })
+})
+
+describe('Task calendar derivation', () => {
+  test('reports the correct month length including Gregorian leap years', () => {
+    expect(getDaysInLocalMonth(2026, 8)).toBe(31)
+    expect(getDaysInLocalMonth(2024, 2)).toBe(29)
+    expect(getDaysInLocalMonth(2025, 2)).toBe(28)
+    expect(getDaysInLocalMonth(2100, 2)).toBe(28)
+    expect(getDaysInLocalMonth(2000, 2)).toBe(29)
+  })
+
+  test('builds a Monday-first six-week grid at the real month position', () => {
+    const days = buildTaskCalendarMonth([], { year: 2026, month: 8 })
+
+    expect(days).toHaveLength(42)
+    expect(days[0]).toMatchObject({
+      date: '2026-07-27',
+      isCurrentMonth: false,
+    })
+    expect(days[5]).toMatchObject({
+      date: '2026-08-01',
+      dayOfMonth: 1,
+      isCurrentMonth: true,
+    })
+    expect(days[35]).toMatchObject({
+      date: '2026-08-31',
+      dayOfMonth: 31,
+      isCurrentMonth: true,
+    })
+    expect(days[41]).toMatchObject({
+      date: '2026-09-06',
+      isCurrentMonth: false,
+    })
+    expect(days.filter((day) => day.isCurrentMonth)).toHaveLength(31)
+  })
+
+  test('includes February 29 in a leap-year calendar', () => {
+    const leapFebruary = buildTaskCalendarMonth([], { year: 2024, month: 2 })
+    const commonFebruary = buildTaskCalendarMonth([], {
+      year: 2025,
+      month: 2,
+    })
+
+    expect(leapFebruary.filter((day) => day.isCurrentMonth).at(-1)?.date).toBe(
+      '2024-02-29',
+    )
+    expect(
+      commonFebruary.filter((day) => day.isCurrentMonth).at(-1)?.date,
+    ).toBe('2025-02-28')
+  })
+
+  test('shifts local months across year boundaries without Date or UTC', () => {
+    expect(localMonthFromLocalDate('2026-12-31')).toEqual({
+      year: 2026,
+      month: 12,
+    })
+    expect(shiftLocalMonth({ year: 2026, month: 12 }, 1)).toEqual({
+      year: 2027,
+      month: 1,
+    })
+    expect(shiftLocalMonth({ year: 2026, month: 1 }, -1)).toEqual({
+      year: 2025,
+      month: 12,
+    })
+  })
+
+  test('places multiple active tasks on their due date and excludes inactive or undated tasks', () => {
+    const first = {
+      ...TASK,
+      id: '00000000-0000-4000-8000-000000000031',
+      title: 'First',
+      dueDate: '2026-08-23',
+    }
+    const second = {
+      ...TASK,
+      id: '00000000-0000-4000-8000-000000000032',
+      title: 'Second',
+      status: 'doing' as const,
+      dueDate: '2026-08-23',
+    }
+    const completed = {
+      ...TASK,
+      id: '00000000-0000-4000-8000-000000000033',
+      title: 'Completed',
+      status: 'completed' as const,
+      dueDate: '2026-08-23',
+    }
+    const cancelled = {
+      ...TASK,
+      id: '00000000-0000-4000-8000-000000000034',
+      title: 'Cancelled',
+      status: 'cancelled' as const,
+      dueDate: '2026-08-24',
+    }
+    const withoutDeadline = {
+      ...TASK,
+      id: '00000000-0000-4000-8000-000000000035',
+      title: 'Undated',
+    }
+    const nextMonth = {
+      ...TASK,
+      id: '00000000-0000-4000-8000-000000000036',
+      title: 'Next month',
+      dueDate: '2026-09-01',
+    }
+
+    const days = buildTaskCalendarMonth(
+      [first, completed, second, cancelled, withoutDeadline, nextMonth],
+      { year: 2026, month: 8 },
+    )
+
+    expect(days.find((day) => day.date === '2026-08-23')?.tasks).toEqual([
+      first,
+      second,
+    ])
+    expect(days.find((day) => day.date === '2026-08-24')?.tasks).toEqual([])
+    expect(days.find((day) => day.date === '2026-09-01')?.tasks).toEqual([])
+    expect(days.flatMap((day) => day.tasks)).not.toContain(withoutDeadline)
   })
 })
