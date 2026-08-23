@@ -143,10 +143,7 @@ export function TrashPage({ openRuntime = openTaskRuntime }: TrashPageProps) {
     <section className="mx-auto w-full max-w-[1440px] space-y-6 pb-8">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <p className="text-caption font-semibold tracking-[0.18em] text-foreground-tertiary uppercase">
-            Task archive
-          </p>
-          <h2 className="mt-1 text-hero font-semibold tracking-tight text-foreground">
+          <h2 className="text-hero font-semibold tracking-tight text-foreground">
             回收站
           </h2>
           <p className="mt-2 text-body text-foreground-secondary">
