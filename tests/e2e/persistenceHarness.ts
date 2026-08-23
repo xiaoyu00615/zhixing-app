@@ -2,11 +2,17 @@ import { openWebTaskRepository } from '@/adapters/web'
 import type { WebPersistenceCapability } from '@/adapters/web'
 import type { Task } from '@/task/model'
 import type { Project } from '@/project/model'
+import type { Tag } from '@/tag/model'
 import type {
   CreateProjectInput,
   ProjectRepository,
   RenameProjectInput,
 } from '@/project/repository'
+import type {
+  CreateTagInput,
+  RenameTagInput,
+  TagRepository,
+} from '@/tag/repository'
 import type {
   ChangeTaskStatusInput,
   CreateTaskInput,
@@ -26,9 +32,16 @@ interface PersistenceHarness {
   clearTaskProject(
     input: import('@/task/repository').ClearTaskProjectInput,
   ): Promise<Task>
+  addTaskTag(input: import('@/task/repository').AddTaskTagInput): Promise<Task>
+  removeTaskTag(
+    input: import('@/task/repository').RemoveTaskTagInput,
+  ): Promise<Task>
   createProject(input: CreateProjectInput): Promise<Project>
   listProjects(): Promise<readonly Project[]>
   renameProject(input: RenameProjectInput): Promise<Project>
+  createTag(input: CreateTagInput): Promise<Tag>
+  listTags(): Promise<readonly Tag[]>
+  renameTag(input: RenameTagInput): Promise<Tag>
   shutdown(): Promise<void>
 }
 
@@ -55,6 +68,13 @@ async function requireProjectRepository(): Promise<ProjectRepository> {
   return result.projectRepository
 }
 
+async function requireTagRepository(): Promise<TagRepository> {
+  const result = await opened
+  if (!('tagRepository' in result))
+    throw new Error('Tag persistence is unavailable.')
+  return result.tagRepository
+}
+
 window.__taskPersistenceHarness = {
   async capability() {
     return (await opened).capability
@@ -77,6 +97,12 @@ window.__taskPersistenceHarness = {
   async clearTaskProject(input) {
     return (await requireRepository()).clearTaskProject(input)
   },
+  async addTaskTag(input) {
+    return (await requireRepository()).addTaskTag(input)
+  },
+  async removeTaskTag(input) {
+    return (await requireRepository()).removeTaskTag(input)
+  },
   async createProject(input) {
     return (await requireProjectRepository()).createProject(input)
   },
@@ -85,6 +111,15 @@ window.__taskPersistenceHarness = {
   },
   async renameProject(input) {
     return (await requireProjectRepository()).renameProject(input)
+  },
+  async createTag(input) {
+    return (await requireTagRepository()).createTag(input)
+  },
+  async listTags() {
+    return (await requireTagRepository()).listTags()
+  },
+  async renameTag(input) {
+    return (await requireTagRepository()).renameTag(input)
   },
   async shutdown() {
     const result = await opened

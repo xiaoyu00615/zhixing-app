@@ -25,6 +25,8 @@ import type {
   CreateProjectInput,
   RenameProjectInput,
 } from '@/project/repository'
+import { isNonEmptyTagName, type Tag } from '@/tag/model'
+import type { CreateTagInput, RenameTagInput } from '@/tag/repository'
 import {
   runWebMigrations,
   SqliteWebMigrationStore,
@@ -43,6 +45,7 @@ export class TaskDatabaseError extends Error {
 const TASK_COLUMNS = `id, title, status, created_at_ms, updated_at_ms,
                       is_important, is_urgent, due_date, project_id`
 const PROJECT_COLUMNS = 'id, name, created_at_ms, updated_at_ms'
+const TAG_COLUMNS = 'id, name, created_at_ms, updated_at_ms'
 
 function parseTaskRow(row: Record<string, unknown> | undefined): Task | null {
   if (row === undefined) {
@@ -84,6 +87,7 @@ function parseTaskRow(row: Record<string, unknown> | undefined): Task | null {
     isUrgent: isUrgent === 1,
     dueDate,
     projectId,
+    tagIds: [],
   }
 }
 
@@ -100,7 +104,11 @@ function validateCreateInput(input: CreateTaskInput): void {
       !isValidLocalDate(input.dueDate)) ||
     (input.projectId !== undefined &&
       input.projectId !== null &&
-      !isCanonicalLowercaseUuid(input.projectId))
+      !isCanonicalLowercaseUuid(input.projectId)) ||
+    (input.tagIds !== undefined &&
+      (!Array.isArray(input.tagIds) ||
+        input.tagIds.some((tagId) => !isCanonicalLowercaseUuid(tagId)) ||
+        new Set(input.tagIds).size !== input.tagIds.length))
   ) {
     throw new TaskDatabaseError('PERSISTENCE_FAILED')
   }
@@ -164,6 +172,9 @@ export class WebTaskDatabase {
         if (input.projectId !== undefined && input.projectId !== null) {
           this.requireProject(input.projectId)
         }
+        for (const tagId of input.tagIds ?? []) {
+          this.requireTag(tagId)
+        }
         this.#database.exec({
           sql: `INSERT INTO tasks
                 (id, title, status, created_at_ms, updated_at_ms,
@@ -180,6 +191,12 @@ export class WebTaskDatabase {
             input.projectId ?? null,
           ],
         })
+        for (const tagId of input.tagIds ?? []) {
+          this.#database.exec({
+            sql: 'INSERT INTO task_tags(task_id, tag_id) VALUES (?, ?)',
+            bind: [input.id, tagId],
+          })
+        }
         return this.requireTask(input.id)
       })
     } catch (error: unknown) {
@@ -202,7 +219,7 @@ export class WebTaskDatabase {
           if (task === null) {
             throw new TaskDatabaseError('PERSISTENCE_FAILED')
           }
-          return task
+          return this.withTaskTags(task)
         })
     } catch (error: unknown) {
       if (error instanceof TaskDatabaseError) {
@@ -339,6 +356,60 @@ export class WebTaskDatabase {
     )
   }
 
+  addTaskTag(input: import('@/task/repository').AddTaskTagInput): Task {
+    validatePlanningBaseInput(input)
+    if (!isCanonicalLowercaseUuid(input.tagId)) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    try {
+      return this.#database.transaction(() => {
+        this.requireTask(input.id)
+        this.requireTag(input.tagId)
+        this.#database.exec({
+          sql: 'INSERT INTO task_tags(task_id, tag_id) VALUES (?, ?)',
+          bind: [input.id, input.tagId],
+        })
+        this.#database.exec({
+          sql: 'UPDATE tasks SET updated_at_ms = ? WHERE id = ?',
+          bind: [input.updatedAtMs, input.id],
+        })
+        return this.requireTask(input.id)
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  removeTaskTag(input: import('@/task/repository').RemoveTaskTagInput): Task {
+    validatePlanningBaseInput(input)
+    if (!isCanonicalLowercaseUuid(input.tagId)) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    try {
+      return this.#database.transaction(() => {
+        this.#database.exec({
+          sql: 'DELETE FROM task_tags WHERE task_id = ? AND tag_id = ?',
+          bind: [input.id, input.tagId],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+        this.#database.exec({
+          sql: 'UPDATE tasks SET updated_at_ms = ? WHERE id = ?',
+          bind: [input.updatedAtMs, input.id],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+        return this.requireTask(input.id)
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
   createProject(input: CreateProjectInput): Project {
     this.validateProjectInput(input.id, input.name, input.createdAtMs)
     try {
@@ -382,6 +453,50 @@ export class WebTaskDatabase {
     }
   }
 
+  createTag(input: CreateTagInput): Tag {
+    this.validateTagInput(input.id, input.name, input.createdAtMs)
+    try {
+      this.#database.exec({
+        sql: 'INSERT INTO tags(id, name, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?)',
+        bind: [input.id, input.name, input.createdAtMs, input.createdAtMs],
+      })
+      return this.requireTag(input.id)
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  listTags(): readonly Tag[] {
+    try {
+      return this.#database
+        .selectObjects(
+          `SELECT ${TAG_COLUMNS} FROM tags ORDER BY updated_at_ms DESC, id ASC`,
+        )
+        .map((row) => this.parseTagRow(row))
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  renameTag(input: RenameTagInput): Tag {
+    this.validateTagInput(input.id, input.name, input.updatedAtMs)
+    try {
+      this.#database.exec({
+        sql: 'UPDATE tags SET name = ?, updated_at_ms = ? WHERE id = ?',
+        bind: [input.name, input.updatedAtMs, input.id],
+      })
+      if (this.#database.changes() !== 1) {
+        throw new TaskDatabaseError('NOT_FOUND')
+      }
+      return this.requireTag(input.id)
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
   private updatePlanningField(
     id: string,
     column: 'is_important' | 'is_urgent' | 'due_date' | 'project_id',
@@ -418,7 +533,21 @@ export class WebTaskDatabase {
     if (task === null) {
       throw new TaskDatabaseError('NOT_FOUND')
     }
-    return task
+    return this.withTaskTags(task)
+  }
+
+  private withTaskTags(task: Task): Task {
+    const tagIds: string[] = []
+    for (const row of this.#database.selectObjects(
+      'SELECT tag_id FROM task_tags WHERE task_id = ? ORDER BY tag_id ASC',
+      [task.id],
+    )) {
+      if (!isCanonicalLowercaseUuid(row.tag_id) || tagIds.includes(row.tag_id)) {
+        throw new TaskDatabaseError('PERSISTENCE_FAILED')
+      }
+      tagIds.push(row.tag_id)
+    }
+    return { ...task, tagIds }
   }
 
   private parseProjectRow(row: Record<string, unknown> | undefined): Project {
@@ -449,6 +578,35 @@ export class WebTaskDatabase {
     )
   }
 
+  private parseTagRow(row: Record<string, unknown> | undefined): Tag {
+    if (row === undefined) throw new TaskDatabaseError('NOT_FOUND')
+    const {
+      id,
+      name,
+      created_at_ms: createdAtMs,
+      updated_at_ms: updatedAtMs,
+    } = row
+    if (
+      !isCanonicalLowercaseUuid(id) ||
+      !isNonEmptyTagName(name) ||
+      !isNonNegativeSafeIntegerMilliseconds(createdAtMs) ||
+      !isNonNegativeSafeIntegerMilliseconds(updatedAtMs) ||
+      updatedAtMs < createdAtMs
+    ) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    return { id, name, createdAtMs, updatedAtMs }
+  }
+
+  private requireTag(id: string): Tag {
+    return this.parseTagRow(
+      this.#database.selectObject(
+        `SELECT ${TAG_COLUMNS} FROM tags WHERE id = ?`,
+        [id],
+      ),
+    )
+  }
+
   private validateProjectInput(
     id: string,
     name: string,
@@ -462,6 +620,16 @@ export class WebTaskDatabase {
       throw new TaskDatabaseError('PERSISTENCE_FAILED')
   }
 
+  private validateTagInput(id: string, name: string, timestamp: number): void {
+    if (
+      !isCanonicalLowercaseUuid(id) ||
+      !isNonEmptyTagName(name) ||
+      !isNonNegativeSafeIntegerMilliseconds(timestamp)
+    ) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
   private assertSane(): void {
     const tasksTableCount = this.#database.selectValue(
       `SELECT COUNT(*) FROM sqlite_schema
@@ -472,9 +640,17 @@ export class WebTaskDatabase {
     const projectsTableCount = this.#database.selectValue(
       `SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'projects'`,
     )
+    const tagsTableCount = this.#database.selectValue(
+      `SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'tags'`,
+    )
+    const taskTagsTableCount = this.#database.selectValue(
+      `SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'task_tags'`,
+    )
     if (
       tasksTableCount !== 1 ||
       projectsTableCount !== 1 ||
+      tagsTableCount !== 1 ||
+      taskTagsTableCount !== 1 ||
       quickCheck !== 'ok' ||
       foreignKeys !== 1
     ) {

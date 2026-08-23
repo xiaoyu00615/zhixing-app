@@ -1,5 +1,5 @@
 import type { FormEvent } from 'react'
-import { CalendarDays, Star, Zap } from 'lucide-react'
+import { CalendarDays, Star, Tag as TagIcon, Zap } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -13,6 +13,7 @@ import {
 import { Input } from '@/components/ui/input'
 import type { LocalDate, Task } from '@/task/model'
 import type { Project } from '@/project/model'
+import type { Tag } from '@/tag/model'
 
 interface CreateTaskDialogProps {
   readonly open: boolean
@@ -24,6 +25,8 @@ interface CreateTaskDialogProps {
   readonly dueDate: LocalDate | null
   readonly projectId: string | null
   readonly projects: readonly Project[]
+  readonly tags: readonly Tag[]
+  readonly tagIds: readonly string[]
   readonly pending: boolean
   readonly onOpenChange: (open: boolean) => void
   readonly onTitleChange: (title: string) => void
@@ -31,6 +34,7 @@ interface CreateTaskDialogProps {
   readonly onUrgencyChange: (isUrgent: boolean) => void
   readonly onDueDateChange: (dueDate: LocalDate | null) => void
   readonly onProjectChange: (projectId: string | null) => void
+  readonly onTagIdsChange: (tagIds: readonly string[]) => void
   readonly onSubmit: () => void
 }
 
@@ -44,6 +48,8 @@ export function CreateTaskDialog({
   dueDate,
   projectId,
   projects,
+  tags,
+  tagIds,
   pending,
   onOpenChange,
   onTitleChange,
@@ -51,6 +57,7 @@ export function CreateTaskDialog({
   onUrgencyChange,
   onDueDateChange,
   onProjectChange,
+  onTagIdsChange,
   onSubmit,
 }: CreateTaskDialogProps) {
   function submit(event: FormEvent<HTMLFormElement>): void {
@@ -218,6 +225,51 @@ export function CreateTaskDialog({
                 ))}
               </select>
             </div>
+            <fieldset className="space-y-2">
+              <legend className="flex items-center gap-2 text-body font-medium">
+                <TagIcon className="size-4 text-foreground-secondary" aria-hidden="true" />
+                标签
+                <span className="text-caption font-normal text-foreground-tertiary">
+                  可多选
+                </span>
+              </legend>
+              {tags.length === 0 ? (
+                <p className="rounded-sm bg-surface-secondary/55 px-3 py-2 text-auxiliary text-foreground-tertiary">
+                  暂无标签，可在任务页新建后再选择。
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {tags.map((tag) => {
+                    const selected = tagIds.includes(tag.id)
+                    return (
+                      <label
+                        className={`inline-flex cursor-pointer items-center gap-2 rounded-full border px-3 py-1.5 text-auxiliary font-medium transition-colors ${
+                          selected
+                            ? 'border-info/25 bg-info-soft text-info'
+                            : 'border-border bg-surface text-foreground-secondary hover:bg-hover'
+                        }`}
+                        key={tag.id}
+                      >
+                        <input
+                          checked={selected}
+                          className="size-3.5 accent-primary"
+                          disabled={pending}
+                          onChange={() =>
+                            onTagIdsChange(
+                              selected
+                                ? tagIds.filter((tagId) => tagId !== tag.id)
+                                : [...tagIds, tag.id],
+                            )
+                          }
+                          type="checkbox"
+                        />
+                        {tag.name}
+                      </label>
+                    )
+                  })}
+                </div>
+              )}
+            </fieldset>
           </div>
           <DialogFooter className="-mx-6 -mb-6 px-6 py-4">
             <Button

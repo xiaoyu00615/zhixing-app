@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react'
 import { TaskList, type TaskStatusAction } from '@/components/tasks/TaskList'
 import { Button } from '@/components/ui/button'
 import type { Project } from '@/project/model'
+import type { Tag } from '@/tag/model'
 import {
   buildTaskCalendarMonth,
   isTaskOverdue,
@@ -18,6 +19,7 @@ import {
 interface TaskCalendarViewProps {
   readonly tasks: readonly Task[]
   readonly projects: readonly Project[]
+  readonly tags: readonly Tag[]
   readonly today: LocalDate
   readonly pendingTaskIds: ReadonlySet<string>
   readonly onCreate: () => void
@@ -69,6 +71,7 @@ function CalendarCell({
   onSelect,
   onOpenDetail,
   projects,
+  tags,
 }: {
   readonly day: TaskCalendarDay
   readonly selectedDate: LocalDate
@@ -76,11 +79,13 @@ function CalendarCell({
   readonly onSelect: (day: TaskCalendarDay) => void
   readonly onOpenDetail: (task: Task) => void
   readonly projects: readonly Project[]
+  readonly tags: readonly Tag[]
 }) {
   const selected = day.date === selectedDate
   const isToday = day.date === today
   const shownTasks = day.tasks.slice(0, 3)
   const projectsById = new Map(projects.map((project) => [project.id, project]))
+  const tagsById = new Map(tags.map((tag) => [tag.id, tag]))
 
   return (
     <div
@@ -118,10 +123,19 @@ function CalendarCell({
             title={task.title}
             type="button"
           >
-            {task.projectId !== null && projectsById.has(task.projectId)
-              ? `${projectsById.get(task.projectId)!.name} · `
-              : ''}
-            {task.title}
+            <span className="flex min-w-0 items-center gap-1">
+              {task.tagIds[0] !== undefined && tagsById.has(task.tagIds[0]) && (
+                <span className="max-w-16 shrink-0 truncate rounded-full bg-info-soft px-1.5 text-[9px] text-info">
+                  {tagsById.get(task.tagIds[0])!.name}
+                </span>
+              )}
+              <span className="truncate">
+                {task.projectId !== null && projectsById.has(task.projectId)
+                  ? `${projectsById.get(task.projectId)!.name} · `
+                  : ''}
+                {task.title}
+              </span>
+            </span>
           </button>
         ))}
         {day.tasks.length > shownTasks.length && (
@@ -142,6 +156,7 @@ function CalendarCell({
 export function TaskCalendarView({
   tasks,
   projects,
+  tags,
   today,
   pendingTaskIds,
   onCreate,
@@ -253,6 +268,7 @@ export function TaskCalendarView({
                     key={day.date}
                     onOpenDetail={onOpenDetail}
                     projects={projects}
+                    tags={tags}
                     onSelect={selectDay}
                     selectedDate={selectedDate}
                     today={today}
@@ -306,6 +322,7 @@ export function TaskCalendarView({
             <div className="mt-4 max-h-[600px] overflow-y-auto">
               <TaskList
                 projects={projects}
+                tags={tags}
                 onClearDeadline={onClearDeadline}
                 onOpenDetail={onOpenDetail}
                 onRename={onRename}

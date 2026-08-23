@@ -11,9 +11,11 @@ import {
   TASK_REPOSITORY_ERROR_CODES,
   TaskRepositoryError,
   type ChangeTaskStatusInput,
+  type AddTaskTagInput,
   type ClearTaskDeadlineInput,
   type CreateTaskInput,
   type RenameTaskInput,
+  type RemoveTaskTagInput,
   type SetTaskDeadlineInput,
   type SetTaskImportanceInput,
   type SetTaskUrgencyInput,
@@ -71,6 +73,10 @@ export class TaskContractBackendError extends Error {
 
 export class TaskRepositoryContractBackend {
   readonly #tasks = new Map<string, Task>()
+  readonly #tags = new Set([
+    '00000000-0000-4000-8000-000000000101',
+    '00000000-0000-4000-8000-000000000102',
+  ])
   #nextFailure: TaskContractBackendError | null = null
 
   failNext(code: TaskRepositoryErrorCode, rawDetails: string): void {
@@ -85,6 +91,9 @@ export class TaskRepositoryContractBackend {
         'UNIQUE constraint failed: tasks.id SQL=INSERT INTO tasks',
       )
     }
+    if (input.tagIds?.some((tagId) => !this.#tags.has(tagId))) {
+      throw new TaskContractBackendError('NOT_FOUND', 'missing tag')
+    }
     const task: Task = {
       id: input.id,
       title: input.title,
@@ -95,6 +104,7 @@ export class TaskRepositoryContractBackend {
       isUrgent: input.isUrgent ?? false,
       dueDate: input.dueDate ?? null,
       projectId: input.projectId ?? null,
+      tagIds: input.tagIds ?? [],
     }
     this.#tasks.set(task.id, task)
     return { ...task }
@@ -190,6 +200,39 @@ export class TaskRepositoryContractBackend {
     input: import('@/task/repository').ClearTaskProjectInput,
   ): Task {
     return this.updatePlanning(input.id, input.updatedAtMs, { projectId: null })
+  }
+
+  addTaskTag(input: AddTaskTagInput): Task {
+    this.consumeFailure()
+    const task = this.#tasks.get(input.id)
+    if (task === undefined || !this.#tags.has(input.tagId)) {
+      throw new TaskContractBackendError('NOT_FOUND', 'missing task or tag')
+    }
+    if (task.tagIds.includes(input.tagId)) {
+      throw new TaskContractBackendError('PERSISTENCE_FAILED', 'duplicate link')
+    }
+    const changed = {
+      ...task,
+      tagIds: [...task.tagIds, input.tagId].sort(),
+      updatedAtMs: input.updatedAtMs,
+    }
+    this.#tasks.set(input.id, changed)
+    return { ...changed }
+  }
+
+  removeTaskTag(input: RemoveTaskTagInput): Task {
+    this.consumeFailure()
+    const task = this.#tasks.get(input.id)
+    if (task === undefined || !task.tagIds.includes(input.tagId)) {
+      throw new TaskContractBackendError('NOT_FOUND', 'missing task tag')
+    }
+    const changed = {
+      ...task,
+      tagIds: task.tagIds.filter((tagId) => tagId !== input.tagId),
+      updatedAtMs: input.updatedAtMs,
+    }
+    this.#tasks.set(input.id, changed)
+    return { ...changed }
   }
 
   private updatePlanning(
@@ -293,6 +336,7 @@ export function defineTaskRepositoryContract(
         isUrgent: false,
         dueDate: null,
         projectId: null,
+        tagIds: [],
       })
       await expectSafeError(
         repository.createTask({
@@ -432,6 +476,40 @@ export function defineTaskRepositoryContract(
         updatedAtMs: 300,
       })
       expect(cleared).toMatchObject({ projectId: null, updatedAtMs: 300 })
+    })
+
+    test('creates with tags atomically and supports add and remove tag', async () => {
+      const { repository } = createFixture()
+      const tagA = '00000000-0000-4000-8000-000000000101'
+      const tagB = '00000000-0000-4000-8000-000000000102'
+      const created = await repository.createTask({
+        id: TASK_CONTRACT_IDS.a,
+        title: 'Tagged task',
+        createdAtMs: 100,
+        tagIds: [tagB],
+      })
+      expect(created.tagIds).toEqual([tagB])
+      const added = await repository.addTaskTag({
+        id: created.id,
+        tagId: tagA,
+        updatedAtMs: 200,
+      })
+      expect(added).toMatchObject({ tagIds: [tagA, tagB], updatedAtMs: 200 })
+      const removed = await repository.removeTaskTag({
+        id: created.id,
+        tagId: tagB,
+        updatedAtMs: 300,
+      })
+      expect(removed).toMatchObject({ tagIds: [tagA], updatedAtMs: 300 })
+      await expectSafeError(
+        repository.addTaskTag({
+          id: created.id,
+          tagId: tagA,
+          updatedAtMs: 400,
+        }),
+        'PERSISTENCE_FAILED',
+        'addTaskTag',
+      )
     })
 
     test('maps missing planning operations to NOT_FOUND', async () => {

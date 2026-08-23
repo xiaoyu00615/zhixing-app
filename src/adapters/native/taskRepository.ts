@@ -45,6 +45,7 @@ function parseTaskDto(
     isUrgent,
     dueDate,
     projectId,
+    tagIds,
   } = value
   if (
     !isCanonicalLowercaseUuid(id) ||
@@ -56,7 +57,10 @@ function parseTaskDto(
     typeof isImportant !== 'boolean' ||
     typeof isUrgent !== 'boolean' ||
     (dueDate !== null && !isValidLocalDate(dueDate)) ||
-    (projectId !== null && !isCanonicalLowercaseUuid(projectId))
+    (projectId !== null && !isCanonicalLowercaseUuid(projectId)) ||
+    !Array.isArray(tagIds) ||
+    tagIds.some((tagId) => !isCanonicalLowercaseUuid(tagId)) ||
+    new Set(tagIds).size !== tagIds.length
   ) {
     throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
   }
@@ -71,6 +75,7 @@ function parseTaskDto(
     isUrgent,
     dueDate,
     projectId,
+    tagIds,
   }
 }
 
@@ -139,7 +144,11 @@ export class NativeTaskRepository implements TaskRepository {
         !isValidLocalDate(input.dueDate)) ||
       (input.projectId !== undefined &&
         input.projectId !== null &&
-        !isCanonicalLowercaseUuid(input.projectId))
+        !isCanonicalLowercaseUuid(input.projectId)) ||
+      (input.tagIds !== undefined &&
+        (!Array.isArray(input.tagIds) ||
+          input.tagIds.some((tagId) => !isCanonicalLowercaseUuid(tagId)) ||
+          new Set(input.tagIds).size !== input.tagIds.length))
     ) {
       throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
     }
@@ -151,6 +160,7 @@ export class NativeTaskRepository implements TaskRepository {
         isUrgent: input.isUrgent ?? false,
         dueDate: input.dueDate ?? null,
         projectId: input.projectId ?? null,
+        tagIds: input.tagIds ?? [],
       },
     })
     return parseTaskDto(dto, operation)
@@ -247,6 +257,28 @@ export class NativeTaskRepository implements TaskRepository {
     )
   }
 
+  async addTaskTag(
+    input: import('@/task/repository').AddTaskTagInput,
+  ): Promise<Task> {
+    return this.invokePlanning(
+      'addTaskTag',
+      'task_add_tag',
+      input,
+      isCanonicalLowercaseUuid(input.tagId),
+    )
+  }
+
+  async removeTaskTag(
+    input: import('@/task/repository').RemoveTaskTagInput,
+  ): Promise<Task> {
+    return this.invokePlanning(
+      'removeTaskTag',
+      'task_remove_tag',
+      input,
+      isCanonicalLowercaseUuid(input.tagId),
+    )
+  }
+
   private async invokePlanning(
     operation: Extract<
       TaskRepositoryOperation,
@@ -256,6 +288,8 @@ export class NativeTaskRepository implements TaskRepository {
       | 'clearTaskDeadline'
       | 'setTaskProject'
       | 'clearTaskProject'
+      | 'addTaskTag'
+      | 'removeTaskTag'
     >,
     command: string,
     input: { readonly id: string; readonly updatedAtMs: number },

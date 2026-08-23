@@ -19,7 +19,14 @@ export type TaskApplicationErrorCode =
   (typeof TASK_APPLICATION_ERROR_CODES)[number]
 
 export type TaskApplicationErrorField =
-  'id' | 'title' | 'dueDate' | 'importance' | 'urgency' | 'projectId'
+  | 'id'
+  | 'title'
+  | 'dueDate'
+  | 'importance'
+  | 'urgency'
+  | 'projectId'
+  | 'tagId'
+  | 'tagIds'
 
 const SAFE_ERROR_MESSAGES: Record<TaskApplicationErrorCode, string> = {
   VALIDATION: 'Task input is invalid.',
@@ -79,6 +86,24 @@ function readProjectId(projectId: unknown): string {
     throw new TaskApplicationError('VALIDATION', 'projectId')
   }
   return projectId
+}
+
+function readTagId(tagId: unknown): string {
+  if (!isCanonicalLowercaseUuid(tagId)) {
+    throw new TaskApplicationError('VALIDATION', 'tagId')
+  }
+  return tagId
+}
+
+function readTagIds(tagIds: unknown): readonly string[] {
+  if (!Array.isArray(tagIds)) {
+    throw new TaskApplicationError('VALIDATION', 'tagIds')
+  }
+  const normalized = tagIds.map(readTagId)
+  if (new Set(normalized).size !== normalized.length) {
+    throw new TaskApplicationError('VALIDATION', 'tagIds')
+  }
+  return normalized
 }
 
 function readBoolean(value: unknown, field: 'importance' | 'urgency'): boolean {
@@ -172,6 +197,7 @@ export function createTaskService({
       readonly isUrgent?: boolean
       readonly dueDate?: LocalDate | null
       readonly projectId?: string | null
+      readonly tagIds?: readonly string[]
     }): Promise<Task> {
       const title = normalizeTitle(input.title)
       const isImportant =
@@ -190,6 +216,7 @@ export function createTaskService({
         input.projectId === undefined || input.projectId === null
           ? null
           : readProjectId(input.projectId)
+      const tagIds = input.tagIds === undefined ? [] : readTagIds(input.tagIds)
       const id = readGeneratedTaskId(generateTaskId)
       const createdAtMs = readNowMs(nowMs)
       return callRepository(() =>
@@ -201,6 +228,7 @@ export function createTaskService({
           isUrgent,
           dueDate,
           projectId,
+          tagIds,
         }),
       )
     },
@@ -294,6 +322,24 @@ export function createTaskService({
       const updatedAtMs = readNowMs(nowMs)
       return callRepository(() =>
         repository.clearTaskProject({ id, updatedAtMs }),
+      )
+    },
+
+    async addTaskTag(id: string, tagId: string): Promise<Task> {
+      validateTaskId(id)
+      const normalizedTagId = readTagId(tagId)
+      const updatedAtMs = readNowMs(nowMs)
+      return callRepository(() =>
+        repository.addTaskTag({ id, tagId: normalizedTagId, updatedAtMs }),
+      )
+    },
+
+    async removeTaskTag(id: string, tagId: string): Promise<Task> {
+      validateTaskId(id)
+      const normalizedTagId = readTagId(tagId)
+      const updatedAtMs = readNowMs(nowMs)
+      return callRepository(() =>
+        repository.removeTaskTag({ id, tagId: normalizedTagId, updatedAtMs }),
       )
     },
   }

@@ -7,6 +7,7 @@ import {
   Pencil,
   Plus,
   RotateCcw,
+  Tags,
   X,
 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -21,6 +22,7 @@ import { TaskDateView } from '@/components/tasks/TaskDateView'
 import { TaskList, type TaskStatusAction } from '@/components/tasks/TaskList'
 import { TaskQuadrantView } from '@/components/tasks/TaskQuadrantView'
 import { ProjectDialog } from '@/components/tasks/ProjectDialogs'
+import { TagDialog } from '@/components/tasks/TagDialogs'
 import { Button } from '@/components/ui/button'
 import { localDateFromDate, type LocalDate, type Task } from '@/task/model'
 import { openTaskRuntime } from '@/task/runtime'
@@ -28,6 +30,8 @@ import type { OpenTaskRuntime } from '@/task/runtime.types'
 import { TaskApplicationError, type TaskService } from '@/task/service'
 import type { Project } from '@/project/model'
 import { ProjectApplicationError, type ProjectService } from '@/project/service'
+import type { Tag } from '@/tag/model'
+import { TagApplicationError, type TagService } from '@/tag/service'
 
 interface TasksPageProps {
   readonly openRuntime?: OpenTaskRuntime
@@ -87,9 +91,12 @@ export function TasksPage({
   const [projectService, setProjectService] = useState<ProjectService | null>(
     null,
   )
+  const [tagService, setTagService] = useState<TagService | null>(null)
   const [tasks, setTasks] = useState<readonly Task[]>([])
   const [projects, setProjects] = useState<readonly Project[]>([])
+  const [tags, setTags] = useState<readonly Tag[]>([])
   const [projectFilter, setProjectFilter] = useState<string>('all')
+  const [tagFilter, setTagFilter] = useState<string>('all')
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null)
   const [view, setView] = useState<'list' | 'quadrant' | 'date' | 'calendar'>(
     'list',
@@ -105,6 +112,7 @@ export function TasksPage({
   const [createIsUrgent, setCreateIsUrgent] = useState(false)
   const [createDueDate, setCreateDueDate] = useState<LocalDate | null>(null)
   const [createProjectId, setCreateProjectId] = useState<string | null>(null)
+  const [createTagIds, setCreateTagIds] = useState<readonly string[]>([])
   const [isCreating, setIsCreating] = useState(false)
   const [renameState, setRenameState] = useState<RenameState | null>(null)
   const [pendingTaskIds, setPendingTaskIds] = useState<ReadonlySet<string>>(
@@ -117,6 +125,13 @@ export function TasksPage({
     error: string | null
   } | null>(null)
   const [projectPending, setProjectPending] = useState(false)
+  const [tagDialog, setTagDialog] = useState<{
+    mode: 'create' | 'rename'
+    tagId: string | null
+    name: string
+    error: string | null
+  } | null>(null)
+  const [tagPending, setTagPending] = useState(false)
 
   useEffect(() => {
     mountedRef.current = true
@@ -149,9 +164,10 @@ export function TasksPage({
           await disposeRuntime()
           return
         }
-        const [loadedTasks, loadedProjects] = await Promise.all([
+        const [loadedTasks, loadedProjects, loadedTags] = await Promise.all([
           runtime.service.listTasks(),
           runtime.projectService.listProjects(),
+          runtime.tagService.listTags(),
         ])
         if (!active) {
           await disposeRuntime()
@@ -159,8 +175,10 @@ export function TasksPage({
         }
         setService(runtime.service)
         setProjectService(runtime.projectService)
+        setTagService(runtime.tagService)
         setTasks(loadedTasks)
         setProjects(loadedProjects)
+        setTags(loadedTags)
         setPhase('ready')
       } catch {
         await disposeRuntime()
@@ -186,6 +204,11 @@ export function TasksPage({
   const reloadProjects = useCallback(async (currentService: ProjectService) => {
     const loadedProjects = await currentService.listProjects()
     if (mountedRef.current) setProjects(loadedProjects)
+  }, [])
+
+  const reloadTags = useCallback(async (currentService: TagService) => {
+    const loadedTags = await currentService.listTags()
+    if (mountedRef.current) setTags(loadedTags)
   }, [])
 
   const handleOperationError = useCallback(
@@ -231,6 +254,7 @@ export function TasksPage({
     setCreateIsUrgent(false)
     setCreateDueDate(null)
     setCreateProjectId(null)
+    setCreateTagIds([])
     setCreateOpen(true)
   }
 
@@ -238,8 +262,10 @@ export function TasksPage({
     setPhase('loading')
     setService(null)
     setProjectService(null)
+    setTagService(null)
     setTasks([])
     setProjects([])
+    setTags([])
     setFeedback(null)
     setLoadAttempt((attempt) => attempt + 1)
   }
@@ -259,6 +285,7 @@ export function TasksPage({
         isUrgent: createIsUrgent,
         dueDate: createDueDate,
         projectId: createProjectId,
+        tagIds: createTagIds,
       })
       if (!mountedRef.current) {
         return
@@ -269,6 +296,7 @@ export function TasksPage({
       setCreateIsUrgent(false)
       setCreateDueDate(null)
       setCreateProjectId(null)
+      setCreateTagIds([])
       try {
         await reloadTasks(service)
       } catch {
@@ -453,11 +481,46 @@ export function TasksPage({
     }
   }
 
-  const visibleTasks = tasks.filter((task) => {
-    if (projectFilter === 'all') return true
-    if (projectFilter === 'none') return task.projectId === null
-    return task.projectId === projectFilter
-  })
+  async function submitTag(): Promise<void> {
+    if (tagService === null || tagDialog === null || tagPending) return
+    setTagPending(true)
+    setTagDialog({ ...tagDialog, error: null })
+    try {
+      if (tagDialog.mode === 'create') {
+        await tagService.createTag(tagDialog.name)
+      } else if (tagDialog.tagId !== null) {
+        await tagService.renameTag(tagDialog.tagId, tagDialog.name)
+      }
+      if (!mountedRef.current) return
+      setTagDialog(null)
+      await reloadTags(tagService)
+    } catch (error: unknown) {
+      if (!mountedRef.current) return
+      if (
+        error instanceof TagApplicationError &&
+        error.code === 'VALIDATION' &&
+        error.field === 'name'
+      ) {
+        setTagDialog({ ...tagDialog, error: '请输入标签名称。' })
+      } else {
+        setFeedback('标签操作暂时无法完成，请检查是否存在同名标签。')
+      }
+    } finally {
+      if (mountedRef.current) setTagPending(false)
+    }
+  }
+
+  const visibleTasks = tasks
+    .filter((task) => {
+      if (projectFilter === 'all') return true
+      if (projectFilter === 'none') return task.projectId === null
+      return task.projectId === projectFilter
+    })
+    .filter((task) => {
+      if (tagFilter === 'all') return true
+      if (tagFilter === 'none') return task.tagIds.length === 0
+      return task.tagIds.includes(tagFilter)
+    })
 
   const detailTask =
     detailTaskId === null
@@ -549,7 +612,7 @@ export function TasksPage({
 
           <div className="flex items-center gap-3 pb-2.5">
             <span className="text-auxiliary text-foreground-secondary">
-              {projectFilter === 'all'
+              {projectFilter === 'all' && tagFilter === 'all'
                 ? `${tasks.length} 项任务`
                 : `${visibleTasks.length} / ${tasks.length} 项任务`}
             </span>
@@ -636,6 +699,79 @@ export function TasksPage({
         </div>
       )}
 
+      {phase === 'ready' && (
+        <div
+          className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-surface px-3 py-2.5"
+          aria-label="标签筛选"
+        >
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <span className="mr-1 inline-flex items-center gap-1.5 px-1 text-auxiliary font-medium text-foreground-tertiary">
+              <Tags className="size-4" aria-hidden="true" />
+              标签
+            </span>
+            {[
+              { id: 'all', name: '全部' },
+              { id: 'none', name: '无标签' },
+              ...tags,
+            ].map((tag) => (
+              <Button
+                key={tag.id}
+                aria-pressed={tagFilter === tag.id}
+                className={
+                  tagFilter === tag.id
+                    ? 'bg-info-soft text-info hover:bg-info-soft'
+                    : undefined
+                }
+                size="sm"
+                type="button"
+                variant="ghost"
+                onClick={() => setTagFilter(tag.id)}
+              >
+                {tag.name}
+              </Button>
+            ))}
+          </div>
+          <div className="flex items-center gap-1">
+            {tags.map((tag) => (
+              <Button
+                key={tag.id}
+                aria-label={`重命名标签：${tag.name}`}
+                size="icon-sm"
+                title={`重命名 ${tag.name}`}
+                type="button"
+                variant="ghost"
+                onClick={() =>
+                  setTagDialog({
+                    mode: 'rename',
+                    tagId: tag.id,
+                    name: tag.name,
+                    error: null,
+                  })
+                }
+              >
+                <Pencil aria-hidden="true" />
+              </Button>
+            ))}
+            <Button
+              size="sm"
+              type="button"
+              variant="outline"
+              onClick={() =>
+                setTagDialog({
+                  mode: 'create',
+                  tagId: null,
+                  name: '',
+                  error: null,
+                })
+              }
+            >
+              <Plus data-icon="inline-start" />
+              新建标签
+            </Button>
+          </div>
+        </div>
+      )}
+
       {feedback !== null && (
         <div
           className="rounded-sm border border-warning/20 bg-warning-soft px-4 py-3 text-body text-foreground"
@@ -679,6 +815,7 @@ export function TasksPage({
           ) : (
             <TaskList
               projects={projects}
+              tags={tags}
               onClearDeadline={(task) =>
                 void runPlanningAction(task, (currentService) =>
                   currentService.clearTaskDeadline(task.id),
@@ -720,6 +857,7 @@ export function TasksPage({
         >
           <TaskQuadrantView
             projects={projects}
+            tags={tags}
             onClearDeadline={(task) =>
               void runPlanningAction(task, (currentService) =>
                 currentService.clearTaskDeadline(task.id),
@@ -760,6 +898,7 @@ export function TasksPage({
         >
           <TaskDateView
             projects={projects}
+            tags={tags}
             onClearDeadline={(task) =>
               void runPlanningAction(task, (currentService) =>
                 currentService.clearTaskDeadline(task.id),
@@ -801,6 +940,7 @@ export function TasksPage({
         >
           <TaskCalendarView
             projects={projects}
+            tags={tags}
             onClearDeadline={(task) =>
               void runPlanningAction(task, (currentService) =>
                 currentService.clearTaskDeadline(task.id),
@@ -836,6 +976,7 @@ export function TasksPage({
 
       <TaskDetailPanel
         projects={projects}
+        tags={tags}
         onClearDeadline={(task) =>
           void runPlanningAction(task, (currentService) =>
             currentService.clearTaskDeadline(task.id),
@@ -872,6 +1013,16 @@ export function TasksPage({
             currentService.clearTaskProject(task.id),
           )
         }
+        onAddTag={(task, tagId) =>
+          void runPlanningAction(task, (currentService) =>
+            currentService.addTaskTag(task.id, tagId),
+          )
+        }
+        onRemoveTag={(task, tagId) =>
+          void runPlanningAction(task, (currentService) =>
+            currentService.removeTaskTag(task.id, tagId),
+          )
+        }
         onStatusAction={(task, action) => void runStatusAction(task, action)}
         pending={detailTask !== null && pendingTaskIds.has(detailTask.id)}
         task={detailTask}
@@ -880,6 +1031,8 @@ export function TasksPage({
 
       <CreateTaskDialog
         projects={projects}
+        tags={tags}
+        tagIds={createTagIds}
         projectId={createProjectId}
         dueDate={createDueDate}
         dueDateError={createDueDateError}
@@ -900,6 +1053,7 @@ export function TasksPage({
         }}
         onUrgencyChange={setCreateIsUrgent}
         onProjectChange={setCreateProjectId}
+        onTagIdsChange={setCreateTagIds}
         pending={isCreating}
         title={createTitle}
       />
@@ -934,6 +1088,22 @@ export function TasksPage({
             setProjectDialog({ ...projectDialog, name, error: null })
         }}
         onSubmit={() => void submitProject()}
+      />
+
+      <TagDialog
+        mode={tagDialog?.mode ?? 'create'}
+        open={tagDialog !== null}
+        name={tagDialog?.name ?? ''}
+        error={tagDialog?.error ?? null}
+        pending={tagPending}
+        onOpenChange={(open) => {
+          if (!open) setTagDialog(null)
+        }}
+        onNameChange={(name) => {
+          if (tagDialog !== null)
+            setTagDialog({ ...tagDialog, name, error: null })
+        }}
+        onSubmit={() => void submitTag()}
       />
     </section>
   )

@@ -32,6 +32,7 @@ mod db;
 mod diagnostics;
 mod project;
 mod storage;
+mod tag;
 mod task;
 
 use bootstrap::{BootstrapService, BootstrapState};
@@ -193,9 +194,14 @@ pub fn run() {
             commands::task_clear_deadline,
             commands::task_set_project,
             commands::task_clear_project,
+            commands::task_add_tag,
+            commands::task_remove_tag,
             commands::project_create,
             commands::project_list,
-            commands::project_rename
+            commands::project_rename,
+            commands::tag_create,
+            commands::tag_list,
+            commands::tag_rename
         ])
         .setup(|app| {
             // 🔒 冻结 §3：路径统一通过 PathResolver。
@@ -703,7 +709,7 @@ mod tests {
         assert!(data_root.join(MANIFEST_FILENAME).is_file());
         assert!(data_root.join("database/zhixing.db").is_file());
         assert!(data_root.join("backup").is_dir());
-        // DB 打开 → schema_migrations + the approved tasks table are present.
+        // DB 打开 → schema_migrations + approved business tables are present.
         let conn = db::policy::open_configured_connection(&data_root.join("database/zhixing.db")).unwrap();
         let cnt_meta: i64 = conn
             .query_row(
@@ -720,7 +726,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(rows, 3, "Production Migrations 1-3 必须写入 history");
+        assert_eq!(rows, 4, "Production Migrations 1-4 必须写入 history");
         let task_table: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
@@ -737,11 +743,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(project_table, 1, "Migration 3 必须创建 projects");
+        let tag_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tags'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tag_table, 1, "Migration 4 必须创建 tags");
+        let task_tags_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='task_tags'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(task_tags_table, 1, "Migration 4 必须创建 task_tags");
         // No unapproved business tables exist.
         let others: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master \
-                 WHERE type='table' AND name NOT IN ('schema_migrations', 'tasks', 'projects')",
+                 WHERE type='table' AND name NOT IN ('schema_migrations', 'tasks', 'projects', 'tags', 'task_tags')",
                 [],
                 |r| r.get(0),
             )
@@ -768,12 +790,12 @@ mod tests {
         let manifest_bytes_before =
             fs::read(data_root.join(MANIFEST_FILENAME)).unwrap();
 
-        // (2) Production already applied v1-v3; insert an unknown v4.
+        // (2) Production already applied v1-v4; insert an unknown v5.
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
             conn.execute_batch(
                 "INSERT INTO schema_migrations(version,id,checksum_sha256,applied_at_ms) \
-                 VALUES(4,'m4','sha4',101);",
+                 VALUES(5,'m5','sha5',101);",
             )
             .unwrap();
         }
@@ -806,10 +828,10 @@ mod tests {
         assert_eq!(device_id_1.as_str(), loaded2.device_id.as_str());
         assert!(db_path.exists(), "失败不得删 zhixing.db");
 
-        // (4) Remove only the injected v4 row; approved v1-v3 remain intact.
+        // (4) Remove only the injected v5 row; approved v1-v4 remain intact.
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
-            conn.execute_batch("DELETE FROM schema_migrations WHERE version = 4;")
+            conn.execute_batch("DELETE FROM schema_migrations WHERE version = 5;")
                 .unwrap();
         }
         let status = run_bootstrap_pipeline(&cfg, &local);

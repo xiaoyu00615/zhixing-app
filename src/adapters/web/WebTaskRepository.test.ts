@@ -41,6 +41,7 @@ const TASK = {
   isUrgent: false,
   dueDate: null,
   projectId: null,
+  tagIds: [],
 } as const
 
 class FakeWorker implements TaskWorkerEndpoint {
@@ -130,6 +131,12 @@ class ContractWorker implements TaskWorkerEndpoint {
           break
         case 'task.clearProject':
           result = this.backend.clearTaskProject(request.input)
+          break
+        case 'task.addTag':
+          result = this.backend.addTaskTag(request.input)
+          break
+        case 'task.removeTag':
+          result = this.backend.removeTaskTag(request.input)
           break
         case 'shutdown':
           result = null
@@ -360,6 +367,17 @@ describe('WebTaskRepository', () => {
     expect(worker.messages.at(-1)).toMatchObject({ type: 'task.clearDeadline' })
     worker.respondToLast({ ...TASK, updatedAtMs: 700 })
     await expect(cleared).resolves.toMatchObject({ dueDate: null })
+
+    const tagId = '00000000-0000-4000-8000-000000000101'
+    const tagged = repository.addTaskTag({ id: ID, tagId, updatedAtMs: 800 })
+    expect(worker.messages.at(-1)).toMatchObject({ type: 'task.addTag' })
+    worker.respondToLast({ ...TASK, tagIds: [tagId], updatedAtMs: 800 })
+    await expect(tagged).resolves.toMatchObject({ tagIds: [tagId] })
+
+    const untagged = repository.removeTaskTag({ id: ID, tagId, updatedAtMs: 900 })
+    expect(worker.messages.at(-1)).toMatchObject({ type: 'task.removeTag' })
+    worker.respondToLast({ ...TASK, tagIds: [], updatedAtMs: 900 })
+    await expect(untagged).resolves.toMatchObject({ tagIds: [] })
   })
 
   test('preserves database list ordering', async () => {
@@ -495,10 +513,16 @@ describe('Web migrations', () => {
         checksumSha256: await sha256Hex(WEB_MIGRATIONS[2]?.sql ?? ''),
         appliedAtMs: 123,
       },
+      {
+        version: 4,
+        id: '0004_add_task_tags',
+        checksumSha256: await sha256Hex(WEB_MIGRATIONS[3]?.sql ?? ''),
+        appliedAtMs: 123,
+      },
     ])
   })
 
-  test('upgrades an exact v1 prefix and is idempotent after v3', async () => {
+  test('upgrades an exact v1 prefix and is idempotent after v4', async () => {
     const store = new FakeMigrationStore()
     await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 1), () => 123)
     expect(store.history.map((row) => row.version)).toEqual([1])
@@ -508,17 +532,32 @@ describe('Web migrations', () => {
     expect(store.executedSql).toEqual(
       WEB_MIGRATIONS.map((migration) => migration.sql),
     )
-    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3])
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4])
   })
 
-  test('upgrades an exact v2 prefix to Project migration 3', async () => {
+  test('upgrades an exact v2 prefix through Tag migration 4', async () => {
     const store = new FakeMigrationStore()
     await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 2), () => 123)
     expect(store.history.map((row) => row.version)).toEqual([1, 2])
     await runWebMigrations(store, WEB_MIGRATIONS, () => 456)
-    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3])
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4])
     expect(store.history[2]).toMatchObject({
       id: '0003_add_task_projects',
+      appliedAtMs: 456,
+    })
+    expect(store.history[3]).toMatchObject({
+      id: '0004_add_task_tags',
+      appliedAtMs: 456,
+    })
+  })
+
+  test('upgrades an exact v3 prefix to Tag migration 4', async () => {
+    const store = new FakeMigrationStore()
+    await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 3), () => 123)
+    await runWebMigrations(store, WEB_MIGRATIONS, () => 456)
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4])
+    expect(store.history[3]).toMatchObject({
+      id: '0004_add_task_tags',
       appliedAtMs: 456,
     })
   })

@@ -5,8 +5,10 @@ import {
   TaskRepositoryError,
   type ChangeTaskStatusInput,
   type ClearTaskDeadlineInput,
+  type AddTaskTagInput,
   type CreateTaskInput,
   type RenameTaskInput,
+  type RemoveTaskTagInput,
   type SetTaskDeadlineInput,
   type SetTaskImportanceInput,
   type SetTaskUrgencyInput,
@@ -32,6 +34,7 @@ const TASK: Task = {
   isUrgent: false,
   dueDate: null,
   projectId: null,
+  tagIds: [],
 }
 
 function createFakeRepository() {
@@ -105,6 +108,20 @@ function createFakeRepository() {
         updatedAtMs: input.updatedAtMs,
       }),
   )
+  const addTaskTag = vi.fn((input: AddTaskTagInput): Promise<Task> =>
+    Promise.resolve({
+      ...TASK,
+      tagIds: [...TASK.tagIds, input.tagId],
+      updatedAtMs: input.updatedAtMs,
+    }),
+  )
+  const removeTaskTag = vi.fn((input: RemoveTaskTagInput): Promise<Task> =>
+    Promise.resolve({
+      ...TASK,
+      tagIds: TASK.tagIds.filter((tagId) => tagId !== input.tagId),
+      updatedAtMs: input.updatedAtMs,
+    }),
+  )
   const repository: TaskRepository = {
     createTask,
     listTasks,
@@ -116,6 +133,8 @@ function createFakeRepository() {
     clearTaskDeadline,
     setTaskProject,
     clearTaskProject,
+    addTaskTag,
+    removeTaskTag,
   }
   return {
     repository,
@@ -129,6 +148,8 @@ function createFakeRepository() {
     clearTaskDeadline,
     setTaskProject,
     clearTaskProject,
+    addTaskTag,
+    removeTaskTag,
   }
 }
 
@@ -163,6 +184,8 @@ test('TaskService exposes only the approved business API and error codes', () =>
     'clearTaskDeadline',
     'setTaskProject',
     'clearTaskProject',
+    'addTaskTag',
+    'removeTaskTag',
   ])
   expect(TASK_APPLICATION_ERROR_CODES).toEqual([
     'VALIDATION',
@@ -196,6 +219,7 @@ describe('TaskService createTask', () => {
       isUrgent: false,
       dueDate: null,
       projectId: null,
+      tagIds: [],
     })
   })
 
@@ -213,6 +237,7 @@ describe('TaskService createTask', () => {
       isUrgent: true,
       dueDate: '2024-02-29',
       projectId: null,
+      tagIds: [],
     })
 
     expect(fake.createTask).toHaveBeenCalledOnce()
@@ -224,6 +249,7 @@ describe('TaskService createTask', () => {
       isUrgent: true,
       dueDate: '2024-02-29',
       projectId: null,
+      tagIds: [],
     })
   })
 
@@ -645,5 +671,53 @@ describe('TaskService project assignment', () => {
       'projectId',
     )
     expect(fake.setTaskProject).not.toHaveBeenCalled()
+  })
+})
+
+describe('TaskService tag assignment', () => {
+  const tagId = '00000000-0000-4000-8000-000000000101'
+
+  test('creates with tags in the single repository create call', async () => {
+    const fake = createFakeRepository()
+    const service = createTaskService({
+      repository: fake.repository,
+      generateTaskId: () => ID,
+      nowMs: () => 200,
+    })
+    await service.createTask({ title: ' Tagged task ', tagIds: [tagId] })
+    expect(fake.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ id: ID, title: 'Tagged task', tagIds: [tagId] }),
+    )
+    expect(fake.createTask).toHaveBeenCalledOnce()
+  })
+
+  test('adds and removes tags with service-owned timestamps', async () => {
+    const fake = createFakeRepository()
+    const service = createTaskService({ repository: fake.repository, nowMs: () => 300 })
+    await service.addTaskTag(ID, tagId)
+    expect(fake.addTaskTag).toHaveBeenCalledWith({ id: ID, tagId, updatedAtMs: 300 })
+    await service.removeTaskTag(ID, tagId)
+    expect(fake.removeTaskTag).toHaveBeenCalledWith({ id: ID, tagId, updatedAtMs: 300 })
+  })
+
+  test('rejects invalid and duplicate tag ids before persistence', async () => {
+    const fake = createFakeRepository()
+    const service = createTaskService({
+      repository: fake.repository,
+      generateTaskId: () => ID,
+      nowMs: () => 200,
+    })
+    await expectApplicationError(
+      service.addTaskTag(ID, 'INVALID'),
+      'VALIDATION',
+      'tagId',
+    )
+    await expectApplicationError(
+      service.createTask({ title: 'Task', tagIds: [tagId, tagId] }),
+      'VALIDATION',
+      'tagIds',
+    )
+    expect(fake.addTaskTag).not.toHaveBeenCalled()
+    expect(fake.createTask).not.toHaveBeenCalled()
   })
 })

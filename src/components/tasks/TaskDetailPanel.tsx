@@ -8,6 +8,7 @@ import {
   Pencil,
   RotateCcw,
   Star,
+  Tags,
   Zap,
   X,
 } from 'lucide-react'
@@ -24,6 +25,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import type { Project } from '@/project/model'
+import type { Tag } from '@/tag/model'
 import {
   isTaskEffectivelyUrgent,
   isTaskOverdue,
@@ -35,6 +37,7 @@ import {
 interface TaskDetailPanelProps {
   readonly task: Task | null
   readonly projects: readonly Project[]
+  readonly tags: readonly Tag[]
   readonly today: LocalDate
   readonly pending: boolean
   readonly onOpenChange: (open: boolean) => void
@@ -46,6 +49,8 @@ interface TaskDetailPanelProps {
   readonly onClearDeadline: (task: Task) => void
   readonly onSetProject: (task: Task, projectId: string) => void
   readonly onClearProject: (task: Task) => void
+  readonly onAddTag: (task: Task, tagId: string) => void
+  readonly onRemoveTag: (task: Task, tagId: string) => void
 }
 
 const STATUS_PRESENTATION: Record<
@@ -104,6 +109,7 @@ function DetailRow({
 export function TaskDetailPanel({
   task,
   projects,
+  tags,
   today,
   pending,
   onOpenChange,
@@ -115,6 +121,8 @@ export function TaskDetailPanel({
   onClearDeadline,
   onSetProject,
   onClearProject,
+  onAddTag,
+  onRemoveTag,
 }: TaskDetailPanelProps) {
   if (task === null) {
     return null
@@ -276,6 +284,48 @@ export function TaskDetailPanel({
                         </option>
                       ))}
                     </select>
+                  </div>
+                </DetailRow>
+                <DetailRow label="标签">
+                  <div className="flex min-w-0 items-start gap-2">
+                    <Tags
+                      className="mt-2 size-4 shrink-0 text-foreground-tertiary"
+                      aria-hidden="true"
+                    />
+                    {tags.length === 0 ? (
+                      <span className="py-2 text-auxiliary text-foreground-tertiary">
+                        暂无可用标签
+                      </span>
+                    ) : (
+                      <div className="flex flex-wrap gap-1.5">
+                        {tags.map((tag) => {
+                          const selected = task.tagIds.includes(tag.id)
+                          return (
+                            <Button
+                              aria-label={`${selected ? '移除' : '添加'}标签：${tag.name}`}
+                              aria-pressed={selected}
+                              className={
+                                selected
+                                  ? 'border-info/20 bg-info-soft text-info hover:bg-info-soft/75'
+                                  : undefined
+                              }
+                              disabled={pending}
+                              key={tag.id}
+                              onClick={() =>
+                                selected
+                                  ? onRemoveTag(task, tag.id)
+                                  : onAddTag(task, tag.id)
+                              }
+                              size="sm"
+                              type="button"
+                              variant={selected ? 'outline' : 'ghost'}
+                            >
+                              {tag.name}
+                            </Button>
+                          )
+                        })}
+                      </div>
+                    )}
                   </div>
                 </DetailRow>
                 <DetailRow label="重要程度">

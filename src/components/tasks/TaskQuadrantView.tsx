@@ -11,7 +11,9 @@ import {
 
 import type { TaskStatusAction } from '@/components/tasks/TaskList'
 import { ProjectChip } from '@/components/tasks/ProjectChip'
+import { TagChip } from '@/components/tasks/TagChip'
 import type { Project } from '@/project/model'
+import type { Tag } from '@/tag/model'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -27,6 +29,7 @@ import {
 interface TaskQuadrantViewProps {
   readonly tasks: readonly Task[]
   readonly projects: readonly Project[]
+  readonly tags: readonly Tag[]
   readonly today: LocalDate
   readonly pendingTaskIds: ReadonlySet<string>
   readonly onCreate: () => void
@@ -83,6 +86,7 @@ const QUADRANT_PRESENTATION: ReadonlyArray<{
 export function TaskQuadrantView({
   tasks,
   projects,
+  tags,
   today,
   pendingTaskIds,
   onCreate,
@@ -95,6 +99,7 @@ export function TaskQuadrantView({
 }: TaskQuadrantViewProps) {
   const groups = groupTasksByQuadrant(tasks, today)
   const projectsById = new Map(projects.map((project) => [project.id, project]))
+  const tagsById = new Map(tags.map((tag) => [tag.id, tag]))
   const activeTaskCount = QUADRANT_PRESENTATION.reduce(
     (total, quadrant) => total + groups[quadrant.key].length,
     0,
@@ -189,6 +194,14 @@ export function TaskQuadrantView({
                                     project={projectsById.get(task.projectId)!}
                                   />
                                 )}
+                              {task.tagIds.map((tagId) =>
+                                tagsById.has(tagId) ? (
+                                  <TagChip
+                                    key={tagId}
+                                    tag={tagsById.get(tagId)!}
+                                  />
+                                ) : null,
+                              )}
                               <Badge variant="secondary">
                                 {task.status === 'doing' ? '进行中' : '待开始'}
                               </Badge>

@@ -3,6 +3,7 @@
 //! This module owns only the approved Task fields and capability-specific
 //! operations. Business schema changes remain exclusively in migrations.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
@@ -100,6 +101,7 @@ pub(crate) struct TaskRecord {
     pub(crate) is_urgent: bool,
     pub(crate) due_date: Option<String>,
     pub(crate) project_id: Option<String>,
+    pub(crate) tag_ids: Vec<String>,
 }
 
 pub(crate) struct CreateTaskInput {
@@ -110,6 +112,7 @@ pub(crate) struct CreateTaskInput {
     pub(crate) is_urgent: bool,
     pub(crate) due_date: Option<String>,
     pub(crate) project_id: Option<String>,
+    pub(crate) tag_ids: Vec<String>,
 }
 
 pub(crate) struct RenameTaskInput {
@@ -158,6 +161,18 @@ pub(crate) struct ClearTaskProjectInput {
     pub(crate) updated_at_ms: i64,
 }
 
+pub(crate) struct AddTaskTagInput {
+    pub(crate) id: String,
+    pub(crate) tag_id: String,
+    pub(crate) updated_at_ms: i64,
+}
+
+pub(crate) struct RemoveTaskTagInput {
+    pub(crate) id: String,
+    pub(crate) tag_id: String,
+    pub(crate) updated_at_ms: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(crate) enum TaskError {
     #[error("task not found")]
@@ -203,7 +218,7 @@ struct RawTaskRecord {
 }
 
 impl RawTaskRecord {
-    fn into_task(self) -> Result<TaskRecord, TaskError> {
+    fn into_task(self, tag_ids: Vec<String>) -> Result<TaskRecord, TaskError> {
         validate_timestamp(self.created_at_ms)?;
         validate_timestamp(self.updated_at_ms)?;
         if self.updated_at_ms < self.created_at_ms
@@ -226,6 +241,7 @@ impl RawTaskRecord {
             is_urgent: self.is_urgent == 1,
             due_date: self.due_date,
             project_id: self.project_id,
+            tag_ids,
         })
     }
 }
@@ -319,6 +335,37 @@ fn validate_due_date(due_date: &str) -> Result<(), TaskError> {
     }
 }
 
+fn validate_tag_ids(tag_ids: &[String]) -> Result<(), TaskError> {
+    let mut seen = HashSet::with_capacity(tag_ids.len());
+    for tag_id in tag_ids {
+        validate_id(tag_id)?;
+        if !seen.insert(tag_id.as_str()) {
+            return Err(TaskError::PersistenceFailed);
+        }
+    }
+    Ok(())
+}
+
+fn load_task_tag_ids(conn: &Connection, task_id: &str) -> Result<Vec<String>, TaskError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT tag_id FROM task_tags \
+             WHERE task_id = ?1 ORDER BY tag_id ASC",
+        )
+        .map_err(|_| TaskError::PersistenceFailed)?;
+    let tag_ids = statement
+        .query_map([task_id], |row| row.get::<_, String>(0))
+        .map_err(|_| TaskError::PersistenceFailed)?
+        .map(|row| row.map_err(|_| TaskError::PersistenceFailed))
+        .collect();
+    tag_ids
+}
+
+fn task_from_raw(conn: &Connection, raw: RawTaskRecord) -> Result<TaskRecord, TaskError> {
+    let tag_ids = load_task_tag_ids(conn, &raw.id)?;
+    raw.into_task(tag_ids)
+}
+
 pub(crate) struct TaskDbService;
 
 impl TaskDbService {
@@ -351,9 +398,13 @@ impl TaskDbService {
         if let Some(due_date) = input.due_date.as_deref() {
             validate_due_date(due_date)?;
         }
+        validate_tag_ids(&input.tag_ids)?;
+        let transaction = conn
+            .unchecked_transaction()
+            .map_err(|_| TaskError::PersistenceFailed)?;
         if let Some(project_id) = input.project_id.as_deref() {
             validate_id(project_id)?;
-            let exists = conn
+            let exists = transaction
                 .query_row("SELECT 1 FROM projects WHERE id = ?1", [project_id], |_| {
                     Ok(())
                 })
@@ -364,25 +415,50 @@ impl TaskDbService {
             }
         }
 
-        conn.query_row(
+        for tag_id in &input.tag_ids {
+            let exists = transaction
+                .query_row("SELECT 1 FROM tags WHERE id = ?1", [tag_id], |_| Ok(()))
+                .optional()
+                .map_err(|_| TaskError::PersistenceFailed)?;
+            if exists.is_none() {
+                return Err(TaskError::NotFound);
+            }
+        }
+
+        let raw = transaction
+            .query_row(
             "INSERT INTO tasks( \
                  id, title, created_at_ms, updated_at_ms, is_important, is_urgent, due_date, project_id \
              ) VALUES(?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7) \
              RETURNING id, title, status, created_at_ms, updated_at_ms, \
                        is_important, is_urgent, due_date, project_id",
             params![
-                input.id,
-                input.title,
+                &input.id,
+                &input.title,
                 input.created_at_ms,
                 input.is_important,
                 input.is_urgent,
-                input.due_date,
-                input.project_id
+                input.due_date.as_deref(),
+                input.project_id.as_deref()
             ],
             raw_task_from_row,
         )
-        .map_err(|_| TaskError::PersistenceFailed)?
-        .into_task()
+            .map_err(|_| TaskError::PersistenceFailed)?;
+
+        for tag_id in &input.tag_ids {
+            transaction
+                .execute(
+                    "INSERT INTO task_tags(task_id, tag_id) VALUES(?1, ?2)",
+                    params![&input.id, tag_id],
+                )
+                .map_err(|_| TaskError::PersistenceFailed)?;
+        }
+
+        let task = task_from_raw(&transaction, raw)?;
+        transaction
+            .commit()
+            .map_err(|_| TaskError::PersistenceFailed)?;
+        Ok(task)
     }
 
     pub(crate) fn list(conn: &Connection) -> Result<Vec<TaskRecord>, TaskError> {
@@ -399,7 +475,10 @@ impl TaskDbService {
 
         let mut tasks = Vec::new();
         for row in rows {
-            tasks.push(row.map_err(|_| TaskError::PersistenceFailed)?.into_task()?);
+            tasks.push(task_from_raw(
+                conn,
+                row.map_err(|_| TaskError::PersistenceFailed)?,
+            )?);
         }
         Ok(tasks)
     }
@@ -423,7 +502,7 @@ impl TaskDbService {
             .optional()
             .map_err(|_| TaskError::PersistenceFailed)?;
 
-        task.ok_or(TaskError::NotFound)?.into_task()
+        task_from_raw(conn, task.ok_or(TaskError::NotFound)?)
     }
 
     pub(crate) fn change_status(
@@ -530,7 +609,7 @@ impl TaskDbService {
             )
             .optional()
             .map_err(|_| TaskError::PersistenceFailed)?;
-        task.ok_or(TaskError::NotFound)?.into_task()
+        task_from_raw(conn, task.ok_or(TaskError::NotFound)?)
     }
 
     pub(crate) fn set_project(
@@ -578,7 +657,89 @@ impl TaskDbService {
             )
             .optional()
             .map_err(|_| TaskError::PersistenceFailed)?;
-        task.ok_or(TaskError::NotFound)?.into_task()
+        task_from_raw(conn, task.ok_or(TaskError::NotFound)?)
+    }
+
+    pub(crate) fn add_tag(
+        conn: &Connection,
+        input: AddTaskTagInput,
+    ) -> Result<TaskRecord, TaskError> {
+        validate_id(&input.id)?;
+        validate_id(&input.tag_id)?;
+        validate_timestamp(input.updated_at_ms)?;
+        let transaction = conn
+            .unchecked_transaction()
+            .map_err(|_| TaskError::PersistenceFailed)?;
+
+        let task_exists = transaction
+            .query_row("SELECT 1 FROM tasks WHERE id = ?1", [&input.id], |_| Ok(()))
+            .optional()
+            .map_err(|_| TaskError::PersistenceFailed)?;
+        let tag_exists = transaction
+            .query_row("SELECT 1 FROM tags WHERE id = ?1", [&input.tag_id], |_| {
+                Ok(())
+            })
+            .optional()
+            .map_err(|_| TaskError::PersistenceFailed)?;
+        if task_exists.is_none() || tag_exists.is_none() {
+            return Err(TaskError::NotFound);
+        }
+
+        transaction
+            .execute(
+                "INSERT INTO task_tags(task_id, tag_id) VALUES(?1, ?2)",
+                params![&input.id, &input.tag_id],
+            )
+            .map_err(|_| TaskError::PersistenceFailed)?;
+        let raw = transaction
+            .query_row(
+                "UPDATE tasks SET updated_at_ms = ?1 WHERE id = ?2 \
+                 RETURNING id, title, status, created_at_ms, updated_at_ms, \
+                           is_important, is_urgent, due_date, project_id",
+                params![input.updated_at_ms, &input.id],
+                raw_task_from_row,
+            )
+            .map_err(|_| TaskError::PersistenceFailed)?;
+        let task = task_from_raw(&transaction, raw)?;
+        transaction
+            .commit()
+            .map_err(|_| TaskError::PersistenceFailed)?;
+        Ok(task)
+    }
+
+    pub(crate) fn remove_tag(
+        conn: &Connection,
+        input: RemoveTaskTagInput,
+    ) -> Result<TaskRecord, TaskError> {
+        validate_id(&input.id)?;
+        validate_id(&input.tag_id)?;
+        validate_timestamp(input.updated_at_ms)?;
+        let transaction = conn
+            .unchecked_transaction()
+            .map_err(|_| TaskError::PersistenceFailed)?;
+        let removed = transaction
+            .execute(
+                "DELETE FROM task_tags WHERE task_id = ?1 AND tag_id = ?2",
+                params![&input.id, &input.tag_id],
+            )
+            .map_err(|_| TaskError::PersistenceFailed)?;
+        if removed == 0 {
+            return Err(TaskError::NotFound);
+        }
+        let raw = transaction
+            .query_row(
+                "UPDATE tasks SET updated_at_ms = ?1 WHERE id = ?2 \
+                 RETURNING id, title, status, created_at_ms, updated_at_ms, \
+                           is_important, is_urgent, due_date, project_id",
+                params![input.updated_at_ms, &input.id],
+                raw_task_from_row,
+            )
+            .map_err(|_| TaskError::PersistenceFailed)?;
+        let task = task_from_raw(&transaction, raw)?;
+        transaction
+            .commit()
+            .map_err(|_| TaskError::PersistenceFailed)?;
+        Ok(task)
     }
 }
 
@@ -593,7 +754,7 @@ fn update_planning_value<T: rusqlite::ToSql>(
         .query_row(sql, params![value, updated_at_ms, id], raw_task_from_row)
         .optional()
         .map_err(|_| TaskError::PersistenceFailed)?;
-    task.ok_or(TaskError::NotFound)?.into_task()
+    task_from_raw(conn, task.ok_or(TaskError::NotFound)?)
 }
 
 fn compare_and_set_status(
@@ -615,7 +776,7 @@ fn compare_and_set_status(
         .optional()
         .map_err(|_| TaskError::PersistenceFailed)?;
 
-    task.ok_or(TaskError::StatusConflict)?.into_task()
+    task_from_raw(transaction, task.ok_or(TaskError::StatusConflict)?)
 }
 
 #[cfg(test)]
@@ -662,13 +823,14 @@ mod tests {
                 is_urgent: false,
                 due_date: None,
                 project_id: None,
+                tag_ids: vec![],
             },
         )
         .unwrap()
     }
 
     #[test]
-    fn migrations_apply_exact_task_project_schema_and_history() {
+    fn migrations_apply_exact_task_project_tag_schema_and_history() {
         let (_sandbox, _database_path, connection) = migrated_database();
 
         let mut history_statement = connection
@@ -685,6 +847,7 @@ mod tests {
                 (1, "0001_create_tasks".to_string()),
                 (2, "0002_add_task_planning_fields".to_string()),
                 (3, "0003_add_task_projects".to_string()),
+                (4, "0004_add_task_tags".to_string()),
             ]
         );
 
@@ -731,7 +894,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_v2_database_migrates_old_rows_to_null_project() {
+    fn existing_v3_database_migrates_old_rows_to_empty_tags() {
         let sandbox = tempdir().unwrap();
         let database_dir = sandbox.path().join("database");
         let backup_dir = sandbox.path().join("backup");
@@ -740,7 +903,7 @@ mod tests {
         let database_path = database_dir.join("zhixing.db");
         let mut connection = open_configured_connection(&database_path).unwrap();
 
-        MigrationRunner::new(&MIGRATIONS[..2], SqliteBackupSnapshot)
+        MigrationRunner::new(&MIGRATIONS[..3], SqliteBackupSnapshot)
             .run(&mut connection, &backup_dir)
             .unwrap();
         connection
@@ -767,6 +930,7 @@ mod tests {
                 is_urgent: false,
                 due_date: None,
                 project_id: None,
+                tag_ids: vec![],
             }]
         );
         let history: Vec<i64> = connection
@@ -776,7 +940,7 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(history, [1, 2, 3]);
+        assert_eq!(history, [1, 2, 3, 4]);
 
         let foreign_keys: Vec<(String, String, String)> = connection
             .prepare("PRAGMA foreign_key_list('tasks')")
@@ -790,6 +954,14 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = 'idx_tasks_project_id'", [], |row| row.get(0))
             .unwrap();
         assert_eq!(project_index_count, 1);
+        let junction_index_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = 'idx_task_tags_tag_id_task_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(junction_index_count, 1);
     }
 
     #[test]
@@ -895,6 +1067,7 @@ mod tests {
                 is_urgent: true,
                 due_date: Some("2024-02-29".into()),
                 project_id: None,
+                tag_ids: vec![],
             },
         )
         .unwrap();
@@ -912,6 +1085,7 @@ mod tests {
                 is_urgent: false,
                 due_date: None,
                 project_id: None,
+                tag_ids: vec![],
             },
         )
         .unwrap_err();
@@ -927,6 +1101,7 @@ mod tests {
                 is_urgent: false,
                 due_date: None,
                 project_id: None,
+                tag_ids: vec![],
             },
         )
         .unwrap_err();
@@ -949,6 +1124,7 @@ mod tests {
                 is_urgent: false,
                 due_date: None,
                 project_id: Some(project_id.into()),
+                tag_ids: vec![],
             },
         )
         .unwrap();
@@ -1007,11 +1183,131 @@ mod tests {
                 is_urgent: false,
                 due_date: None,
                 project_id: Some("00000000-0000-4000-8000-000000000199".into()),
+                tag_ids: vec![],
             },
         )
         .unwrap_err();
         assert_eq!(error, TaskError::NotFound);
         assert!(TaskDbService::list(&connection).unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_with_tags_is_atomic_and_projects_sorted_tag_ids() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        let tag_a = "00000000-0000-4000-8000-000000000101";
+        let tag_b = "00000000-0000-4000-8000-000000000102";
+        let missing = "00000000-0000-4000-8000-000000000199";
+        connection
+            .execute(
+                "INSERT INTO tags(id, name, created_at_ms, updated_at_ms) VALUES(?1, 'Work', 1, 1), (?2, 'Home', 2, 2)",
+                [tag_a, tag_b],
+            )
+            .unwrap();
+
+        let created = TaskDbService::create(
+            &connection,
+            CreateTaskInput {
+                id: ID_A.into(),
+                title: "Tagged".into(),
+                created_at_ms: 10,
+                is_important: false,
+                is_urgent: false,
+                due_date: None,
+                project_id: None,
+                tag_ids: vec![tag_b.into(), tag_a.into()],
+            },
+        )
+        .unwrap();
+        assert_eq!(created.tag_ids, [tag_a.to_string(), tag_b.to_string()]);
+
+        let error = TaskDbService::create(
+            &connection,
+            CreateTaskInput {
+                id: ID_B.into(),
+                title: "Must roll back".into(),
+                created_at_ms: 20,
+                is_important: false,
+                is_urgent: false,
+                due_date: None,
+                project_id: None,
+                tag_ids: vec![tag_a.into(), missing.into()],
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, TaskError::NotFound);
+        assert_eq!(TaskDbService::list(&connection).unwrap(), [created]);
+        let leaked_links: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM task_tags WHERE task_id = ?1",
+                [ID_B],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(leaked_links, 0);
+    }
+
+    #[test]
+    fn tag_assignment_updates_timestamp_and_duplicate_add_fails_safely() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        let tag_id = "00000000-0000-4000-8000-000000000101";
+        connection
+            .execute(
+                "INSERT INTO tags(id, name, created_at_ms, updated_at_ms) VALUES(?1, 'Work', 1, 1)",
+                [tag_id],
+            )
+            .unwrap();
+        create_task(&connection, ID_A, "Task", 10);
+
+        let added = TaskDbService::add_tag(
+            &connection,
+            AddTaskTagInput {
+                id: ID_A.into(),
+                tag_id: tag_id.into(),
+                updated_at_ms: 20,
+            },
+        )
+        .unwrap();
+        assert_eq!(added.tag_ids, [tag_id.to_string()]);
+        assert_eq!(added.updated_at_ms, 20);
+
+        let duplicate = TaskDbService::add_tag(
+            &connection,
+            AddTaskTagInput {
+                id: ID_A.into(),
+                tag_id: tag_id.into(),
+                updated_at_ms: 30,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(duplicate, TaskError::PersistenceFailed);
+        assert_eq!(
+            TaskDbService::list(&connection).unwrap()[0].updated_at_ms,
+            20
+        );
+
+        let removed = TaskDbService::remove_tag(
+            &connection,
+            RemoveTaskTagInput {
+                id: ID_A.into(),
+                tag_id: tag_id.into(),
+                updated_at_ms: 40,
+            },
+        )
+        .unwrap();
+        assert!(removed.tag_ids.is_empty());
+        assert_eq!(removed.updated_at_ms, 40);
+        assert_eq!(
+            TaskDbService::remove_tag(
+                &connection,
+                RemoveTaskTagInput {
+                    id: ID_A.into(),
+                    tag_id: tag_id.into(),
+                    updated_at_ms: 50,
+                },
+            )
+            .unwrap_err(),
+            TaskError::NotFound
+        );
     }
 
     #[test]
@@ -1451,6 +1747,7 @@ mod tests {
                 is_urgent: true,
                 due_date: Some("2026-08-23".into()),
                 project_id: None,
+                tag_ids: vec![],
             }]
         );
     }

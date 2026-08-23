@@ -30,6 +30,7 @@ import {
   type WebPersistenceCapability,
 } from '@/adapters/web/taskWorkerProtocol'
 import { WebProjectRepository } from '@/adapters/web/WebProjectRepository'
+import { WebTagRepository } from '@/adapters/web/WebTagRepository'
 
 function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
   if (!isRecord(value)) {
@@ -46,6 +47,7 @@ function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
     isUrgent,
     dueDate,
     projectId,
+    tagIds,
   } = value
   if (
     !isCanonicalLowercaseUuid(id) ||
@@ -57,7 +59,10 @@ function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
     typeof isImportant !== 'boolean' ||
     typeof isUrgent !== 'boolean' ||
     (dueDate !== null && !isValidLocalDate(dueDate)) ||
-    (projectId !== null && !isCanonicalLowercaseUuid(projectId))
+    (projectId !== null && !isCanonicalLowercaseUuid(projectId)) ||
+    !Array.isArray(tagIds) ||
+    tagIds.some((tagId) => !isCanonicalLowercaseUuid(tagId)) ||
+    new Set(tagIds).size !== tagIds.length
   ) {
     throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
   }
@@ -71,6 +76,7 @@ function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
     isUrgent,
     dueDate,
     projectId,
+    tagIds,
   }
 }
 
@@ -132,7 +138,11 @@ export class WebTaskRepository implements TaskRepository {
         !isValidLocalDate(input.dueDate)) ||
       (input.projectId !== undefined &&
         input.projectId !== null &&
-        !isCanonicalLowercaseUuid(input.projectId))
+        !isCanonicalLowercaseUuid(input.projectId)) ||
+      (input.tagIds !== undefined &&
+        (!Array.isArray(input.tagIds) ||
+          input.tagIds.some((tagId) => !isCanonicalLowercaseUuid(tagId)) ||
+          new Set(input.tagIds).size !== input.tagIds.length))
     ) {
       throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
     }
@@ -144,6 +154,7 @@ export class WebTaskRepository implements TaskRepository {
           isUrgent: input.isUrgent ?? false,
           dueDate: input.dueDate ?? null,
           projectId: input.projectId ?? null,
+          tagIds: input.tagIds ?? [],
         }),
         operation,
       )
@@ -249,6 +260,28 @@ export class WebTaskRepository implements TaskRepository {
     )
   }
 
+  async addTaskTag(
+    input: import('@/task/repository').AddTaskTagInput,
+  ): Promise<Task> {
+    return this.callPlanning(
+      'addTaskTag',
+      input,
+      () => this.#client.addTaskTag(input),
+      isCanonicalLowercaseUuid(input.tagId),
+    )
+  }
+
+  async removeTaskTag(
+    input: import('@/task/repository').RemoveTaskTagInput,
+  ): Promise<Task> {
+    return this.callPlanning(
+      'removeTaskTag',
+      input,
+      () => this.#client.removeTaskTag(input),
+      isCanonicalLowercaseUuid(input.tagId),
+    )
+  }
+
   private async callPlanning(
     operation: Extract<
       TaskRepositoryOperation,
@@ -258,6 +291,8 @@ export class WebTaskRepository implements TaskRepository {
       | 'clearTaskDeadline'
       | 'setTaskProject'
       | 'clearTaskProject'
+      | 'addTaskTag'
+      | 'removeTaskTag'
     >,
     input: { readonly id: string; readonly updatedAtMs: number },
     call: () => Promise<unknown>,
@@ -287,6 +322,7 @@ export type OpenWebTaskRepositoryResult =
       readonly capability: { readonly status: 'AVAILABLE' }
       readonly repository: WebTaskRepository
       readonly projectRepository: import('@/project/repository').ProjectRepository
+      readonly tagRepository: import('@/tag/repository').TagRepository
       readonly dispose: () => Promise<void>
     }
   | {
@@ -339,6 +375,7 @@ export async function openWebTaskRepository(
       capability,
       repository: new WebTaskRepository(client),
       projectRepository: new WebProjectRepository(client),
+      tagRepository: new WebTagRepository(client),
       dispose: () => client.shutdown(),
     }
   } catch {

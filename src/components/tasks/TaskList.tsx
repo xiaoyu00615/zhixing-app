@@ -14,7 +14,9 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ProjectChip } from '@/components/tasks/ProjectChip'
+import { TagChip } from '@/components/tasks/TagChip'
 import type { Project } from '@/project/model'
+import type { Tag } from '@/tag/model'
 import {
   isTaskEffectivelyUrgent,
   isTaskOverdue,
@@ -29,6 +31,7 @@ export type TaskStatusAction =
 interface TaskListProps {
   readonly tasks: readonly Task[]
   readonly projects: readonly Project[]
+  readonly tags: readonly Tag[]
   readonly today: LocalDate
   readonly pendingTaskIds: ReadonlySet<string>
   readonly onOpenDetail: (task: Task) => void
@@ -78,6 +81,7 @@ function formatUpdatedAt(updatedAtMs: number): string {
 export function TaskList({
   tasks,
   projects,
+  tags,
   today,
   pendingTaskIds,
   onOpenDetail,
@@ -89,6 +93,7 @@ export function TaskList({
   onClearDeadline,
 }: TaskListProps) {
   const projectsById = new Map(projects.map((project) => [project.id, project]))
+  const tagsById = new Map(tags.map((tag) => [tag.id, tag]))
   return (
     <div className="overflow-hidden rounded-lg border border-border bg-surface">
       <ul aria-label="任务列表" className="divide-y divide-border">
@@ -170,6 +175,11 @@ export function TaskList({
                         project={projectsById.get(task.projectId)!}
                       />
                     )}
+                  {task.tagIds.map((tagId) =>
+                    tagsById.has(tagId) ? (
+                      <TagChip key={tagId} tag={tagsById.get(tagId)!} />
+                    ) : null,
+                  )}
                   <span className="mr-1">
                     更新于 {formatUpdatedAt(task.updatedAtMs)}
                   </span>

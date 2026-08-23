@@ -9,6 +9,7 @@ import { useState } from 'react'
 import { TaskList, type TaskStatusAction } from '@/components/tasks/TaskList'
 import { Button } from '@/components/ui/button'
 import type { Project } from '@/project/model'
+import type { Tag } from '@/tag/model'
 import {
   TASK_DATE_GROUPS,
   groupTasksByDate,
@@ -20,6 +21,7 @@ import {
 interface TaskDateViewProps {
   readonly tasks: readonly Task[]
   readonly projects: readonly Project[]
+  readonly tags: readonly Tag[]
   readonly today: LocalDate
   readonly pendingTaskIds: ReadonlySet<string>
   readonly onCreate: () => void
@@ -64,6 +66,7 @@ function formatLocalDateLabel(localDate: LocalDate): string {
 export function TaskDateView({
   tasks,
   projects,
+  tags,
   today,
   pendingTaskIds,
   onCreate,
@@ -173,6 +176,7 @@ export function TaskDateView({
         ) : (
           <TaskList
             projects={projects}
+            tags={tags}
             onClearDeadline={onClearDeadline}
             onOpenDetail={onOpenDetail}
             onRename={onRename}

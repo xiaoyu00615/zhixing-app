@@ -20,6 +20,8 @@ import type {
   CreateProjectInput,
   RenameProjectInput,
 } from '@/project/repository'
+import { isNonEmptyTagName } from '@/tag/model'
+import type { CreateTagInput, RenameTagInput } from '@/tag/repository'
 
 export type WebPersistenceCapability =
   | { readonly status: 'AVAILABLE' }
@@ -83,6 +85,16 @@ export type TaskWorkerRequest =
     }
   | {
       readonly requestId: number
+      readonly type: 'task.addTag'
+      readonly input: import('@/task/repository').AddTaskTagInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'task.removeTag'
+      readonly input: import('@/task/repository').RemoveTaskTagInput
+    }
+  | {
+      readonly requestId: number
       readonly type: 'project.create'
       readonly input: CreateProjectInput
     }
@@ -91,6 +103,17 @@ export type TaskWorkerRequest =
       readonly requestId: number
       readonly type: 'project.rename'
       readonly input: RenameProjectInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'tag.create'
+      readonly input: CreateTagInput
+    }
+  | { readonly requestId: number; readonly type: 'tag.list' }
+  | {
+      readonly requestId: number
+      readonly type: 'tag.rename'
+      readonly input: RenameTagInput
     }
   | { readonly requestId: number; readonly type: 'shutdown' }
 
@@ -135,7 +158,25 @@ function isCreateInput(value: unknown): value is CreateTaskInput {
       isValidLocalDate(value.dueDate)) &&
     (value.projectId === undefined ||
       value.projectId === null ||
-      isCanonicalLowercaseUuid(value.projectId))
+      isCanonicalLowercaseUuid(value.projectId)) &&
+    (value.tagIds === undefined ||
+      (Array.isArray(value.tagIds) &&
+        value.tagIds.every(isCanonicalLowercaseUuid) &&
+        new Set(value.tagIds).size === value.tagIds.length))
+  )
+}
+
+function isTagInput(
+  value: unknown,
+  withCreatedAt: boolean,
+): value is CreateTagInput | RenameTagInput {
+  return (
+    isRecord(value) &&
+    isCanonicalLowercaseUuid(value.id) &&
+    isNonEmptyTagName(value.name) &&
+    (withCreatedAt
+      ? isNonNegativeSafeIntegerMilliseconds(value.createdAtMs)
+      : isNonNegativeSafeIntegerMilliseconds(value.updatedAtMs))
   )
 }
 
@@ -200,6 +241,7 @@ export function parseTaskWorkerRequest(
     case 'initialize':
     case 'task.list':
     case 'project.list':
+    case 'tag.list':
     case 'shutdown':
       return { requestId: value.requestId, type: value.type }
     case 'task.create':
@@ -285,6 +327,20 @@ export function parseTaskWorkerRequest(
             input: { id: value.input.id, updatedAtMs: value.input.updatedAtMs },
           }
         : null
+    case 'task.addTag':
+    case 'task.removeTag':
+      return isPlanningBaseInput(value.input) &&
+        isCanonicalLowercaseUuid(value.input.tagId)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: {
+              id: value.input.id,
+              tagId: value.input.tagId,
+              updatedAtMs: value.input.updatedAtMs,
+            },
+          }
+        : null
     case 'project.create':
       return isProjectInput(value.input, true)
         ? {
@@ -299,6 +355,22 @@ export function parseTaskWorkerRequest(
             requestId: value.requestId,
             type: value.type,
             input: value.input as RenameProjectInput,
+          }
+        : null
+    case 'tag.create':
+      return isTagInput(value.input, true)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input as CreateTagInput,
+          }
+        : null
+    case 'tag.rename':
+      return isTagInput(value.input, false)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input as RenameTagInput,
           }
         : null
     default:

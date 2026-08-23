@@ -12,6 +12,7 @@ import type {
   CreateProjectInput,
   RenameProjectInput,
 } from '@/project/repository'
+import type { CreateTagInput, RenameTagInput } from '@/tag/repository'
 import {
   parseTaskWorkerResponse,
   parseWebPersistenceCapability,
@@ -163,6 +164,26 @@ export class TaskWorkerClient {
     }))
   }
 
+  addTaskTag(
+    input: import('@/task/repository').AddTaskTagInput,
+  ): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'task.addTag',
+      input,
+    }))
+  }
+
+  removeTaskTag(
+    input: import('@/task/repository').RemoveTaskTagInput,
+  ): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'task.removeTag',
+      input,
+    }))
+  }
+
   createProject(input: CreateProjectInput): Promise<unknown> {
     return this.send((requestId) => ({
       requestId,
@@ -179,6 +200,26 @@ export class TaskWorkerClient {
     return this.send((requestId) => ({
       requestId,
       type: 'project.rename',
+      input,
+    }))
+  }
+
+  createTag(input: CreateTagInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'tag.create',
+      input,
+    }))
+  }
+
+  listTags(): Promise<unknown> {
+    return this.send((requestId) => ({ requestId, type: 'tag.list' }))
+  }
+
+  renameTag(input: RenameTagInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'tag.rename',
       input,
     }))
   }

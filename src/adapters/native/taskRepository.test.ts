@@ -34,6 +34,7 @@ const TASK = {
   isUrgent: false,
   dueDate: null,
   projectId: null,
+  tagIds: [],
 } as const
 
 function createNativeContractFixture(): TaskRepositoryContractFixture {
@@ -69,6 +70,14 @@ function createNativeContractFixture(): TaskRepositoryContractFixture {
         case 'task_clear_project':
           return backend.clearTaskProject(
             args?.input as import('@/task/repository').ClearTaskProjectInput,
+          )
+        case 'task_add_tag':
+          return backend.addTaskTag(
+            args?.input as import('@/task/repository').AddTaskTagInput,
+          )
+        case 'task_remove_tag':
+          return backend.removeTaskTag(
+            args?.input as import('@/task/repository').RemoveTaskTagInput,
           )
         default:
           throw new Error(`Unexpected native command: ${command}`)
@@ -140,6 +149,7 @@ describe('NativeTaskRepository', () => {
             isUrgent: false,
             dueDate: null,
             projectId: null,
+            tagIds: [],
           },
         },
       ],

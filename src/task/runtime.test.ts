@@ -15,6 +15,7 @@ const TASK: Task = {
   isUrgent: false,
   dueDate: null,
   projectId: null,
+  tagIds: [],
 }
 
 const runtimeMocks = vi.hoisted(() => ({
@@ -22,6 +23,7 @@ const runtimeMocks = vi.hoisted(() => ({
   nativeConstructed: vi.fn(),
   nativeListTasks: vi.fn(),
   nativeListProjects: vi.fn(),
+  nativeListTags: vi.fn(),
 }))
 
 vi.mock('@/adapters/web', () => ({
@@ -55,6 +57,11 @@ vi.mock('@/adapters/native', () => ({
       return runtimeMocks.nativeListProjects() as Promise<readonly never[]>
     }
   },
+  NativeTagRepository: class {
+    listTags(): Promise<readonly never[]> {
+      return runtimeMocks.nativeListTags() as Promise<readonly never[]>
+    }
+  },
 }))
 
 describe('Task runtime composition', () => {
@@ -62,6 +69,7 @@ describe('Task runtime composition', () => {
     vi.clearAllMocks()
     runtimeMocks.nativeListTasks.mockResolvedValue([TASK])
     runtimeMocks.nativeListProjects.mockResolvedValue([])
+    runtimeMocks.nativeListTags.mockResolvedValue([])
   })
 
   test('Web composition opens only Web persistence and preserves disposal', async () => {
@@ -79,6 +87,11 @@ describe('Task runtime composition', () => {
         createProject: vi.fn(),
         listProjects: vi.fn(() => Promise.resolve([])),
         renameProject: vi.fn(),
+      },
+      tagRepository: {
+        createTag: vi.fn(),
+        listTags: vi.fn(() => Promise.resolve([])),
+        renameTag: vi.fn(),
       },
       dispose,
     })

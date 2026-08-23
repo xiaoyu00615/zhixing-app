@@ -16,6 +16,8 @@ import type { Project } from '@/project/model'
 import type { OpenTaskRuntime, TaskRuntime } from '@/task/runtime.types'
 import { TaskApplicationError, type TaskService } from '@/task/service'
 import type { ProjectService } from '@/project/service'
+import type { Tag } from '@/tag/model'
+import type { TagService } from '@/tag/service'
 
 const TASK_ID = '00000000-0000-4000-8000-000000000001'
 const TASK: Task = {
@@ -28,6 +30,7 @@ const TASK: Task = {
   isUrgent: false,
   dueDate: null,
   projectId: null,
+  tagIds: [],
 }
 
 function taskFixture(
@@ -70,6 +73,10 @@ function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
   setTaskProject.mockResolvedValue(TASK)
   const clearTaskProject = vi.fn<TaskService['clearTaskProject']>()
   clearTaskProject.mockResolvedValue(TASK)
+  const addTaskTag = vi.fn<TaskService['addTaskTag']>()
+  addTaskTag.mockResolvedValue(TASK)
+  const removeTaskTag = vi.fn<TaskService['removeTaskTag']>()
+  removeTaskTag.mockResolvedValue(TASK)
 
   const service: TaskService = {
     createTask,
@@ -85,6 +92,8 @@ function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
     clearTaskDeadline,
     setTaskProject,
     clearTaskProject,
+    addTaskTag,
+    removeTaskTag,
   }
   return {
     service,
@@ -101,12 +110,15 @@ function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
     clearTaskDeadline,
     setTaskProject,
     clearTaskProject,
+    addTaskTag,
+    removeTaskTag,
   }
 }
 
 function createRuntime(
   service: TaskService,
   projects: readonly Project[] = [],
+  tags: readonly Tag[] = [],
 ) {
   const dispose = vi.fn(() => Promise.resolve())
   const createProject = vi.fn<ProjectService['createProject']>()
@@ -129,8 +141,37 @@ function createRuntime(
     listProjects,
     renameProject,
   }
-  const runtime: TaskRuntime = { service, projectService, dispose }
-  return { runtime, dispose, createProject, listProjects, renameProject }
+  const createTag = vi.fn<TagService['createTag']>()
+  createTag.mockImplementation((name) =>
+    Promise.resolve({
+      id: '00000000-0000-4000-8000-000000000201',
+      name,
+      createdAtMs: 100,
+      updatedAtMs: 100,
+    }),
+  )
+  const listTags = vi.fn<TagService['listTags']>()
+  listTags.mockResolvedValue(tags)
+  const renameTag = vi.fn<TagService['renameTag']>()
+  renameTag.mockImplementation((id, name) =>
+    Promise.resolve({ id, name, createdAtMs: 100, updatedAtMs: 200 }),
+  )
+  const tagService: TagService = {
+    createTag,
+    listTags,
+    renameTag,
+  }
+  const runtime: TaskRuntime = { service, projectService, tagService, dispose }
+  return {
+    runtime,
+    dispose,
+    createProject,
+    listProjects,
+    renameProject,
+    createTag,
+    listTags,
+    renameTag,
+  }
 }
 
 function resolvedRuntime(service: TaskService) {
@@ -349,6 +390,150 @@ describe('TasksPage Project V1 UI', () => {
   })
 })
 
+describe('TasksPage Tag V1 UI', () => {
+  const WORK: Project = {
+    id: '00000000-0000-4000-8000-000000000101',
+    name: '工作',
+    createdAtMs: 100,
+    updatedAtMs: 100,
+  }
+  const FOCUS: Tag = {
+    id: '00000000-0000-4000-8000-000000000201',
+    name: '专注',
+    createdAtMs: 100,
+    updatedAtMs: 100,
+  }
+
+  test('combines project and tag filters and creates with selected tags atomically', async () => {
+    const user = userEvent.setup()
+    const matching = taskFixture(84, '匹配任务', {
+      projectId: WORK.id,
+      tagIds: [FOCUS.id],
+    })
+    const wrongProject = taskFixture(85, '其它项目任务', { tagIds: [FOCUS.id] })
+    const untagged = taskFixture(86, '无标签任务', { projectId: WORK.id })
+    const fake = createServiceDouble([matching, wrongProject, untagged])
+    const current = createRuntime(fake.service, [WORK], [FOCUS])
+    render(
+      <TasksPage
+        openRuntime={vi.fn(() => Promise.resolve(current.runtime))}
+        today="2026-08-23"
+      />,
+    )
+    await screen.findByText(matching.title)
+
+    await user.click(screen.getByRole('button', { name: '工作' }))
+    await user.click(screen.getByRole('button', { name: '专注' }))
+    expect(screen.getByText(matching.title)).toBeInTheDocument()
+    expect(screen.queryByText(wrongProject.title)).not.toBeInTheDocument()
+    expect(screen.queryByText(untagged.title)).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '新建任务' }))
+    await user.type(screen.getByRole('textbox', { name: '标题' }), '带标签任务')
+    await user.click(screen.getByRole('checkbox', { name: FOCUS.name }))
+    await user.click(screen.getByRole('button', { name: '创建任务' }))
+    expect(fake.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ title: '带标签任务', tagIds: [FOCUS.id] }),
+    )
+  })
+
+  test('adds and removes a tag from the shared task detail panel', async () => {
+    const user = userEvent.setup()
+    const task = taskFixture(87, '详情标签任务')
+    const tagged = { ...task, tagIds: [FOCUS.id], updatedAtMs: 200 }
+    const fake = createServiceDouble([task])
+    fake.listTasks
+      .mockResolvedValueOnce([task])
+      .mockResolvedValueOnce([tagged])
+      .mockResolvedValueOnce([{ ...tagged, tagIds: [], updatedAtMs: 300 }])
+    const current = createRuntime(fake.service, [], [FOCUS])
+    render(
+      <TasksPage
+        openRuntime={vi.fn(() => Promise.resolve(current.runtime))}
+        today="2026-08-23"
+      />,
+    )
+    await screen.findByText(task.title)
+    await user.click(
+      screen.getByRole('button', { name: `查看任务详情：${task.title}` }),
+    )
+    await user.click(screen.getByRole('button', { name: `添加标签：${FOCUS.name}` }))
+    expect(fake.addTaskTag).toHaveBeenCalledWith(task.id, FOCUS.id)
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: `移除标签：${FOCUS.name}` }),
+      ).toBeInTheDocument(),
+    )
+    await user.click(screen.getByRole('button', { name: `移除标签：${FOCUS.name}` }))
+    expect(fake.removeTaskTag).toHaveBeenCalledWith(task.id, FOCUS.id)
+  })
+
+  test('creates and renames tags without exposing delete', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([])
+    const current = createRuntime(fake.service, [], [FOCUS])
+    render(
+      <TasksPage
+        openRuntime={vi.fn(() => Promise.resolve(current.runtime))}
+        today="2026-08-23"
+      />,
+    )
+    await screen.findByRole('button', { name: '新建标签' })
+    await user.click(screen.getByRole('button', { name: '新建标签' }))
+    await user.type(screen.getByRole('textbox', { name: '标签名称' }), ' Work ')
+    await user.click(screen.getByRole('button', { name: '创建标签' }))
+    expect(current.createTag).toHaveBeenCalledWith(' Work ')
+    expect(screen.queryByRole('button', { name: /删除标签/ })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: `重命名标签：${FOCUS.name}` }))
+    const input = screen.getByRole('textbox', { name: '标签名称' })
+    await user.clear(input)
+    await user.type(input, '深度工作')
+    await user.click(screen.getByRole('button', { name: '保存名称' }))
+    expect(current.renameTag).toHaveBeenCalledWith(FOCUS.id, '深度工作')
+  })
+
+  test('shows the persisted tag chip across list, quadrant, date, and calendar', async () => {
+    const user = userEvent.setup()
+    const task = taskFixture(88, '跨视图标签任务', {
+      tagIds: [FOCUS.id],
+      dueDate: '2026-08-23',
+    })
+    const fake = createServiceDouble([task])
+    const current = createRuntime(fake.service, [], [FOCUS])
+    render(
+      <TasksPage
+        openRuntime={vi.fn(() => Promise.resolve(current.runtime))}
+        today="2026-08-23"
+      />,
+    )
+
+    expect(
+      within(await screen.findByRole('list', { name: '任务列表' })).getByText(
+        FOCUS.name,
+      ),
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: '四象限' }))
+    expect(
+      within(screen.getByRole('region', { name: '任务四象限' })).getByText(
+        FOCUS.name,
+      ),
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: '日期' }))
+    expect(
+      within(screen.getByRole('region', { name: '任务日期视图' })).getByText(
+        FOCUS.name,
+      ),
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: '日历' }))
+    expect(
+      within(screen.getByRole('grid', { name: '2026年8月任务月历' })).getByText(
+        FOCUS.name,
+      ),
+    ).toBeInTheDocument()
+  })
+})
+
 describe('TasksPage create and rename', () => {
   test('creates through TaskService and reloads repository ordering', async () => {
     const user = userEvent.setup()
@@ -371,6 +556,7 @@ describe('TasksPage create and rename', () => {
       isUrgent: false,
       dueDate: null,
       projectId: null,
+      tagIds: [],
     })
     expect(await screen.findByText(TASK.title)).toBeInTheDocument()
     expect(fake.listTasks).toHaveBeenCalledTimes(2)
@@ -385,6 +571,7 @@ describe('TasksPage create and rename', () => {
       isUrgent: true,
       dueDate: '2026-08-23',
       projectId: null,
+      tagIds: [],
     }
     const fake = createServiceDouble([])
     fake.createTask.mockResolvedValueOnce(planned)
@@ -408,6 +595,7 @@ describe('TasksPage create and rename', () => {
       isUrgent: true,
       dueDate: '2026-08-23',
       projectId: null,
+      tagIds: [],
     })
     expect(await screen.findByText('Planned')).toBeInTheDocument()
     expect(fake.listTasks).toHaveBeenCalledTimes(2)

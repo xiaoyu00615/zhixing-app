@@ -172,6 +172,12 @@ async function handleRequest(value: unknown): Promise<void> {
           state.database.clearTaskProject(request.input),
         )
         return
+      case 'task.addTag':
+        success(request.requestId, state.database.addTaskTag(request.input))
+        return
+      case 'task.removeTag':
+        success(request.requestId, state.database.removeTaskTag(request.input))
+        return
       case 'project.create':
         success(request.requestId, state.database.createProject(request.input))
         return
@@ -180,6 +186,15 @@ async function handleRequest(value: unknown): Promise<void> {
         return
       case 'project.rename':
         success(request.requestId, state.database.renameProject(request.input))
+        return
+      case 'tag.create':
+        success(request.requestId, state.database.createTag(request.input))
+        return
+      case 'tag.list':
+        success(request.requestId, state.database.listTags())
+        return
+      case 'tag.rename':
+        success(request.requestId, state.database.renameTag(request.input))
         return
     }
   } catch (error: unknown) {

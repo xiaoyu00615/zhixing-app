@@ -19,9 +19,17 @@ interface BrowserTask {
   readonly isUrgent: boolean
   readonly dueDate: string | null
   readonly projectId: string | null
+  readonly tagIds: readonly string[]
 }
 
 interface BrowserProject {
+  readonly id: string
+  readonly name: string
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
+}
+
+interface BrowserTag {
   readonly id: string
   readonly name: string
   readonly createdAtMs: number
@@ -44,6 +52,7 @@ interface BrowserHarness {
     isUrgent?: boolean
     dueDate?: string | null
     projectId?: string | null
+    tagIds?: readonly string[]
   }): Promise<BrowserTask>
   listTasks(): Promise<readonly BrowserTask[]>
   renameTask(input: {
@@ -67,6 +76,27 @@ interface BrowserHarness {
     name: string
     updatedAtMs: number
   }): Promise<BrowserProject>
+  createTag(input: {
+    id: string
+    name: string
+    createdAtMs: number
+  }): Promise<BrowserTag>
+  listTags(): Promise<readonly BrowserTag[]>
+  renameTag(input: {
+    id: string
+    name: string
+    updatedAtMs: number
+  }): Promise<BrowserTag>
+  addTaskTag(input: {
+    id: string
+    tagId: string
+    updatedAtMs: number
+  }): Promise<BrowserTask>
+  removeTaskTag(input: {
+    id: string
+    tagId: string
+    updatedAtMs: number
+  }): Promise<BrowserTask>
   shutdown(): Promise<void>
 }
 
@@ -78,6 +108,10 @@ const TASK_IDS = {
   c: '00000000-0000-4000-8000-000000000003',
 } as const
 const PROJECT_ID = '00000000-0000-4000-8000-000000000101'
+const TAG_IDS = {
+  focus: '00000000-0000-4000-8000-000000000201',
+  deep: '00000000-0000-4000-8000-000000000202',
+} as const
 
 async function openHarnessPage(
   context: BrowserContext,
@@ -140,6 +174,27 @@ test('persists Task operations in OPFS across a browser restart', async ({
       { id: PROJECT_ID },
     )
 
+    await page.evaluate(
+      ({ ids }) =>
+        Promise.all([
+          (
+            window as unknown as HarnessWindow
+          ).__taskPersistenceHarness.createTag({
+            id: ids.focus,
+            name: '专注',
+            createdAtMs: 7,
+          }),
+          (
+            window as unknown as HarnessWindow
+          ).__taskPersistenceHarness.createTag({
+            id: ids.deep,
+            name: '深度工作',
+            createdAtMs: 8,
+          }),
+        ]),
+      { ids: TAG_IDS },
+    )
+
     const missingProjectError = await page.evaluate(
       async ({ id }) => {
         try {
@@ -171,8 +226,34 @@ test('persists Task operations in OPFS across a browser restart', async ({
       ),
     ).resolves.toEqual([])
 
+    const missingTagError = await page.evaluate(
+      async ({ id }) => {
+        try {
+          await (
+            window as unknown as HarnessWindow
+          ).__taskPersistenceHarness.createTask({
+            id,
+            title: 'Missing tag',
+            createdAtMs: 7,
+            tagIds: ['00000000-0000-4000-8000-000000000299'],
+          })
+          return null
+        } catch (error: unknown) {
+          const safe = error as { code?: unknown; message?: unknown }
+          return { code: safe.code, message: safe.message }
+        }
+      },
+      { id: '00000000-0000-4000-8000-000000000005' },
+    )
+    expect(missingTagError).toMatchObject({ code: 'NOT_FOUND' })
+    await expect(
+      page.evaluate(() =>
+        (window as unknown as HarnessWindow).__taskPersistenceHarness.listTasks(),
+      ),
+    ).resolves.toEqual([])
+
     await page.evaluate(
-      ({ ids, projectId }) =>
+      ({ ids, projectId, tagIds }) =>
         Promise.all([
           (
             window as unknown as HarnessWindow
@@ -184,6 +265,7 @@ test('persists Task operations in OPFS across a browser restart', async ({
             isUrgent: true,
             dueDate: '2026-08-23',
             projectId,
+            tagIds: [tagIds.focus],
           }),
           (
             window as unknown as HarnessWindow
@@ -200,7 +282,19 @@ test('persists Task operations in OPFS across a browser restart', async ({
             createdAtMs: 10,
           }),
         ]),
-      { ids: TASK_IDS, projectId: PROJECT_ID },
+      { ids: TASK_IDS, projectId: PROJECT_ID, tagIds: TAG_IDS },
+    )
+
+    await page.evaluate(
+      ({ id, tagId }) =>
+        (
+          window as unknown as HarnessWindow
+        ).__taskPersistenceHarness.addTaskTag({
+          id,
+          tagId,
+          updatedAtMs: 102,
+        }),
+      { id: TASK_IDS.a, tagId: TAG_IDS.deep },
     )
 
     const duplicateError = await page.evaluate(
@@ -259,6 +353,17 @@ test('persists Task operations in OPFS across a browser restart', async ({
         }),
       { id: PROJECT_ID },
     )
+    await page.evaluate(
+      ({ id }) =>
+        (
+          window as unknown as HarnessWindow
+        ).__taskPersistenceHarness.renameTag({
+          id,
+          name: '专注力',
+          updatedAtMs: 103,
+        }),
+      { id: TAG_IDS.focus },
+    )
 
     const expectedTasks: readonly BrowserTask[] = [
       {
@@ -271,6 +376,7 @@ test('persists Task operations in OPFS across a browser restart', async ({
         isUrgent: false,
         dueDate: null,
         projectId: null,
+        tagIds: [TAG_IDS.deep],
       },
       {
         id: TASK_IDS.b,
@@ -282,6 +388,7 @@ test('persists Task operations in OPFS across a browser restart', async ({
         isUrgent: false,
         dueDate: null,
         projectId: null,
+        tagIds: [],
       },
       {
         id: TASK_IDS.c,
@@ -293,6 +400,7 @@ test('persists Task operations in OPFS across a browser restart', async ({
         isUrgent: true,
         dueDate: '2026-08-23',
         projectId: PROJECT_ID,
+        tagIds: [TAG_IDS.focus],
       },
     ]
     await expect(
@@ -332,9 +440,42 @@ test('persists Task operations in OPFS across a browser restart', async ({
         updatedAtMs: 101,
       },
     ])
+    await expect(
+      page.evaluate(() =>
+        (window as unknown as HarnessWindow).__taskPersistenceHarness.listTags(),
+      ),
+    ).resolves.toEqual([
+      {
+        id: TAG_IDS.focus,
+        name: '专注力',
+        createdAtMs: 7,
+        updatedAtMs: 103,
+      },
+      {
+        id: TAG_IDS.deep,
+        name: '深度工作',
+        createdAtMs: 8,
+        updatedAtMs: 8,
+      },
+    ])
+
+    await page.evaluate(
+      ({ id, tagId }) =>
+        (
+          window as unknown as HarnessWindow
+        ).__taskPersistenceHarness.removeTaskTag({
+          id,
+          tagId,
+          updatedAtMs: 110,
+        }),
+      { id: TASK_IDS.a, tagId: TAG_IDS.deep },
+    )
 
     await page.goto(`${configuredBaseURL}/tasks`)
     await expect(page.getByText('Third', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: '专注力', exact: true }).click()
+    await expect(page.getByText('Third', { exact: true })).toBeVisible()
+    await expect(page.getByText('First', { exact: true })).toHaveCount(0)
     await page.getByRole('button', { name: '取消重要：Third' }).click()
     await expect(
       page.getByRole('button', { name: '设为重要：Third' }),

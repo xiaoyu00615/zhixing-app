@@ -2,6 +2,7 @@ import { openWebTaskRepository } from '@/adapters/web'
 import { createTaskService, TaskApplicationError } from '@/task/service'
 import type { TaskRuntime } from '@/task/runtime.types'
 import { createProjectService } from '@/project/service'
+import { createTagService } from '@/tag/service'
 
 export async function openTaskRuntime(): Promise<TaskRuntime> {
   try {
@@ -15,6 +16,7 @@ export async function openTaskRuntime(): Promise<TaskRuntime> {
       projectService: createProjectService({
         repository: opened.projectRepository,
       }),
+      tagService: createTagService({ repository: opened.tagRepository }),
       dispose: opened.dispose,
     }
   } catch {
