@@ -4,7 +4,9 @@ import {
   TASK_STATUSES,
   TASK_STATUS_OPERATIONS,
   isCanonicalLowercaseUuid,
+  getTaskDateGroup,
   getTaskQuadrant,
+  groupTasksByDate,
   groupTasksByQuadrant,
   isNonEmptyTaskTitle,
   isNonNegativeSafeIntegerMilliseconds,
@@ -337,6 +339,103 @@ describe('Task quadrant grouping', () => {
       importantNotUrgent: [],
       notImportantUrgent: [],
       notImportantNotUrgent: [],
+    })
+  })
+})
+
+describe('Task date grouping', () => {
+  test.each([
+    { dueDate: '2026-08-23', status: 'todo', expected: 'today' },
+    { dueDate: '2026-08-23', status: 'doing', expected: 'today' },
+    { dueDate: '2026-08-24', status: 'todo', expected: 'upcoming' },
+    { dueDate: '2026-09-01', status: 'doing', expected: 'upcoming' },
+    { dueDate: '2026-08-22', status: 'todo', expected: 'overdue' },
+    { dueDate: '2026-08-22', status: 'doing', expected: 'overdue' },
+    { dueDate: null, status: 'todo', expected: null },
+    { dueDate: '2026-08-23', status: 'completed', expected: null },
+    { dueDate: '2026-08-24', status: 'cancelled', expected: null },
+    { dueDate: 'invalid', status: 'todo', expected: null },
+  ] as const)(
+    'derives $expected for $status with deadline $dueDate',
+    ({ dueDate, status, expected }) => {
+      expect(
+        getTaskDateGroup({ ...TASK, dueDate, status }, '2026-08-23'),
+      ).toBe(expected)
+    },
+  )
+
+  test('rejects classification when today is not a valid local date', () => {
+    expect(
+      getTaskDateGroup(
+        { ...TASK, dueDate: '2026-08-23' },
+        '2026-8-23',
+      ),
+    ).toBeNull()
+  })
+
+  test('groups active dated tasks and preserves repository list order', () => {
+    const overdueFirst = {
+      ...TASK,
+      id: '00000000-0000-4000-8000-000000000021',
+      title: 'Overdue first',
+      dueDate: '2026-08-21',
+    }
+    const todayFirst = {
+      ...TASK,
+      id: '00000000-0000-4000-8000-000000000022',
+      title: 'Today first',
+      dueDate: '2026-08-23',
+    }
+    const upcoming = {
+      ...TASK,
+      id: '00000000-0000-4000-8000-000000000023',
+      title: 'Upcoming',
+      status: 'doing' as const,
+      dueDate: '2026-08-24',
+    }
+    const todaySecond = {
+      ...TASK,
+      id: '00000000-0000-4000-8000-000000000024',
+      title: 'Today second',
+      status: 'doing' as const,
+      dueDate: '2026-08-23',
+    }
+    const completed = {
+      ...TASK,
+      id: '00000000-0000-4000-8000-000000000025',
+      title: 'Completed',
+      status: 'completed' as const,
+      dueDate: '2026-08-23',
+    }
+    const overdueSecond = {
+      ...TASK,
+      id: '00000000-0000-4000-8000-000000000026',
+      title: 'Overdue second',
+      dueDate: '2026-08-22',
+    }
+    const tasks = [
+      overdueFirst,
+      todayFirst,
+      upcoming,
+      todaySecond,
+      completed,
+      overdueSecond,
+    ]
+    const snapshot = tasks.map((task) => ({ ...task }))
+
+    expect(groupTasksByDate(tasks, '2026-08-23')).toEqual({
+      today: [todayFirst, todaySecond],
+      upcoming: [upcoming],
+      overdue: [overdueFirst, overdueSecond],
+    })
+    expect(tasks).toEqual(snapshot)
+  })
+
+  test('returns three empty groups for an empty task list', () => {
+    expect(groupTasksByDate([], '2026-08-23')).toEqual({
+      today: [],
+      upcoming: [],
+      overdue: [],
     })
   })
 })

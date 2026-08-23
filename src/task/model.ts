@@ -42,6 +42,14 @@ export type TasksByQuadrant = Readonly<
   Record<TaskQuadrant, readonly Task[]>
 >
 
+export const TASK_DATE_GROUPS = ['today', 'upcoming', 'overdue'] as const
+
+export type TaskDateGroup = (typeof TASK_DATE_GROUPS)[number]
+
+export type TasksByDateGroup = Readonly<
+  Record<TaskDateGroup, readonly Task[]>
+>
+
 const CANONICAL_LOWERCASE_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
@@ -163,6 +171,47 @@ export function groupTasksByQuadrant(
     const quadrant = getTaskQuadrant(task, today)
     if (quadrant !== null) {
       groups[quadrant].push(task)
+    }
+  }
+
+  return groups
+}
+
+export function getTaskDateGroup(
+  task: Task,
+  today: LocalDate,
+): TaskDateGroup | null {
+  if (
+    !isValidLocalDate(today) ||
+    task.dueDate === null ||
+    !isValidLocalDate(task.dueDate) ||
+    (task.status !== 'todo' && task.status !== 'doing')
+  ) {
+    return null
+  }
+  if (task.dueDate === today) {
+    return 'today'
+  }
+  if (isTaskOverdue(task, today)) {
+    return 'overdue'
+  }
+  return task.dueDate > today ? 'upcoming' : null
+}
+
+export function groupTasksByDate(
+  tasks: readonly Task[],
+  today: LocalDate,
+): TasksByDateGroup {
+  const groups: Record<TaskDateGroup, Task[]> = {
+    today: [],
+    upcoming: [],
+    overdue: [],
+  }
+
+  for (const task of tasks) {
+    const group = getTaskDateGroup(task, today)
+    if (group !== null) {
+      groups[group].push(task)
     }
   }
 

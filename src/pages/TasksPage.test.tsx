@@ -668,6 +668,122 @@ describe('TasksPage planning actions and derived presentation', () => {
   })
 })
 
+describe('TasksPage date view', () => {
+  test('derives today, upcoming, and overdue groups from active tasks', async () => {
+    const user = userEvent.setup()
+    const todayTodo = taskFixture(71, '今天到期的待办', {
+      dueDate: '2026-08-23',
+    })
+    const todayDoing = taskFixture(72, '今天到期的进行中任务', {
+      status: 'doing',
+      dueDate: '2026-08-23',
+    })
+    const upcoming = taskFixture(73, '未来到期的任务', {
+      dueDate: '2026-08-24',
+    })
+    const overdue = taskFixture(74, '已经逾期的任务', {
+      dueDate: '2026-08-22',
+    })
+    const completedToday = taskFixture(75, '已完成的今日任务', {
+      status: 'completed',
+      dueDate: '2026-08-23',
+    })
+    const cancelledUpcoming = taskFixture(76, '已取消的未来任务', {
+      status: 'cancelled',
+      dueDate: '2026-08-24',
+    })
+    const withoutDeadline = taskFixture(77, '没有截止日期的任务')
+    const fake = createServiceDouble([
+      todayTodo,
+      todayDoing,
+      upcoming,
+      overdue,
+      completedToday,
+      cancelledUpcoming,
+      withoutDeadline,
+    ])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByRole('list', { name: '任务列表' })
+
+    await user.click(screen.getByRole('tab', { name: '日期' }))
+
+    const dateView = screen.getByRole('region', { name: '任务日期视图' })
+    expect(screen.getByRole('tab', { name: '日期' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+    expect(
+      within(dateView).getByRole('button', { name: '今日，2 项任务' }),
+    ).toHaveAttribute('aria-pressed', 'true')
+    expect(within(dateView).getByText(todayTodo.title)).toBeInTheDocument()
+    expect(within(dateView).getByText(todayDoing.title)).toBeInTheDocument()
+    expect(within(dateView).queryByText(upcoming.title)).not.toBeInTheDocument()
+    expect(
+      within(dateView).queryByText(completedToday.title),
+    ).not.toBeInTheDocument()
+
+    await user.click(
+      within(dateView).getByRole('button', {
+        name: '即将到期，1 项任务',
+      }),
+    )
+    expect(within(dateView).getByText(upcoming.title)).toBeInTheDocument()
+    expect(
+      within(dateView).queryByText(cancelledUpcoming.title),
+    ).not.toBeInTheDocument()
+    expect(
+      within(dateView).queryByText(withoutDeadline.title),
+    ).not.toBeInTheDocument()
+
+    await user.click(
+      within(dateView).getByRole('button', { name: '已逾期，1 项任务' }),
+    )
+    const overdueList = within(dateView).getByRole('list', {
+      name: '任务列表',
+    })
+    expect(within(overdueList).getByText(overdue.title)).toBeInTheDocument()
+    expect(within(overdueList).getByText('已逾期')).toBeInTheDocument()
+  })
+
+  test('re-derives the selected date group after a deadline change', async () => {
+    const user = userEvent.setup()
+    const todayTask = taskFixture(81, '需要改期的任务', {
+      dueDate: '2026-08-23',
+    })
+    const movedTask = {
+      ...todayTask,
+      dueDate: '2026-08-24',
+      updatedAtMs: 200,
+    }
+    const fake = createServiceDouble([todayTask])
+    fake.setTaskDeadline.mockResolvedValueOnce(movedTask)
+    fake.listTasks
+      .mockResolvedValueOnce([todayTask])
+      .mockResolvedValueOnce([movedTask])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByText(todayTask.title)
+    await user.click(screen.getByRole('tab', { name: '日期' }))
+
+    fireEvent.change(
+      screen.getByLabelText(`任务截止日期：${todayTask.title}`),
+      { target: { value: '2026-08-24' } },
+    )
+
+    expect(fake.setTaskDeadline).toHaveBeenCalledWith(
+      todayTask.id,
+      '2026-08-24',
+    )
+    expect(await screen.findByText('暂无今日任务')).toBeInTheDocument()
+    await user.click(
+      screen.getByRole('button', { name: '即将到期，1 项任务' }),
+    )
+    expect(await screen.findByText(todayTask.title)).toBeInTheDocument()
+    expect(fake.listTasks).toHaveBeenCalledTimes(2)
+  })
+})
+
 describe('TasksPage quadrant view', () => {
   test('defaults to list and switches to correctly grouped quadrants', async () => {
     const user = userEvent.setup()

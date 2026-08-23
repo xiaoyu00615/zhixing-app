@@ -1,10 +1,18 @@
-import { LayoutGrid, ListTodo, Plus, RotateCcw, X } from 'lucide-react'
+import {
+  CalendarDays,
+  LayoutGrid,
+  ListTodo,
+  Plus,
+  RotateCcw,
+  X,
+} from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import {
   CreateTaskDialog,
   RenameTaskDialog,
 } from '@/components/tasks/TaskDialogs'
+import { TaskDateView } from '@/components/tasks/TaskDateView'
 import { TaskList, type TaskStatusAction } from '@/components/tasks/TaskList'
 import { TaskQuadrantView } from '@/components/tasks/TaskQuadrantView'
 import { Button } from '@/components/ui/button'
@@ -69,7 +77,7 @@ export function TasksPage({
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
   const [service, setService] = useState<TaskService | null>(null)
   const [tasks, setTasks] = useState<readonly Task[]>([])
-  const [view, setView] = useState<'list' | 'quadrant'>('list')
+  const [view, setView] = useState<'list' | 'quadrant' | 'date'>('list')
   const [feedback, setFeedback] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
   const [createTitle, setCreateTitle] = useState('')
@@ -420,6 +428,23 @@ export function TasksPage({
               <LayoutGrid data-icon="inline-start" />
               四象限
             </Button>
+            <Button
+              aria-controls="task-date-panel"
+              aria-selected={view === 'date'}
+              className={
+                view === 'date'
+                  ? 'h-16 rounded-none border-x-0 border-t-0 border-b-2 border-b-primary bg-transparent px-0 text-primary hover:bg-transparent'
+                  : 'h-16 rounded-none border-0 bg-transparent px-0 text-foreground-secondary hover:bg-transparent hover:text-foreground'
+              }
+              id="task-date-tab"
+              onClick={() => setView('date')}
+              role="tab"
+              type="button"
+              variant="ghost"
+            >
+              <CalendarDays data-icon="inline-start" />
+              日期
+            </Button>
           </div>
 
           <div className="flex items-center gap-3 pb-2.5">
@@ -523,6 +548,45 @@ export function TasksPage({
               )
             }
             onCreate={openCreateDialog}
+            onSetDeadline={(task, dueDate) =>
+              void runPlanningAction(task, (currentService) =>
+                currentService.setTaskDeadline(task.id, dueDate),
+              )
+            }
+            onSetImportance={(task, isImportant) =>
+              void runPlanningAction(task, (currentService) =>
+                currentService.setTaskImportance(task.id, isImportant),
+              )
+            }
+            onSetUrgency={(task, isUrgent) =>
+              void runPlanningAction(task, (currentService) =>
+                currentService.setTaskUrgency(task.id, isUrgent),
+              )
+            }
+            onStatusAction={(task, action) =>
+              void runStatusAction(task, action)
+            }
+            pendingTaskIds={pendingTaskIds}
+            tasks={tasks}
+            today={today}
+          />
+        </div>
+      )}
+
+      {phase === 'ready' && view === 'date' && (
+        <div
+          aria-labelledby="task-date-tab"
+          id="task-date-panel"
+          role="tabpanel"
+        >
+          <TaskDateView
+            onClearDeadline={(task) =>
+              void runPlanningAction(task, (currentService) =>
+                currentService.clearTaskDeadline(task.id),
+              )
+            }
+            onCreate={openCreateDialog}
+            onRename={openRenameDialog}
             onSetDeadline={(task, dueDate) =>
               void runPlanningAction(task, (currentService) =>
                 currentService.setTaskDeadline(task.id, dueDate),
