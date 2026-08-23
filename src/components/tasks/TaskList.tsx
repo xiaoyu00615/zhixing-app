@@ -1,5 +1,5 @@
 import {
-  CalendarClock,
+  CalendarDays,
   CalendarX,
   Check,
   CirclePlay,
@@ -61,7 +61,7 @@ const STATUS_PRESENTATION: Record<
 function formatUpdatedAt(updatedAtMs: number): string {
   const date = new Date(updatedAtMs)
   if (Number.isNaN(date.getTime())) {
-    return '更新时间未知'
+    return '时间未知'
   }
   return new Intl.DateTimeFormat('zh-CN', {
     month: 'numeric',
@@ -83,177 +83,228 @@ export function TaskList({
   onClearDeadline,
 }: TaskListProps) {
   return (
-    <div className="overflow-x-auto rounded-lg border border-border bg-surface shadow-card">
-      <div className="min-w-[1180px]">
-        <div className="grid min-h-10 grid-cols-[minmax(220px,1fr)_100px_180px_150px_230px_minmax(280px,auto)] items-center gap-4 border-b border-border bg-surface-secondary px-5 text-caption font-medium text-foreground-tertiary">
-          <span>任务名称</span>
-          <span>状态</span>
-          <span>截止日期</span>
-          <span>更新时间</span>
-          <span>规划属性</span>
-          <span className="text-right">操作</span>
-        </div>
-        <ul aria-label="任务列表" className="divide-y divide-border">
-          {tasks.map((task) => {
-            const pending = pendingTaskIds.has(task.id)
-            const status = STATUS_PRESENTATION[task.status]
-            const overdue = isTaskOverdue(task, today)
-            const effectivelyUrgent = isTaskEffectivelyUrgent(task, today)
-            return (
-              <li
-                className="grid min-h-[74px] grid-cols-[minmax(220px,1fr)_100px_180px_150px_230px_minmax(280px,auto)] items-center gap-4 px-5 transition-colors hover:bg-hover"
-                aria-busy={pending}
-                key={task.id}
-              >
-                <div className="min-w-0 space-y-1.5">
-                  <p className="truncate text-body font-medium text-foreground">
+    <div className="overflow-hidden rounded-lg border border-border bg-surface">
+      <ul aria-label="任务列表" className="divide-y divide-border">
+        {tasks.map((task) => {
+          const pending = pendingTaskIds.has(task.id)
+          const status = STATUS_PRESENTATION[task.status]
+          const overdue = isTaskOverdue(task, today)
+          const effectivelyUrgent = isTaskEffectivelyUrgent(task, today)
+          const isActive = task.status === 'todo' || task.status === 'doing'
+
+          return (
+            <li
+              aria-busy={pending}
+              className="group flex min-h-[100px] items-start gap-3 px-4 py-[18px] transition-colors duration-150 hover:bg-hover/70 sm:gap-4 sm:px-5"
+              key={task.id}
+            >
+              {isActive ? (
+                <Button
+                  aria-label={`完成任务：${task.title}`}
+                  className="mt-0.5 size-6 shrink-0 rounded-full border-border text-transparent hover:border-primary hover:bg-primary-softest hover:text-primary focus-visible:text-primary"
+                  disabled={pending}
+                  onClick={() => onStatusAction(task, 'completeTask')}
+                  size="icon-sm"
+                  title="完成任务"
+                  type="button"
+                  variant="outline"
+                >
+                  <Check className="size-3.5" aria-hidden="true" />
+                </Button>
+              ) : (
+                <span
+                  aria-hidden="true"
+                  className={`mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full border ${
+                    task.status === 'completed'
+                      ? 'border-success/25 bg-success-soft text-success'
+                      : 'border-danger/20 bg-danger-soft text-danger'
+                  }`}
+                >
+                  {task.status === 'completed' ? (
+                    <Check className="size-3.5" />
+                  ) : (
+                    <X className="size-3.5" />
+                  )}
+                </span>
+              )}
+
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <p
+                    className={`min-w-0 break-words text-[15px] leading-6 font-semibold text-foreground ${
+                      task.status === 'completed' || task.status === 'cancelled'
+                        ? 'text-foreground-secondary line-through decoration-border'
+                        : ''
+                    }`}
+                  >
                     {task.title}
                   </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {task.isImportant && (
-                      <Badge variant="secondary">重要</Badge>
-                    )}
-                    {overdue && <Badge variant="destructive">已逾期</Badge>}
-                    {effectivelyUrgent && (
-                      <Badge
-                        className="border-warning/20 bg-warning-soft text-warning"
-                        variant="outline"
-                      >
-                        {task.isUrgent ? '紧急' : '紧急（逾期）'}
-                      </Badge>
-                    )}
-                  </div>
-                </div>
-                <Badge className={status.className} variant="outline">
-                  {status.label}
-                </Badge>
-                <div className="flex items-center gap-2">
-                  <Input
-                    aria-label={`任务截止日期：${task.title}`}
-                    className="w-[132px]"
-                    disabled={pending}
-                    onChange={(event) => {
-                      if (event.target.value === '') {
-                        onClearDeadline(task)
-                      } else {
-                        onSetDeadline(task, event.target.value)
-                      }
-                    }}
-                    type="date"
-                    value={task.dueDate ?? ''}
-                  />
-                  {task.dueDate !== null && (
-                    <Button
-                      aria-label={`清除截止日期：${task.title}`}
-                      disabled={pending}
-                      onClick={() => onClearDeadline(task)}
-                      size="icon-sm"
-                      title="清除截止日期"
-                      type="button"
-                      variant="ghost"
+                  <Badge className={status.className} variant="outline">
+                    {status.label}
+                  </Badge>
+                  {overdue && <Badge variant="destructive">已逾期</Badge>}
+                  {effectivelyUrgent && !task.isUrgent && (
+                    <Badge
+                      className="border-warning/20 bg-warning-soft text-warning"
+                      variant="outline"
                     >
-                      <CalendarX aria-hidden="true" />
-                    </Button>
+                      紧急（逾期）
+                    </Badge>
                   )}
                 </div>
-                <span className="flex items-center gap-2 text-auxiliary text-foreground-tertiary">
-                  <CalendarClock className="size-3.5" aria-hidden="true" />
-                  {formatUpdatedAt(task.updatedAtMs)}
-                </span>
-                <div className="flex flex-wrap items-center gap-2">
+
+                <div className="mt-2 flex flex-wrap items-center gap-x-1 gap-y-1 text-auxiliary text-foreground-tertiary">
+                  <span className="mr-1">更新于 {formatUpdatedAt(task.updatedAtMs)}</span>
+                  <span aria-hidden="true" className="text-border-strong">
+                    ·
+                  </span>
                   <Button
                     aria-label={`${task.isImportant ? '取消重要' : '设为重要'}：${task.title}`}
+                    className={`h-7 rounded-sm border-0 px-2 text-auxiliary ${
+                      task.isImportant
+                        ? 'bg-danger-soft text-danger hover:bg-danger-soft/75'
+                        : 'bg-transparent text-foreground-tertiary hover:bg-surface-secondary hover:text-foreground-secondary'
+                    }`}
                     disabled={pending}
                     onClick={() => onSetImportance(task, !task.isImportant)}
-                    size="sm"
                     type="button"
-                    variant={task.isImportant ? 'secondary' : 'outline'}
+                    variant="ghost"
                   >
-                    <Star data-icon="inline-start" />
+                    <Star
+                      className={task.isImportant ? 'fill-current' : undefined}
+                      data-icon="inline-start"
+                    />
                     {task.isImportant ? '重要' : '不重要'}
                   </Button>
                   <Button
                     aria-label={`${task.isUrgent ? '取消基础紧急' : '设为基础紧急'}：${task.title}`}
+                    className={`h-7 rounded-sm border-0 px-2 text-auxiliary ${
+                      effectivelyUrgent
+                        ? 'bg-warning-soft text-warning hover:bg-warning-soft/75'
+                        : 'bg-transparent text-foreground-tertiary hover:bg-surface-secondary hover:text-foreground-secondary'
+                    }`}
                     disabled={pending}
                     onClick={() => onSetUrgency(task, !task.isUrgent)}
-                    size="sm"
-                    type="button"
-                    variant={task.isUrgent ? 'secondary' : 'outline'}
-                  >
-                    <Zap data-icon="inline-start" />
-                    {task.isUrgent ? '基础紧急' : '基础不紧急'}
-                  </Button>
-                </div>
-                <div className="flex items-center justify-end gap-2">
-                  <Button
-                    aria-label={`重命名任务：${task.title}`}
-                    disabled={pending}
-                    onClick={() => onRename(task)}
-                    size="sm"
                     type="button"
                     variant="ghost"
                   >
-                    <Pencil data-icon="inline-start" />
-                    重命名
+                    <Zap
+                      className={task.isUrgent ? 'fill-current' : undefined}
+                      data-icon="inline-start"
+                    />
+                    {task.isUrgent ? '基础紧急' : '基础不紧急'}
                   </Button>
-                  {task.status === 'todo' && (
-                    <Button
-                      aria-label={`开始任务：${task.title}`}
-                      disabled={pending}
-                      onClick={() => onStatusAction(task, 'startTask')}
-                      size="sm"
-                      type="button"
-                      variant="outline"
+                  <div
+                    className={`group/deadline relative flex h-7 items-center rounded-sm focus-within:[box-shadow:var(--focus-ring)] ${
+                      overdue
+                        ? 'bg-danger-soft text-danger'
+                        : 'text-foreground-tertiary hover:bg-surface-secondary hover:text-foreground-secondary'
+                    }`}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="inline-flex h-7 items-center gap-1.5 px-2 text-auxiliary"
                     >
-                      <CirclePlay data-icon="inline-start" />
-                      开始
-                    </Button>
-                  )}
-                  {(task.status === 'todo' || task.status === 'doing') && (
-                    <Button
-                      aria-label={`完成任务：${task.title}`}
+                      <CalendarDays className="size-4" />
+                      {task.dueDate === null ? '无截止日期' : task.dueDate}
+                    </span>
+                    <Input
+                      aria-label={`任务截止日期：${task.title}`}
+                      className="absolute inset-0 h-full w-full cursor-pointer border-0 opacity-0"
                       disabled={pending}
-                      onClick={() => onStatusAction(task, 'completeTask')}
-                      size="sm"
-                      type="button"
-                    >
-                      <Check data-icon="inline-start" />
-                      完成
-                    </Button>
-                  )}
-                  {(task.status === 'todo' || task.status === 'doing') && (
-                    <Button
-                      aria-label={`取消任务：${task.title}`}
-                      disabled={pending}
-                      onClick={() => onStatusAction(task, 'cancelTask')}
-                      size="sm"
-                      type="button"
-                      variant="destructive"
-                    >
-                      <X data-icon="inline-start" />
-                      取消
-                    </Button>
-                  )}
-                  {(task.status === 'completed' ||
-                    task.status === 'cancelled') && (
-                    <Button
-                      aria-label={`恢复任务：${task.title}`}
-                      disabled={pending}
-                      onClick={() => onStatusAction(task, 'reopenTask')}
-                      size="sm"
-                      type="button"
-                      variant="outline"
-                    >
-                      <RotateCcw data-icon="inline-start" />
-                      恢复
-                    </Button>
-                  )}
+                      onChange={(event) => {
+                        if (event.target.value === '') {
+                          onClearDeadline(task)
+                        } else {
+                          onSetDeadline(task, event.target.value)
+                        }
+                      }}
+                      type="date"
+                      value={task.dueDate ?? ''}
+                    />
+                    {task.dueDate !== null && (
+                      <Button
+                        aria-label={`清除截止日期：${task.title}`}
+                        className="relative z-10 mr-0.5 size-6 text-foreground-tertiary opacity-60 hover:bg-surface hover:text-foreground group-hover/deadline:opacity-100 group-focus-within/deadline:opacity-100"
+                        disabled={pending}
+                        onClick={() => onClearDeadline(task)}
+                        size="icon-sm"
+                        title="清除截止日期"
+                        type="button"
+                        variant="ghost"
+                      >
+                        <CalendarX aria-hidden="true" />
+                      </Button>
+                    )}
+                  </div>
+                  <div className="ml-2 flex shrink-0 items-center gap-0.5">
+                    {task.status === 'todo' && (
+                      <Button
+                        aria-label={`开始任务：${task.title}`}
+                        className="h-7"
+                        disabled={pending}
+                        onClick={() => onStatusAction(task, 'startTask')}
+                        size="sm"
+                        title="开始任务"
+                        type="button"
+                        variant="outline"
+                      >
+                        <CirclePlay data-icon="inline-start" />
+                        开始
+                      </Button>
+                    )}
+                    {(task.status === 'completed' ||
+                      task.status === 'cancelled') && (
+                      <Button
+                        aria-label={`恢复任务：${task.title}`}
+                        className="h-7"
+                        disabled={pending}
+                        onClick={() => onStatusAction(task, 'reopenTask')}
+                        size="sm"
+                        title="恢复任务"
+                        type="button"
+                        variant="outline"
+                      >
+                        <RotateCcw data-icon="inline-start" />
+                        恢复
+                      </Button>
+                    )}
+                    <div className="flex items-center gap-0.5 opacity-60 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 lg:opacity-0">
+                      <Button
+                        aria-label={`重命名任务：${task.title}`}
+                        disabled={pending}
+                        onClick={() => onRename(task)}
+                        size="icon-sm"
+                        title="重命名"
+                        type="button"
+                        variant="ghost"
+                      >
+                        <Pencil aria-hidden="true" />
+                      </Button>
+                      {isActive && (
+                        <Button
+                          aria-label={`取消任务：${task.title}`}
+                          className="text-foreground-tertiary hover:bg-danger-soft hover:text-danger"
+                          disabled={pending}
+                          onClick={() =>
+                            onStatusAction(task, 'cancelTask')
+                          }
+                          size="icon-sm"
+                          title="取消任务"
+                          type="button"
+                          variant="ghost"
+                        >
+                          <X aria-hidden="true" />
+                        </Button>
+                      )}
+                    </div>
+                  </div>
                 </div>
-              </li>
-            )
-          })}
-        </ul>
-      </div>
+              </div>
+            </li>
+          )
+        })}
+      </ul>
     </div>
   )
 }

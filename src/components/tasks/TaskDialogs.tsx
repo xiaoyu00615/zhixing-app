@@ -1,4 +1,5 @@
 import type { FormEvent } from 'react'
+import { CalendarDays, Star, Zap } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -59,15 +60,20 @@ export function CreateTaskDialog({
       }}
       open={open}
     >
-      <DialogContent showCloseButton={!pending}>
+      <DialogContent
+        className="gap-5 p-6 sm:max-w-[520px]"
+        showCloseButton={!pending}
+      >
         <form className="contents" onSubmit={submit}>
-          <DialogHeader>
-            <DialogTitle>新建任务</DialogTitle>
+          <DialogHeader className="pr-8">
+            <DialogTitle className="text-module font-semibold">
+              新建任务
+            </DialogTitle>
             <DialogDescription>
-              输入任务标题。任务将保存到当前本地数据存储。
+              记录任务并设置当前需要的规划属性，内容会保存到本地。
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
+          <div className="space-y-5">
             <div className="space-y-2">
               <label className="text-body font-medium" htmlFor="create-title">
                 标题
@@ -94,7 +100,13 @@ export function CreateTaskDialog({
               )}
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
-              <label className="flex items-center gap-2 text-body text-foreground">
+              <label
+                className={`flex cursor-pointer items-center gap-3 rounded-lg border p-3 transition-colors ${
+                  isImportant
+                    ? 'border-primary/35 bg-primary-softest'
+                    : 'border-border bg-surface hover:bg-hover'
+                }`}
+              >
                 <input
                   checked={isImportant}
                   className="size-[18px] accent-primary"
@@ -102,9 +114,21 @@ export function CreateTaskDialog({
                   onChange={(event) => onImportanceChange(event.target.checked)}
                   type="checkbox"
                 />
-                重要任务
+                <span className="flex min-w-0 items-center gap-2 text-body font-medium text-foreground">
+                  <Star
+                    aria-hidden="true"
+                    className={`size-4 text-primary ${isImportant ? 'fill-current' : ''}`}
+                  />
+                  重要任务
+                </span>
               </label>
-              <label className="flex items-center gap-2 text-body text-foreground">
+              <label
+                className={`flex cursor-pointer items-center gap-3 rounded-lg border p-3 transition-colors ${
+                  isUrgent
+                    ? 'border-warning/35 bg-warning-soft'
+                    : 'border-border bg-surface hover:bg-hover'
+                }`}
+              >
                 <input
                   checked={isUrgent}
                   className="size-[18px] accent-primary"
@@ -112,16 +136,31 @@ export function CreateTaskDialog({
                   onChange={(event) => onUrgencyChange(event.target.checked)}
                   type="checkbox"
                 />
-                基础紧急
+                <span className="flex min-w-0 items-center gap-2 text-body font-medium text-foreground">
+                  <Zap
+                    aria-hidden="true"
+                    className={`size-4 text-warning ${isUrgent ? 'fill-current' : ''}`}
+                  />
+                  基础紧急
+                </span>
               </label>
             </div>
-            <div className="space-y-2">
-              <label
-                className="text-body font-medium"
-                htmlFor="create-due-date"
-              >
-                截止日期
-              </label>
+            <div className="space-y-3 rounded-lg border border-border bg-surface-secondary/35 p-4">
+              <div className="flex items-center gap-2">
+                <CalendarDays
+                  aria-hidden="true"
+                  className="size-4 text-foreground-secondary"
+                />
+                <label
+                  className="text-body font-medium"
+                  htmlFor="create-due-date"
+                >
+                  截止日期
+                </label>
+                <span className="text-caption text-foreground-tertiary">
+                  可选
+                </span>
+              </div>
               <Input
                 aria-describedby={
                   dueDateError === null ? undefined : 'create-due-date-error'
@@ -147,10 +186,7 @@ export function CreateTaskDialog({
               )}
             </div>
           </div>
-          <DialogFooter>
-            <Button disabled={pending} type="submit">
-              {pending ? '正在创建…' : '创建任务'}
-            </Button>
+          <DialogFooter className="-mx-6 -mb-6 px-6 py-4">
             <Button
               disabled={pending}
               onClick={() => onOpenChange(false)}
@@ -158,6 +194,9 @@ export function CreateTaskDialog({
               variant="outline"
             >
               取消
+            </Button>
+            <Button disabled={pending} type="submit">
+              {pending ? '正在创建…' : '创建任务'}
             </Button>
           </DialogFooter>
         </form>
@@ -199,11 +238,13 @@ export function RenameTaskDialog({
       }}
       open={task !== null}
     >
-      <DialogContent showCloseButton={!pending}>
+      <DialogContent className="gap-5 p-5" showCloseButton={!pending}>
         {task !== null && (
           <form className="contents" onSubmit={submit}>
-            <DialogHeader>
-              <DialogTitle>重命名任务</DialogTitle>
+            <DialogHeader className="pr-8">
+              <DialogTitle className="text-subtitle font-semibold">
+                重命名任务
+              </DialogTitle>
               <DialogDescription>
                 修改任务标题，不会改变任务的当前状态。
               </DialogDescription>
@@ -232,10 +273,7 @@ export function RenameTaskDialog({
                 </p>
               )}
             </div>
-            <DialogFooter>
-              <Button disabled={pending} type="submit">
-                {pending ? '正在保存…' : '保存修改'}
-              </Button>
+            <DialogFooter className="-mx-5 -mb-5 px-5 py-4">
               <Button
                 disabled={pending}
                 onClick={onClose}
@@ -243,6 +281,9 @@ export function RenameTaskDialog({
                 variant="outline"
               >
                 取消
+              </Button>
+              <Button disabled={pending} type="submit">
+                {pending ? '正在保存…' : '保存修改'}
               </Button>
             </DialogFooter>
           </form>

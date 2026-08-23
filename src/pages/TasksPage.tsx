@@ -27,14 +27,14 @@ interface RenameState {
 function LoadingState() {
   return (
     <div
-      className="space-y-3 rounded-lg border border-border bg-surface p-5 shadow-card"
+      className="space-y-2.5 rounded-lg border border-border bg-surface-secondary/35 p-4"
       role="status"
       aria-label="正在加载任务"
     >
       <span className="sr-only">正在加载任务</span>
       {[0, 1, 2].map((item) => (
         <div
-          className="h-[50px] animate-pulse rounded-sm bg-surface-secondary"
+          className="h-[58px] animate-pulse rounded-md bg-surface-secondary"
           key={item}
         />
       ))}
@@ -44,9 +44,9 @@ function LoadingState() {
 
 function EmptyState({ onCreate }: { readonly onCreate: () => void }) {
   return (
-    <div className="flex min-h-72 flex-col items-center justify-center rounded-lg border border-border bg-surface px-6 py-12 text-center shadow-card">
-      <div className="mb-4 flex size-16 items-center justify-center rounded-2xl bg-primary-softest text-primary">
-        <ListTodo className="size-8" aria-hidden="true" />
+    <div className="flex min-h-80 flex-col items-center justify-center rounded-lg border border-dashed border-border bg-surface-secondary/25 px-6 py-12 text-center">
+      <div className="mb-4 flex size-14 items-center justify-center rounded-xl bg-primary-softest text-primary">
+        <ListTodo className="size-7" aria-hidden="true" />
       </div>
       <h3 className="text-module font-semibold text-foreground">还没有任务</h3>
       <p className="mt-2 max-w-sm text-body text-foreground-secondary">
@@ -374,26 +374,67 @@ export function TasksPage({
   }
 
   return (
-    <section className="space-y-6" aria-labelledby="tasks-page-title">
-      <div className="flex items-start justify-between gap-6">
-        <div>
-          <h2
-            className="text-title font-semibold text-foreground"
-            id="tasks-page-title"
+    <section className="min-w-0 space-y-5" aria-labelledby="tasks-page-title">
+      <h2 className="sr-only" id="tasks-page-title">
+        任务
+      </h2>
+
+      {phase === 'ready' && (
+        <div className="flex min-h-16 flex-wrap items-end justify-between gap-x-6 gap-y-3 border-b border-border">
+          <div
+            aria-label="任务视图"
+            className="flex h-16 items-end gap-8"
+            role="tablist"
           >
-            任务
-          </h2>
-          <p className="mt-1 text-body text-foreground-secondary">
-            管理当前任务及其执行状态。
-          </p>
+            <Button
+              aria-controls="task-list-panel"
+              aria-selected={view === 'list'}
+              className={
+                view === 'list'
+                  ? 'h-16 rounded-none border-x-0 border-t-0 border-b-2 border-b-primary bg-transparent px-0 text-primary hover:bg-transparent'
+                  : 'h-16 rounded-none border-0 bg-transparent px-0 text-foreground-secondary hover:bg-transparent hover:text-foreground'
+              }
+              id="task-list-tab"
+              onClick={() => setView('list')}
+              role="tab"
+              type="button"
+              variant="ghost"
+            >
+              <ListTodo data-icon="inline-start" />
+              列表
+            </Button>
+            <Button
+              aria-controls="task-quadrant-panel"
+              aria-selected={view === 'quadrant'}
+              className={
+                view === 'quadrant'
+                  ? 'h-16 rounded-none border-x-0 border-t-0 border-b-2 border-b-primary bg-transparent px-0 text-primary hover:bg-transparent'
+                  : 'h-16 rounded-none border-0 bg-transparent px-0 text-foreground-secondary hover:bg-transparent hover:text-foreground'
+              }
+              id="task-quadrant-tab"
+              onClick={() => setView('quadrant')}
+              role="tab"
+              type="button"
+              variant="ghost"
+            >
+              <LayoutGrid data-icon="inline-start" />
+              四象限
+            </Button>
+          </div>
+
+          <div className="flex items-center gap-3 pb-2.5">
+            <span className="text-auxiliary text-foreground-secondary">
+              {tasks.length} 项任务
+            </span>
+            {tasks.length > 0 && (
+              <Button onClick={openCreateDialog} type="button">
+                <Plus data-icon="inline-start" />
+                新建任务
+              </Button>
+            )}
+          </div>
         </div>
-        {phase === 'ready' && tasks.length > 0 && (
-          <Button onClick={openCreateDialog} type="button">
-            <Plus data-icon="inline-start" />
-            新建任务
-          </Button>
-        )}
-      </div>
+      )}
 
       {feedback !== null && (
         <div
@@ -404,50 +445,15 @@ export function TasksPage({
         </div>
       )}
 
-      {phase === 'ready' && (
-        <div
-          aria-label="任务视图"
-          className="inline-flex rounded-md border border-border bg-surface p-1 shadow-sm"
-          role="tablist"
-        >
-          <Button
-            aria-controls="task-list-panel"
-            aria-selected={view === 'list'}
-            id="task-list-tab"
-            onClick={() => setView('list')}
-            role="tab"
-            size="sm"
-            type="button"
-            variant={view === 'list' ? 'secondary' : 'ghost'}
-          >
-            <ListTodo data-icon="inline-start" />
-            列表
-          </Button>
-          <Button
-            aria-controls="task-quadrant-panel"
-            aria-selected={view === 'quadrant'}
-            id="task-quadrant-tab"
-            onClick={() => setView('quadrant')}
-            role="tab"
-            size="sm"
-            type="button"
-            variant={view === 'quadrant' ? 'secondary' : 'ghost'}
-          >
-            <LayoutGrid data-icon="inline-start" />
-            四象限
-          </Button>
-        </div>
-      )}
-
       {phase === 'loading' && <LoadingState />}
 
       {phase === 'error' && (
         <div
-          className="flex min-h-72 flex-col items-center justify-center rounded-lg border border-border bg-surface px-6 py-12 text-center shadow-card"
+          className="flex min-h-80 flex-col items-center justify-center rounded-lg border border-danger/15 bg-danger-soft/35 px-6 py-12 text-center"
           role="alert"
         >
-          <div className="mb-4 flex size-16 items-center justify-center rounded-2xl bg-danger-soft text-danger">
-            <X className="size-8" aria-hidden="true" />
+          <div className="mb-4 flex size-14 items-center justify-center rounded-xl bg-danger-soft text-danger">
+            <X className="size-7" aria-hidden="true" />
           </div>
           <h3 className="text-module font-semibold text-foreground">
             无法加载任务
@@ -463,7 +469,11 @@ export function TasksPage({
       )}
 
       {phase === 'ready' && view === 'list' && (
-        <div aria-labelledby="task-list-tab" id="task-list-panel" role="tabpanel">
+        <div
+          aria-labelledby="task-list-tab"
+          id="task-list-panel"
+          role="tabpanel"
+        >
           {tasks.length === 0 ? (
             <EmptyState onCreate={openCreateDialog} />
           ) : (
