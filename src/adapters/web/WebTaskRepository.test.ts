@@ -37,6 +37,9 @@ const TASK = {
   status: 'todo',
   createdAtMs: 100,
   updatedAtMs: 100,
+  isImportant: false,
+  isUrgent: false,
+  dueDate: null,
 } as const
 
 class FakeWorker implements TaskWorkerEndpoint {
@@ -108,6 +111,18 @@ class ContractWorker implements TaskWorkerEndpoint {
           break
         case 'task.changeStatus':
           result = this.backend.changeTaskStatus(request.input)
+          break
+        case 'task.setImportance':
+          result = this.backend.setTaskImportance(request.input)
+          break
+        case 'task.setUrgency':
+          result = this.backend.setTaskUrgency(request.input)
+          break
+        case 'task.setDeadline':
+          result = this.backend.setTaskDeadline(request.input)
+          break
+        case 'task.clearDeadline':
+          result = this.backend.clearTaskDeadline(request.input)
           break
         case 'shutdown':
           result = null
@@ -297,6 +312,47 @@ describe('WebTaskRepository', () => {
     })
     worker.respondToLast({ ...TASK, status: 'doing', updatedAtMs: 300 })
     await expect(changed).resolves.toMatchObject({ status: 'doing' })
+
+    const important = repository.setTaskImportance({
+      id: ID,
+      isImportant: true,
+      updatedAtMs: 400,
+    })
+    expect(worker.messages.at(-1)).toMatchObject({
+      type: 'task.setImportance',
+    })
+    worker.respondToLast({ ...TASK, isImportant: true, updatedAtMs: 400 })
+    await expect(important).resolves.toMatchObject({ isImportant: true })
+
+    const urgent = repository.setTaskUrgency({
+      id: ID,
+      isUrgent: true,
+      updatedAtMs: 500,
+    })
+    expect(worker.messages.at(-1)).toMatchObject({ type: 'task.setUrgency' })
+    worker.respondToLast({ ...TASK, isUrgent: true, updatedAtMs: 500 })
+    await expect(urgent).resolves.toMatchObject({ isUrgent: true })
+
+    const deadline = repository.setTaskDeadline({
+      id: ID,
+      dueDate: '2026-08-23',
+      updatedAtMs: 600,
+    })
+    expect(worker.messages.at(-1)).toMatchObject({ type: 'task.setDeadline' })
+    worker.respondToLast({
+      ...TASK,
+      dueDate: '2026-08-23',
+      updatedAtMs: 600,
+    })
+    await expect(deadline).resolves.toMatchObject({ dueDate: '2026-08-23' })
+
+    const cleared = repository.clearTaskDeadline({
+      id: ID,
+      updatedAtMs: 700,
+    })
+    expect(worker.messages.at(-1)).toMatchObject({ type: 'task.clearDeadline' })
+    worker.respondToLast({ ...TASK, updatedAtMs: 700 })
+    await expect(cleared).resolves.toMatchObject({ dueDate: null })
   })
 
   test('preserves database list ordering', async () => {
@@ -328,6 +384,18 @@ describe('WebTaskRepository', () => {
     await expect(malformed).rejects.toMatchObject({
       code: 'PERSISTENCE_FAILED',
     })
+
+    for (const payload of [
+      { ...TASK, isImportant: 1 },
+      { ...TASK, isUrgent: 'true' },
+      { ...TASK, dueDate: '2025-02-29' },
+    ]) {
+      const invalidPlanning = repository.listTasks()
+      worker.respondToLast([payload])
+      await expect(invalidPlanning).rejects.toMatchObject({
+        code: 'PERSISTENCE_FAILED',
+      })
+    }
   })
 
   test('returns no repository when Worker or isolation capability is absent', async () => {
@@ -392,11 +460,15 @@ describe('Web migrations', () => {
     const store = new FakeMigrationStore()
     await runWebMigrations(store, WEB_MIGRATIONS, () => 123)
 
-    expect(WEB_MIGRATIONS[0]?.sql).not.toContain('\r')
-    expect(WEB_MIGRATIONS[0]?.sql.charCodeAt(0)).not.toBe(0xfeff)
+    for (const migration of WEB_MIGRATIONS) {
+      expect(migration.sql).not.toContain('\r')
+      expect(migration.sql.charCodeAt(0)).not.toBe(0xfeff)
+    }
     expect(store.metadataEnsured).toBe(true)
     expect(store.metadataValidated).toBe(true)
-    expect(store.executedSql).toEqual([WEB_MIGRATIONS[0]?.sql])
+    expect(store.executedSql).toEqual(
+      WEB_MIGRATIONS.map((migration) => migration.sql),
+    )
     expect(store.history).toEqual([
       {
         version: 1,
@@ -404,16 +476,26 @@ describe('Web migrations', () => {
         checksumSha256: await sha256Hex(WEB_MIGRATIONS[0]?.sql ?? ''),
         appliedAtMs: 123,
       },
+      {
+        version: 2,
+        id: '0002_add_task_planning_fields',
+        checksumSha256: await sha256Hex(WEB_MIGRATIONS[1]?.sql ?? ''),
+        appliedAtMs: 123,
+      },
     ])
   })
 
-  test('accepts an exact contiguous prefix and is idempotent', async () => {
+  test('upgrades an exact v1 prefix and is idempotent after v2', async () => {
     const store = new FakeMigrationStore()
-    await runWebMigrations(store, WEB_MIGRATIONS, () => 123)
+    await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 1), () => 123)
+    expect(store.history.map((row) => row.version)).toEqual([1])
+    await runWebMigrations(store, WEB_MIGRATIONS, () => 456)
     await runWebMigrations(store, WEB_MIGRATIONS, () => 456)
 
-    expect(store.executedSql).toHaveLength(1)
-    expect(store.history).toHaveLength(1)
+    expect(store.executedSql).toEqual(
+      WEB_MIGRATIONS.map((migration) => migration.sql),
+    )
+    expect(store.history.map((row) => row.version)).toEqual([1, 2])
   })
 
   test('fails closed on id and checksum mismatch', async () => {
@@ -456,15 +538,16 @@ describe('Web migrations', () => {
     }
   })
 
-  test('rolls migration SQL back when history insertion fails', async () => {
+  test('rolls Migration 2 SQL back when history insertion fails', async () => {
     const store = new FakeMigrationStore()
+    await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 1), () => 123)
     store.failHistoryInsert = true
 
     await expect(runWebMigrations(store)).rejects.toEqual(
       new WebMigrationError('APPLY_FAILED'),
     )
-    expect(store.executedSql).toEqual([])
-    expect(store.history).toEqual([])
+    expect(store.executedSql).toEqual([WEB_MIGRATIONS[0]?.sql])
+    expect(store.history.map((row) => row.version)).toEqual([1])
   })
 
   test('rejects definition gaps before touching metadata', async () => {
@@ -483,13 +566,17 @@ describe('Web migrations', () => {
   })
 })
 
-test('Batch B does not introduce a generic Worker command', () => {
+test('Task Worker protocol does not expose a generic command', () => {
   const allowed = [
     'initialize',
     'task.create',
     'task.list',
     'task.rename',
     'task.changeStatus',
+    'task.setImportance',
+    'task.setUrgency',
+    'task.setDeadline',
+    'task.clearDeadline',
     'shutdown',
   ]
   expect(allowed).not.toContain('sql')
@@ -498,4 +585,63 @@ test('Batch B does not introduce a generic Worker command', () => {
   expect(parseTaskWorkerRequest({ requestId: 1, type: 'sql' })).toBeNull()
   expect(parseTaskWorkerRequest({ requestId: 2, type: 'query' })).toBeNull()
   expect(parseTaskWorkerRequest({ requestId: 3, type: 'execute' })).toBeNull()
+})
+
+test('planning Worker messages are capability-specific and strictly parsed', () => {
+  expect(
+    parseTaskWorkerRequest({
+      requestId: 1,
+      type: 'task.setImportance',
+      input: { id: ID, isImportant: true, updatedAtMs: 200 },
+    }),
+  ).toEqual({
+    requestId: 1,
+    type: 'task.setImportance',
+    input: { id: ID, isImportant: true, updatedAtMs: 200 },
+  })
+  expect(
+    parseTaskWorkerRequest({
+      requestId: 2,
+      type: 'task.setUrgency',
+      input: { id: ID, isUrgent: false, updatedAtMs: 200 },
+    }),
+  ).not.toBeNull()
+  expect(
+    parseTaskWorkerRequest({
+      requestId: 3,
+      type: 'task.setDeadline',
+      input: { id: ID, dueDate: '2024-02-29', updatedAtMs: 200 },
+    }),
+  ).not.toBeNull()
+  expect(
+    parseTaskWorkerRequest({
+      requestId: 4,
+      type: 'task.clearDeadline',
+      input: { id: ID, updatedAtMs: 200, sql: 'DELETE' },
+    }),
+  ).toEqual({
+    requestId: 4,
+    type: 'task.clearDeadline',
+    input: { id: ID, updatedAtMs: 200 },
+  })
+
+  for (const request of [
+    {
+      requestId: 5,
+      type: 'task.setImportance',
+      input: { id: ID, isImportant: 1, updatedAtMs: 200 },
+    },
+    {
+      requestId: 6,
+      type: 'task.setUrgency',
+      input: { id: ID, isUrgent: 'true', updatedAtMs: 200 },
+    },
+    {
+      requestId: 7,
+      type: 'task.setDeadline',
+      input: { id: ID, dueDate: '2025-02-29', updatedAtMs: 200 },
+    },
+  ]) {
+    expect(parseTaskWorkerRequest(request)).toBeNull()
+  }
 })

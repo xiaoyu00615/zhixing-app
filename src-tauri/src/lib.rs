@@ -185,7 +185,11 @@ pub fn run() {
             commands::task_create,
             commands::task_list,
             commands::task_rename,
-            commands::task_change_status
+            commands::task_change_status,
+            commands::task_set_importance,
+            commands::task_set_urgency,
+            commands::task_set_deadline,
+            commands::task_clear_deadline
         ])
         .setup(|app| {
             // 🔒 冻结 §3：路径统一通过 PathResolver。
@@ -678,7 +682,7 @@ mod tests {
     // Step 9 Boot Pipeline Integration（冻结六 18 + 19）
     // ============================================================
 
-    // --- [18] FirstBoot integration：production Migration 1 applies through the Runner ---
+    // --- [18] FirstBoot integration：production migrations apply through the Runner ---
     #[test]
     fn step9_first_boot_pipeline_integration() {
         let (_t, cfg, local) = sandbox();
@@ -710,7 +714,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(rows, 1, "Production Migration 1 必须写入 history");
+        assert_eq!(rows, 2, "Production Migrations 1-2 必须写入 history");
         let task_table: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
@@ -732,7 +736,7 @@ mod tests {
     }
 
     // --- [19] Existing / retry / failure integration：
-    // 先 FirstBoot → 手动破坏 history 使其产生 MigrationError（HistoryGap）→
+    // 先 FirstBoot → 手动破坏 history 使其产生 MigrationError（FutureVersion）→
     // 下次 Existing 启动返回 Degraded(Database)，**bootstrap/Data Root 不被删除/修改**。
     #[test]
     fn step9_existing_retry_failure_preserves_everything() {
@@ -750,7 +754,7 @@ mod tests {
         let manifest_bytes_before =
             fs::read(data_root.join(MANIFEST_FILENAME)).unwrap();
 
-        // (2) Production already applied v1; insert v3 to create history [1,3].
+        // (2) Production already applied v1-v2; insert an unknown v3.
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
             conn.execute_batch(
@@ -766,9 +770,9 @@ mod tests {
             matches!(
                 status,
                 RuntimeStatus::Degraded(DegradedCause::Database(ref issue))
-                if issue.kind == "HistoryGap"
+                if issue.kind == "FutureVersion"
             ),
-            "Expected Degraded(Database::HistoryGap), got {:?}",
+            "Expected Degraded(Database::FutureVersion), got {:?}",
             status
         );
 
@@ -788,7 +792,7 @@ mod tests {
         assert_eq!(device_id_1.as_str(), loaded2.device_id.as_str());
         assert!(db_path.exists(), "失败不得删 zhixing.db");
 
-        // (4) Remove only the injected v3 row; approved v1 remains intact.
+        // (4) Remove only the injected v3 row; approved v1-v2 remain intact.
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
             conn.execute_batch("DELETE FROM schema_migrations WHERE version = 3;")

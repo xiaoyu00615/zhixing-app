@@ -1,7 +1,11 @@
 import type {
   ChangeTaskStatusInput,
+  ClearTaskDeadlineInput,
   CreateTaskInput,
   RenameTaskInput,
+  SetTaskDeadlineInput,
+  SetTaskImportanceInput,
+  SetTaskUrgencyInput,
   TaskRepositoryErrorCode,
 } from '@/task/repository'
 import {
@@ -99,6 +103,38 @@ export class TaskWorkerClient {
     return this.send((requestId) => ({
       requestId,
       type: 'task.changeStatus',
+      input,
+    }))
+  }
+
+  setTaskImportance(input: SetTaskImportanceInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'task.setImportance',
+      input,
+    }))
+  }
+
+  setTaskUrgency(input: SetTaskUrgencyInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'task.setUrgency',
+      input,
+    }))
+  }
+
+  setTaskDeadline(input: SetTaskDeadlineInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'task.setDeadline',
+      input,
+    }))
+  }
+
+  clearTaskDeadline(input: ClearTaskDeadlineInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'task.clearDeadline',
       input,
     }))
   }

@@ -1,4 +1,11 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { StrictMode } from 'react'
 import { describe, expect, test, vi } from 'vitest'
@@ -15,6 +22,9 @@ const TASK: Task = {
   status: 'todo',
   createdAtMs: 100,
   updatedAtMs: 100,
+  isImportant: false,
+  isUrgent: false,
+  dueDate: null,
 }
 
 function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
@@ -32,6 +42,14 @@ function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
   cancelTask.mockResolvedValue({ ...TASK, status: 'cancelled' })
   const reopenTask = vi.fn<TaskService['reopenTask']>()
   reopenTask.mockResolvedValue(TASK)
+  const setTaskImportance = vi.fn<TaskService['setTaskImportance']>()
+  setTaskImportance.mockResolvedValue(TASK)
+  const setTaskUrgency = vi.fn<TaskService['setTaskUrgency']>()
+  setTaskUrgency.mockResolvedValue(TASK)
+  const setTaskDeadline = vi.fn<TaskService['setTaskDeadline']>()
+  setTaskDeadline.mockResolvedValue(TASK)
+  const clearTaskDeadline = vi.fn<TaskService['clearTaskDeadline']>()
+  clearTaskDeadline.mockResolvedValue(TASK)
 
   const service: TaskService = {
     createTask,
@@ -41,6 +59,10 @@ function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
     completeTask,
     cancelTask,
     reopenTask,
+    setTaskImportance,
+    setTaskUrgency,
+    setTaskDeadline,
+    clearTaskDeadline,
   }
   return {
     service,
@@ -51,6 +73,10 @@ function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
     completeTask,
     cancelTask,
     reopenTask,
+    setTaskImportance,
+    setTaskUrgency,
+    setTaskDeadline,
+    clearTaskDeadline,
   }
 }
 
@@ -184,8 +210,48 @@ describe('TasksPage create and rename', () => {
     )
     await user.click(screen.getByRole('button', { name: '创建任务' }))
 
-    expect(fake.createTask).toHaveBeenCalledWith({ title: '  整理桌面  ' })
+    expect(fake.createTask).toHaveBeenCalledWith({
+      title: '  整理桌面  ',
+      isImportant: false,
+      isUrgent: false,
+      dueDate: null,
+    })
     expect(await screen.findByText(TASK.title)).toBeInTheDocument()
+    expect(fake.listTasks).toHaveBeenCalledTimes(2)
+  })
+
+  test('creates important, urgent, and deadline planning values atomically', async () => {
+    const user = userEvent.setup()
+    const planned = {
+      ...TASK,
+      title: 'Planned',
+      isImportant: true,
+      isUrgent: true,
+      dueDate: '2026-08-23',
+    }
+    const fake = createServiceDouble([])
+    fake.createTask.mockResolvedValueOnce(planned)
+    fake.listTasks.mockResolvedValueOnce([]).mockResolvedValueOnce([planned])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} />)
+    await screen.findByText('还没有任务')
+
+    await user.click(screen.getByRole('button', { name: '新建任务' }))
+    await user.type(screen.getByRole('textbox', { name: '标题' }), 'Planned')
+    await user.click(screen.getByRole('checkbox', { name: '重要任务' }))
+    await user.click(screen.getByRole('checkbox', { name: '基础紧急' }))
+    fireEvent.change(screen.getByLabelText('截止日期'), {
+      target: { value: '2026-08-23' },
+    })
+    await user.click(screen.getByRole('button', { name: '创建任务' }))
+
+    expect(fake.createTask).toHaveBeenCalledWith({
+      title: 'Planned',
+      isImportant: true,
+      isUrgent: true,
+      dueDate: '2026-08-23',
+    })
+    expect(await screen.findByText('Planned')).toBeInTheDocument()
     expect(fake.listTasks).toHaveBeenCalledTimes(2)
   })
 
@@ -390,5 +456,201 @@ describe('TasksPage status actions and feedback', () => {
     ).toBeInTheDocument()
     expect(button).toBeEnabled()
     expect(document.body).not.toHaveTextContent(/SQL|OPFS|Worker|UNAVAILABLE/)
+  })
+})
+
+describe('TasksPage planning actions and derived presentation', () => {
+  test.each([
+    {
+      buttonName: `设为重要：${TASK.title}`,
+      method: 'setTaskImportance' as const,
+      value: true,
+      changed: { ...TASK, isImportant: true, updatedAtMs: 200 },
+    },
+    {
+      buttonName: `设为基础紧急：${TASK.title}`,
+      method: 'setTaskUrgency' as const,
+      value: true,
+      changed: { ...TASK, isUrgent: true, updatedAtMs: 200 },
+    },
+  ])(
+    '$method calls the narrow TaskService action and reloads',
+    async ({ buttonName, method, value, changed }) => {
+      const user = userEvent.setup()
+      const fake = createServiceDouble()
+      fake[method].mockResolvedValueOnce(changed)
+      fake.listTasks
+        .mockResolvedValueOnce([TASK])
+        .mockResolvedValueOnce([changed])
+      const { openRuntime } = resolvedRuntime(fake.service)
+      render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+      await screen.findByText(TASK.title)
+
+      await user.click(screen.getByRole('button', { name: buttonName }))
+
+      expect(fake[method]).toHaveBeenCalledWith(TASK.id, value)
+      expect(fake.listTasks).toHaveBeenCalledTimes(2)
+    },
+  )
+
+  test('sets and clears a deadline through separate service actions', async () => {
+    const user = userEvent.setup()
+    const withDeadline = {
+      ...TASK,
+      dueDate: '2026-08-24',
+      updatedAtMs: 200,
+    }
+    const cleared = { ...withDeadline, dueDate: null, updatedAtMs: 300 }
+    const fake = createServiceDouble()
+    fake.setTaskDeadline.mockResolvedValueOnce(withDeadline)
+    fake.clearTaskDeadline.mockResolvedValueOnce(cleared)
+    fake.listTasks
+      .mockResolvedValueOnce([TASK])
+      .mockResolvedValueOnce([withDeadline])
+      .mockResolvedValueOnce([cleared])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByText(TASK.title)
+
+    fireEvent.change(screen.getByLabelText(`任务截止日期：${TASK.title}`), {
+      target: { value: '2026-08-24' },
+    })
+    await waitFor(() =>
+      expect(fake.setTaskDeadline).toHaveBeenCalledWith(TASK.id, '2026-08-24'),
+    )
+    expect(fake.listTasks).toHaveBeenCalledTimes(2)
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: `清除截止日期：${TASK.title}`,
+      }),
+    )
+    expect(fake.clearTaskDeadline).toHaveBeenCalledWith(TASK.id)
+    await waitFor(() => expect(fake.listTasks).toHaveBeenCalledTimes(3))
+  })
+
+  test('shows overdue and overdue-driven urgency without changing base urgency', async () => {
+    const overdue = { ...TASK, dueDate: '2026-08-22' }
+    const fake = createServiceDouble([overdue])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+
+    const list = await screen.findByRole('list', { name: '任务列表' })
+    expect(within(list).getByText('已逾期')).toBeInTheDocument()
+    expect(within(list).getByText('紧急（逾期）')).toBeInTheDocument()
+    expect(
+      within(list).getByRole('button', {
+        name: `设为基础紧急：${TASK.title}`,
+      }),
+    ).toHaveTextContent('基础不紧急')
+    expect(fake.setTaskUrgency).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    { title: 'Due today', status: 'todo', dueDate: '2026-08-23' },
+    { title: 'Completed past due', status: 'completed', dueDate: '2026-08-22' },
+    { title: 'Cancelled past due', status: 'cancelled', dueDate: '2026-08-22' },
+  ] as const)('$title is not displayed as overdue', async (taskFields) => {
+    const task = { ...TASK, ...taskFields }
+    const fake = createServiceDouble([task])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+
+    const list = await screen.findByRole('list', { name: '任务列表' })
+    expect(within(list).queryByText('已逾期')).not.toBeInTheDocument()
+    expect(within(list).queryByText('紧急（逾期）')).not.toBeInTheDocument()
+  })
+
+  test('moving an overdue deadline to the future removes derived urgency', async () => {
+    const overdue = { ...TASK, dueDate: '2026-08-22' }
+    const future = { ...TASK, dueDate: '2026-08-24', updatedAtMs: 200 }
+    const fake = createServiceDouble([overdue])
+    fake.setTaskDeadline.mockResolvedValueOnce(future)
+    fake.listTasks
+      .mockResolvedValueOnce([overdue])
+      .mockResolvedValueOnce([future])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByText('紧急（逾期）')
+
+    fireEvent.change(screen.getByLabelText(`任务截止日期：${TASK.title}`), {
+      target: { value: '2026-08-24' },
+    })
+
+    await waitFor(() =>
+      expect(screen.queryByText('紧急（逾期）')).not.toBeInTheDocument(),
+    )
+    expect(screen.queryByText('已逾期')).not.toBeInTheDocument()
+    expect(fake.setTaskUrgency).not.toHaveBeenCalled()
+  })
+
+  test('refreshes after planning NOT_FOUND', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble()
+    fake.setTaskImportance.mockRejectedValueOnce(
+      new TaskApplicationError('NOT_FOUND'),
+    )
+    fake.listTasks.mockResolvedValueOnce([TASK]).mockResolvedValueOnce([])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByText(TASK.title)
+
+    await user.click(
+      screen.getByRole('button', { name: `设为重要：${TASK.title}` }),
+    )
+
+    expect(
+      await screen.findByText('任务已不存在，列表已刷新。'),
+    ).toBeInTheDocument()
+    expect(await screen.findByText('还没有任务')).toBeInTheDocument()
+    expect(fake.listTasks).toHaveBeenCalledTimes(2)
+  })
+
+  test('shows safe planning UNAVAILABLE feedback and remains retryable', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble()
+    fake.setTaskUrgency.mockRejectedValueOnce(
+      new TaskApplicationError('UNAVAILABLE'),
+    )
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByText(TASK.title)
+
+    const button = screen.getByRole('button', {
+      name: `设为基础紧急：${TASK.title}`,
+    })
+    await user.click(button)
+
+    expect(
+      await screen.findByText('操作暂时无法完成，请重试。'),
+    ).toBeInTheDocument()
+    expect(button).toBeEnabled()
+    expect(document.body).not.toHaveTextContent(/SQL|OPFS|Worker|UNAVAILABLE/)
+  })
+
+  test('prevents duplicate planning submissions while the task is pending', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble()
+    const changing = deferred<Task>()
+    fake.setTaskImportance.mockReturnValueOnce(changing.promise)
+    fake.listTasks
+      .mockResolvedValueOnce([TASK])
+      .mockResolvedValueOnce([{ ...TASK, isImportant: true }])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByText(TASK.title)
+
+    const button = screen.getByRole('button', {
+      name: `设为重要：${TASK.title}`,
+    })
+    await user.click(button)
+    expect(button).toBeDisabled()
+    await user.click(button)
+    expect(fake.setTaskImportance).toHaveBeenCalledOnce()
+
+    act(() => {
+      changing.resolve({ ...TASK, isImportant: true })
+    })
+    await waitFor(() => expect(fake.listTasks).toHaveBeenCalledTimes(2))
   })
 })

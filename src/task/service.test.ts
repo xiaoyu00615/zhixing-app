@@ -4,8 +4,12 @@ import type { Task, TaskStatusOperation } from '@/task/model'
 import {
   TaskRepositoryError,
   type ChangeTaskStatusInput,
+  type ClearTaskDeadlineInput,
   type CreateTaskInput,
   type RenameTaskInput,
+  type SetTaskDeadlineInput,
+  type SetTaskImportanceInput,
+  type SetTaskUrgencyInput,
   type TaskRepository,
   type TaskRepositoryErrorCode,
 } from '@/task/repository'
@@ -24,6 +28,9 @@ const TASK: Task = {
   status: 'todo',
   createdAtMs: 100,
   updatedAtMs: 100,
+  isImportant: false,
+  isUrgent: false,
+  dueDate: null,
 }
 
 function createFakeRepository() {
@@ -51,11 +58,45 @@ function createFakeRepository() {
         updatedAtMs: input.updatedAtMs,
       }),
   )
+  const setTaskImportance = vi.fn(
+    (input: SetTaskImportanceInput): Promise<Task> =>
+      Promise.resolve({
+        ...TASK,
+        isImportant: input.isImportant,
+        updatedAtMs: input.updatedAtMs,
+      }),
+  )
+  const setTaskUrgency = vi.fn((input: SetTaskUrgencyInput): Promise<Task> =>
+    Promise.resolve({
+      ...TASK,
+      isUrgent: input.isUrgent,
+      updatedAtMs: input.updatedAtMs,
+    }),
+  )
+  const setTaskDeadline = vi.fn((input: SetTaskDeadlineInput): Promise<Task> =>
+    Promise.resolve({
+      ...TASK,
+      dueDate: input.dueDate,
+      updatedAtMs: input.updatedAtMs,
+    }),
+  )
+  const clearTaskDeadline = vi.fn(
+    (input: ClearTaskDeadlineInput): Promise<Task> =>
+      Promise.resolve({
+        ...TASK,
+        dueDate: null,
+        updatedAtMs: input.updatedAtMs,
+      }),
+  )
   const repository: TaskRepository = {
     createTask,
     listTasks,
     renameTask,
     changeTaskStatus,
+    setTaskImportance,
+    setTaskUrgency,
+    setTaskDeadline,
+    clearTaskDeadline,
   }
   return {
     repository,
@@ -63,6 +104,10 @@ function createFakeRepository() {
     listTasks,
     renameTask,
     changeTaskStatus,
+    setTaskImportance,
+    setTaskUrgency,
+    setTaskDeadline,
+    clearTaskDeadline,
   }
 }
 
@@ -91,6 +136,10 @@ test('TaskService exposes only the approved business API and error codes', () =>
     'completeTask',
     'cancelTask',
     'reopenTask',
+    'setTaskImportance',
+    'setTaskUrgency',
+    'setTaskDeadline',
+    'clearTaskDeadline',
   ])
   expect(TASK_APPLICATION_ERROR_CODES).toEqual([
     'VALIDATION',
@@ -120,7 +169,67 @@ describe('TaskService createTask', () => {
       id: ID,
       title: 'Buy milk',
       createdAtMs: 100,
+      isImportant: false,
+      isUrgent: false,
+      dueDate: null,
     })
+  })
+
+  test('atomically passes approved planning values to repository creation', async () => {
+    const fake = createFakeRepository()
+    const service = createTaskService({
+      repository: fake.repository,
+      generateTaskId: () => ID,
+      nowMs: () => 100,
+    })
+
+    await service.createTask({
+      title: 'Planned',
+      isImportant: true,
+      isUrgent: true,
+      dueDate: '2024-02-29',
+    })
+
+    expect(fake.createTask).toHaveBeenCalledOnce()
+    expect(fake.createTask).toHaveBeenCalledWith({
+      id: ID,
+      title: 'Planned',
+      createdAtMs: 100,
+      isImportant: true,
+      isUrgent: true,
+      dueDate: '2024-02-29',
+    })
+  })
+
+  test('rejects invalid planning values before creating', async () => {
+    const fake = createFakeRepository()
+    const service = createTaskService({
+      repository: fake.repository,
+      generateTaskId: () => ID,
+      nowMs: () => 100,
+    })
+
+    await expectApplicationError(
+      service.createTask({ title: 'Task', dueDate: '2025-02-29' }),
+      'VALIDATION',
+      'dueDate',
+    )
+    await expectApplicationError(
+      service.createTask({ title: 'Task', isImportant: 'yes' as never }),
+      'VALIDATION',
+      'importance',
+    )
+    await expectApplicationError(
+      service.createTask({ title: 'Task', isImportant: null as never }),
+      'VALIDATION',
+      'importance',
+    )
+    await expectApplicationError(
+      service.createTask({ title: 'Task', isUrgent: 1 as never }),
+      'VALIDATION',
+      'urgency',
+    )
+    expect(fake.createTask).not.toHaveBeenCalled()
   })
 
   test('rejects a blank title before calling runtime dependencies or persistence', async () => {
@@ -313,6 +422,108 @@ describe('TaskService status actions', () => {
       })
 
       await expectApplicationError(service.startTask(ID), applicationCode)
+    },
+  )
+})
+
+describe('TaskService planning actions', () => {
+  test('maps each narrow action with a service-owned timestamp', async () => {
+    const fake = createFakeRepository()
+    const nowMs = vi
+      .fn<() => number>()
+      .mockReturnValueOnce(200)
+      .mockReturnValueOnce(300)
+      .mockReturnValueOnce(400)
+      .mockReturnValueOnce(500)
+    const service = createTaskService({ repository: fake.repository, nowMs })
+
+    await service.setTaskImportance(ID, true)
+    await service.setTaskUrgency(ID, true)
+    await service.setTaskDeadline(ID, '2026-08-23')
+    await service.clearTaskDeadline(ID)
+
+    expect(fake.setTaskImportance).toHaveBeenCalledWith({
+      id: ID,
+      isImportant: true,
+      updatedAtMs: 200,
+    })
+    expect(fake.setTaskUrgency).toHaveBeenCalledWith({
+      id: ID,
+      isUrgent: true,
+      updatedAtMs: 300,
+    })
+    expect(fake.setTaskDeadline).toHaveBeenCalledWith({
+      id: ID,
+      dueDate: '2026-08-23',
+      updatedAtMs: 400,
+    })
+    expect(fake.clearTaskDeadline).toHaveBeenCalledWith({
+      id: ID,
+      updatedAtMs: 500,
+    })
+  })
+
+  test('validates planning inputs before reading the clock', async () => {
+    const fake = createFakeRepository()
+    const nowMs = vi.fn(() => 200)
+    const service = createTaskService({ repository: fake.repository, nowMs })
+
+    await expectApplicationError(
+      service.setTaskImportance(ID, 'yes' as never),
+      'VALIDATION',
+      'importance',
+    )
+    await expectApplicationError(
+      service.setTaskUrgency(ID, 1 as never),
+      'VALIDATION',
+      'urgency',
+    )
+    await expectApplicationError(
+      service.setTaskDeadline(ID, '2026-02-30'),
+      'VALIDATION',
+      'dueDate',
+    )
+    await expectApplicationError(
+      service.clearTaskDeadline('invalid'),
+      'VALIDATION',
+      'id',
+    )
+    expect(nowMs).not.toHaveBeenCalled()
+    expect(fake.setTaskImportance).not.toHaveBeenCalled()
+    expect(fake.setTaskUrgency).not.toHaveBeenCalled()
+    expect(fake.setTaskDeadline).not.toHaveBeenCalled()
+    expect(fake.clearTaskDeadline).not.toHaveBeenCalled()
+  })
+
+  test.each<{
+    repositoryCode: TaskRepositoryErrorCode
+    applicationCode: TaskApplicationErrorCode
+  }>([
+    { repositoryCode: 'NOT_FOUND', applicationCode: 'NOT_FOUND' },
+    {
+      repositoryCode: 'PERSISTENCE_UNAVAILABLE',
+      applicationCode: 'UNAVAILABLE',
+    },
+    {
+      repositoryCode: 'PERSISTENCE_FAILED',
+      applicationCode: 'UNAVAILABLE',
+    },
+  ])(
+    'maps planning $repositoryCode to $applicationCode',
+    async ({ repositoryCode, applicationCode }) => {
+      const fake = createFakeRepository()
+      fake.setTaskImportance.mockRejectedValueOnce(
+        new TaskRepositoryError(repositoryCode, 'setTaskImportance'),
+      )
+      const service = createTaskService({
+        repository: fake.repository,
+        nowMs: () => 200,
+      })
+
+      await expectApplicationError(
+        service.setTaskImportance(ID, true),
+        applicationCode,
+      )
     },
   )
 })

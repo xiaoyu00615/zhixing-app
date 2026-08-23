@@ -11,8 +11,12 @@ import {
   TASK_REPOSITORY_ERROR_CODES,
   TaskRepositoryError,
   type ChangeTaskStatusInput,
+  type ClearTaskDeadlineInput,
   type CreateTaskInput,
   type RenameTaskInput,
+  type SetTaskDeadlineInput,
+  type SetTaskImportanceInput,
+  type SetTaskUrgencyInput,
   type TaskRepository,
   type TaskRepositoryErrorCode,
   type TaskRepositoryOperation,
@@ -87,6 +91,9 @@ export class TaskRepositoryContractBackend {
       status: 'todo',
       createdAtMs: input.createdAtMs,
       updatedAtMs: input.createdAtMs,
+      isImportant: input.isImportant ?? false,
+      isUrgent: input.isUrgent ?? false,
+      dueDate: input.dueDate ?? null,
     }
     this.#tasks.set(task.id, task)
     return { ...task }
@@ -147,6 +154,46 @@ export class TaskRepositoryContractBackend {
       updatedAtMs: input.updatedAtMs,
     }
     this.#tasks.set(input.id, changed)
+    return { ...changed }
+  }
+
+  setTaskImportance(input: SetTaskImportanceInput): Task {
+    return this.updatePlanning(input.id, input.updatedAtMs, {
+      isImportant: input.isImportant,
+    })
+  }
+
+  setTaskUrgency(input: SetTaskUrgencyInput): Task {
+    return this.updatePlanning(input.id, input.updatedAtMs, {
+      isUrgent: input.isUrgent,
+    })
+  }
+
+  setTaskDeadline(input: SetTaskDeadlineInput): Task {
+    return this.updatePlanning(input.id, input.updatedAtMs, {
+      dueDate: input.dueDate,
+    })
+  }
+
+  clearTaskDeadline(input: ClearTaskDeadlineInput): Task {
+    return this.updatePlanning(input.id, input.updatedAtMs, { dueDate: null })
+  }
+
+  private updatePlanning(
+    id: string,
+    updatedAtMs: number,
+    change: Partial<Pick<Task, 'isImportant' | 'isUrgent' | 'dueDate'>>,
+  ): Task {
+    this.consumeFailure()
+    const current = this.#tasks.get(id)
+    if (current === undefined) {
+      throw new TaskContractBackendError(
+        'NOT_FOUND',
+        '/private/task planning SQL=UPDATE tasks',
+      )
+    }
+    const changed = { ...current, ...change, updatedAtMs }
+    this.#tasks.set(id, changed)
     return { ...changed }
   }
 
@@ -227,6 +274,9 @@ export function defineTaskRepositoryContract(
         status: 'todo',
         createdAtMs: 100,
         updatedAtMs: 100,
+        isImportant: false,
+        isUrgent: false,
+        dueDate: null,
       })
       await expectSafeError(
         repository.createTask({
@@ -268,6 +318,99 @@ export function defineTaskRepositoryContract(
         updatedAtMs: 300,
       })
       await expect(repository.listTasks()).resolves.toEqual([renamed])
+    })
+
+    test('creates planning values atomically and preserves them through rename and status', async () => {
+      const { repository } = createFixture()
+      const created = await repository.createTask({
+        id: TASK_CONTRACT_IDS.a,
+        title: 'Planned',
+        createdAtMs: 100,
+        isImportant: true,
+        isUrgent: true,
+        dueDate: '2026-08-23',
+      })
+      expect(created).toMatchObject({
+        isImportant: true,
+        isUrgent: true,
+        dueDate: '2026-08-23',
+      })
+      const renamed = await repository.renameTask({
+        id: created.id,
+        title: 'Renamed',
+        updatedAtMs: 200,
+      })
+      expect(renamed).toMatchObject({
+        isImportant: true,
+        isUrgent: true,
+        dueDate: '2026-08-23',
+      })
+      const started = await repository.changeTaskStatus({
+        id: created.id,
+        operation: 'start',
+        updatedAtMs: 300,
+      })
+      expect(started).toMatchObject({
+        status: 'doing',
+        isImportant: true,
+        isUrgent: true,
+        dueDate: '2026-08-23',
+      })
+    })
+
+    test('updates planning fields independently and clears deadline', async () => {
+      const { repository } = createFixture()
+      const created = await createTask(repository, TASK_CONTRACT_IDS.a)
+      const important = await repository.setTaskImportance({
+        id: created.id,
+        isImportant: true,
+        updatedAtMs: 200,
+      })
+      expect(important).toMatchObject({ isImportant: true, isUrgent: false })
+      const urgent = await repository.setTaskUrgency({
+        id: created.id,
+        isUrgent: true,
+        updatedAtMs: 300,
+      })
+      expect(urgent).toMatchObject({ isImportant: true, isUrgent: true })
+      const deadline = await repository.setTaskDeadline({
+        id: created.id,
+        dueDate: '2026-08-23',
+        updatedAtMs: 400,
+      })
+      expect(deadline).toMatchObject({ dueDate: '2026-08-23' })
+      const cleared = await repository.clearTaskDeadline({
+        id: created.id,
+        updatedAtMs: 500,
+      })
+      expect(cleared).toMatchObject({
+        isImportant: true,
+        isUrgent: true,
+        dueDate: null,
+        updatedAtMs: 500,
+      })
+      await expect(repository.listTasks()).resolves.toEqual([cleared])
+    })
+
+    test('maps missing planning operations to NOT_FOUND', async () => {
+      const { repository } = createFixture()
+      await expectSafeError(
+        repository.setTaskImportance({
+          id: TASK_CONTRACT_IDS.missing,
+          isImportant: true,
+          updatedAtMs: 200,
+        }),
+        'NOT_FOUND',
+        'setTaskImportance',
+      )
+      await expectSafeError(
+        repository.clearTaskDeadline({
+          id: TASK_CONTRACT_IDS.missing,
+          updatedAtMs: 200,
+        }),
+        'NOT_FOUND',
+        'clearTaskDeadline',
+      )
     })
 
     test('maps missing rename and status operations to NOT_FOUND', async () => {

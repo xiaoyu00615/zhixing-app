@@ -4,8 +4,12 @@ import { NativeTaskRepository } from '@/adapters/native/taskRepository'
 import {
   TaskRepositoryError,
   type ChangeTaskStatusInput,
+  type ClearTaskDeadlineInput,
   type CreateTaskInput,
   type RenameTaskInput,
+  type SetTaskDeadlineInput,
+  type SetTaskImportanceInput,
+  type SetTaskUrgencyInput,
 } from '@/task/repository'
 import {
   defineTaskRepositoryContract,
@@ -26,6 +30,9 @@ const TASK = {
   status: 'todo',
   createdAtMs: 100,
   updatedAtMs: 100,
+  isImportant: false,
+  isUrgent: false,
+  dueDate: null,
 } as const
 
 function createNativeContractFixture(): TaskRepositoryContractFixture {
@@ -42,6 +49,18 @@ function createNativeContractFixture(): TaskRepositoryContractFixture {
           return backend.renameTask(args?.input as RenameTaskInput)
         case 'task_change_status':
           return backend.changeTaskStatus(args?.input as ChangeTaskStatusInput)
+        case 'task_set_importance':
+          return backend.setTaskImportance(
+            args?.input as SetTaskImportanceInput,
+          )
+        case 'task_set_urgency':
+          return backend.setTaskUrgency(args?.input as SetTaskUrgencyInput)
+        case 'task_set_deadline':
+          return backend.setTaskDeadline(args?.input as SetTaskDeadlineInput)
+        case 'task_clear_deadline':
+          return backend.clearTaskDeadline(
+            args?.input as ClearTaskDeadlineInput,
+          )
         default:
           throw new Error(`Unexpected native command: ${command}`)
       }
@@ -66,6 +85,14 @@ describe('NativeTaskRepository', () => {
         status: 'doing',
         updatedAtMs: 300,
       })
+      .mockResolvedValueOnce({ ...TASK, isImportant: true, updatedAtMs: 400 })
+      .mockResolvedValueOnce({ ...TASK, isUrgent: true, updatedAtMs: 500 })
+      .mockResolvedValueOnce({
+        ...TASK,
+        dueDate: '2026-08-23',
+        updatedAtMs: 600,
+      })
+      .mockResolvedValueOnce({ ...TASK, updatedAtMs: 700 })
 
     await repository.createTask({ id: ID, title: 'Task', createdAtMs: 100 })
     await repository.listTasks()
@@ -75,9 +102,37 @@ describe('NativeTaskRepository', () => {
       operation: 'start',
       updatedAtMs: 300,
     })
+    await repository.setTaskImportance({
+      id: ID,
+      isImportant: true,
+      updatedAtMs: 400,
+    })
+    await repository.setTaskUrgency({
+      id: ID,
+      isUrgent: true,
+      updatedAtMs: 500,
+    })
+    await repository.setTaskDeadline({
+      id: ID,
+      dueDate: '2026-08-23',
+      updatedAtMs: 600,
+    })
+    await repository.clearTaskDeadline({ id: ID, updatedAtMs: 700 })
 
     expect(invokeMock.mock.calls).toEqual([
-      ['task_create', { input: { id: ID, title: 'Task', createdAtMs: 100 } }],
+      [
+        'task_create',
+        {
+          input: {
+            id: ID,
+            title: 'Task',
+            createdAtMs: 100,
+            isImportant: false,
+            isUrgent: false,
+            dueDate: null,
+          },
+        },
+      ],
       ['task_list', undefined],
       [
         'task_rename',
@@ -87,23 +142,40 @@ describe('NativeTaskRepository', () => {
         'task_change_status',
         { input: { id: ID, operation: 'start', updatedAtMs: 300 } },
       ],
+      [
+        'task_set_importance',
+        { input: { id: ID, isImportant: true, updatedAtMs: 400 } },
+      ],
+      [
+        'task_set_urgency',
+        { input: { id: ID, isUrgent: true, updatedAtMs: 500 } },
+      ],
+      [
+        'task_set_deadline',
+        { input: { id: ID, dueDate: '2026-08-23', updatedAtMs: 600 } },
+      ],
+      ['task_clear_deadline', { input: { id: ID, updatedAtMs: 700 } }],
     ])
   })
 
   test('strictly parses Task DTOs', async () => {
     const repository = new NativeTaskRepository()
-    invokeMock.mockResolvedValueOnce(TASK).mockResolvedValueOnce({
-      ...TASK,
-      updatedAtMs: -1,
-    })
+    invokeMock
+      .mockResolvedValueOnce(TASK)
+      .mockResolvedValueOnce({ ...TASK, updatedAtMs: -1 })
+      .mockResolvedValueOnce({ ...TASK, isImportant: 1 })
+      .mockResolvedValueOnce({ ...TASK, isUrgent: 'true' })
+      .mockResolvedValueOnce({ ...TASK, dueDate: '2025-02-29' })
 
     await expect(
       repository.createTask({ id: ID, title: 'Task', createdAtMs: 100 }),
     ).resolves.toEqual(TASK)
-    await expect(repository.listTasks()).rejects.toMatchObject({
-      code: 'PERSISTENCE_FAILED',
-      operation: 'listTasks',
-    })
+    for (let index = 0; index < 4; index += 1) {
+      await expect(repository.listTasks()).rejects.toMatchObject({
+        code: 'PERSISTENCE_FAILED',
+        operation: 'listTasks',
+      })
+    }
   })
 
   test('maps known safe errors without exposing the native message', async () => {
@@ -160,6 +232,20 @@ describe('NativeTaskRepository', () => {
       repository.changeTaskStatus({
         id: ID,
         operation: 'pause' as never,
+        updatedAtMs: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })
+    await expect(
+      repository.setTaskImportance({
+        id: ID,
+        isImportant: 'yes' as never,
+        updatedAtMs: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })
+    await expect(
+      repository.setTaskDeadline({
+        id: ID,
+        dueDate: '2026-02-30',
         updatedAtMs: 1,
       }),
     ).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })

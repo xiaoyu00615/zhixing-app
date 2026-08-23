@@ -3,12 +3,17 @@ import {
   isNonEmptyTaskTitle,
   isNonNegativeSafeIntegerMilliseconds,
   isTaskStatusOperation,
+  isValidLocalDate,
 } from '@/task/model'
 import {
   isTaskRepositoryErrorCode,
   type ChangeTaskStatusInput,
+  type ClearTaskDeadlineInput,
   type CreateTaskInput,
   type RenameTaskInput,
+  type SetTaskDeadlineInput,
+  type SetTaskImportanceInput,
+  type SetTaskUrgencyInput,
   type TaskRepositoryErrorCode,
 } from '@/task/repository'
 
@@ -41,6 +46,26 @@ export type TaskWorkerRequest =
       readonly requestId: number
       readonly type: 'task.changeStatus'
       readonly input: ChangeTaskStatusInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'task.setImportance'
+      readonly input: SetTaskImportanceInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'task.setUrgency'
+      readonly input: SetTaskUrgencyInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'task.setDeadline'
+      readonly input: SetTaskDeadlineInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'task.clearDeadline'
+      readonly input: ClearTaskDeadlineInput
     }
   | { readonly requestId: number; readonly type: 'shutdown' }
 
@@ -76,7 +101,27 @@ function isCreateInput(value: unknown): value is CreateTaskInput {
   return (
     isCanonicalLowercaseUuid(value.id) &&
     isNonEmptyTaskTitle(value.title) &&
-    isNonNegativeSafeIntegerMilliseconds(value.createdAtMs)
+    isNonNegativeSafeIntegerMilliseconds(value.createdAtMs) &&
+    (value.isImportant === undefined ||
+      typeof value.isImportant === 'boolean') &&
+    (value.isUrgent === undefined || typeof value.isUrgent === 'boolean') &&
+    (value.dueDate === undefined ||
+      value.dueDate === null ||
+      isValidLocalDate(value.dueDate))
+  )
+}
+
+function isPlanningBaseInput(value: unknown): value is Record<
+  string,
+  unknown
+> & {
+  readonly id: string
+  readonly updatedAtMs: number
+} {
+  return (
+    isRecord(value) &&
+    isCanonicalLowercaseUuid(value.id) &&
+    isNonNegativeSafeIntegerMilliseconds(value.updatedAtMs)
   )
 }
 
@@ -125,6 +170,56 @@ export function parseTaskWorkerRequest(
     case 'task.changeStatus':
       return isChangeStatusInput(value.input)
         ? { requestId: value.requestId, type: value.type, input: value.input }
+        : null
+    case 'task.setImportance':
+      return isPlanningBaseInput(value.input) &&
+        typeof value.input.isImportant === 'boolean'
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: {
+              id: value.input.id,
+              isImportant: value.input.isImportant,
+              updatedAtMs: value.input.updatedAtMs,
+            },
+          }
+        : null
+    case 'task.setUrgency':
+      return isPlanningBaseInput(value.input) &&
+        typeof value.input.isUrgent === 'boolean'
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: {
+              id: value.input.id,
+              isUrgent: value.input.isUrgent,
+              updatedAtMs: value.input.updatedAtMs,
+            },
+          }
+        : null
+    case 'task.setDeadline':
+      return isPlanningBaseInput(value.input) &&
+        isValidLocalDate(value.input.dueDate)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: {
+              id: value.input.id,
+              dueDate: value.input.dueDate,
+              updatedAtMs: value.input.updatedAtMs,
+            },
+          }
+        : null
+    case 'task.clearDeadline':
+      return isPlanningBaseInput(value.input)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: {
+              id: value.input.id,
+              updatedAtMs: value.input.updatedAtMs,
+            },
+          }
         : null
     default:
       return null

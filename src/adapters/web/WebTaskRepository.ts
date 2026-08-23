@@ -4,13 +4,18 @@ import {
   isNonNegativeSafeIntegerMilliseconds,
   isTaskStatus,
   isTaskStatusOperation,
+  isValidLocalDate,
   type Task,
 } from '@/task/model'
 import {
   TaskRepositoryError,
   type ChangeTaskStatusInput,
+  type ClearTaskDeadlineInput,
   type CreateTaskInput,
   type RenameTaskInput,
+  type SetTaskDeadlineInput,
+  type SetTaskImportanceInput,
+  type SetTaskUrgencyInput,
   type TaskRepository,
   type TaskRepositoryOperation,
 } from '@/task/repository'
@@ -30,18 +35,39 @@ function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
     throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
   }
 
-  const { id, title, status, createdAtMs, updatedAtMs } = value
+  const {
+    id,
+    title,
+    status,
+    createdAtMs,
+    updatedAtMs,
+    isImportant,
+    isUrgent,
+    dueDate,
+  } = value
   if (
     !isCanonicalLowercaseUuid(id) ||
     !isNonEmptyTaskTitle(title) ||
     !isTaskStatus(status) ||
     !isNonNegativeSafeIntegerMilliseconds(createdAtMs) ||
     !isNonNegativeSafeIntegerMilliseconds(updatedAtMs) ||
-    updatedAtMs < createdAtMs
+    updatedAtMs < createdAtMs ||
+    typeof isImportant !== 'boolean' ||
+    typeof isUrgent !== 'boolean' ||
+    (dueDate !== null && !isValidLocalDate(dueDate))
   ) {
     throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
   }
-  return { id, title, status, createdAtMs, updatedAtMs }
+  return {
+    id,
+    title,
+    status,
+    createdAtMs,
+    updatedAtMs,
+    isImportant,
+    isUrgent,
+    dueDate,
+  }
 }
 
 function validateId(id: string, operation: TaskRepositoryOperation): void {
@@ -93,8 +119,26 @@ export class WebTaskRepository implements TaskRepository {
     validateId(input.id, operation)
     validateTitle(input.title, operation)
     validateTimestamp(input.createdAtMs, operation)
+    if (
+      (input.isImportant !== undefined &&
+        typeof input.isImportant !== 'boolean') ||
+      (input.isUrgent !== undefined && typeof input.isUrgent !== 'boolean') ||
+      (input.dueDate !== undefined &&
+        input.dueDate !== null &&
+        !isValidLocalDate(input.dueDate))
+    ) {
+      throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
+    }
     try {
-      return parseTask(await this.#client.createTask(input), operation)
+      return parseTask(
+        await this.#client.createTask({
+          ...input,
+          isImportant: input.isImportant ?? false,
+          isUrgent: input.isUrgent ?? false,
+          dueDate: input.dueDate ?? null,
+        }),
+        operation,
+      )
     } catch (error: unknown) {
       throw mapClientError(error, operation)
     }
@@ -134,6 +178,66 @@ export class WebTaskRepository implements TaskRepository {
     }
     try {
       return parseTask(await this.#client.changeTaskStatus(input), operation)
+    } catch (error: unknown) {
+      throw mapClientError(error, operation)
+    }
+  }
+
+  async setTaskImportance(input: SetTaskImportanceInput): Promise<Task> {
+    return this.callPlanning(
+      'setTaskImportance',
+      input,
+      () => this.#client.setTaskImportance(input),
+      typeof input.isImportant === 'boolean',
+    )
+  }
+
+  async setTaskUrgency(input: SetTaskUrgencyInput): Promise<Task> {
+    return this.callPlanning(
+      'setTaskUrgency',
+      input,
+      () => this.#client.setTaskUrgency(input),
+      typeof input.isUrgent === 'boolean',
+    )
+  }
+
+  async setTaskDeadline(input: SetTaskDeadlineInput): Promise<Task> {
+    return this.callPlanning(
+      'setTaskDeadline',
+      input,
+      () => this.#client.setTaskDeadline(input),
+      isValidLocalDate(input.dueDate),
+    )
+  }
+
+  async clearTaskDeadline(input: ClearTaskDeadlineInput): Promise<Task> {
+    return this.callPlanning(
+      'clearTaskDeadline',
+      input,
+      () => this.#client.clearTaskDeadline(input),
+      true,
+    )
+  }
+
+  private async callPlanning(
+    operation: Extract<
+      TaskRepositoryOperation,
+      | 'setTaskImportance'
+      | 'setTaskUrgency'
+      | 'setTaskDeadline'
+      | 'clearTaskDeadline'
+    >,
+    input: { readonly id: string; readonly updatedAtMs: number },
+    call: () => Promise<unknown>,
+    valueIsValid: boolean,
+  ): Promise<Task> {
+    validateId(input.id, operation)
+    validateTimestamp(input.updatedAtMs, operation)
+    if (!valueIsValid) {
+      throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
+    }
+    try {
+      return parseTask(await call(), operation)
     } catch (error: unknown) {
       throw mapClientError(error, operation)
     }

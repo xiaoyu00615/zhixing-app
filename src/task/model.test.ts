@@ -6,9 +6,14 @@ import {
   isCanonicalLowercaseUuid,
   isNonEmptyTaskTitle,
   isNonNegativeSafeIntegerMilliseconds,
+  isTaskEffectivelyUrgent,
+  isTaskOverdue,
   isTaskStatus,
   isTaskStatusOperation,
+  isValidLocalDate,
+  localDateFromDate,
   resolveTaskStatusTransition,
+  type Task,
   type TaskStatus,
   type TaskStatusOperation,
 } from '@/task/model'
@@ -24,6 +29,17 @@ const LEGAL_TRANSITIONS: ReadonlyArray<
   ['completed', 'reopen', 'todo'],
   ['cancelled', 'reopen', 'todo'],
 ]
+
+const TASK: Task = {
+  id: '00000000-0000-4000-8000-000000000001',
+  title: 'Task',
+  status: 'todo',
+  createdAtMs: 100,
+  updatedAtMs: 100,
+  isImportant: false,
+  isUrgent: false,
+  dueDate: null,
+}
 
 describe('Task model persistence contract', () => {
   test.each(LEGAL_TRANSITIONS)(
@@ -48,6 +64,88 @@ describe('Task model persistence contract', () => {
       }
     }
   })
+
+  test('validates canonical Gregorian local dates', () => {
+    for (const valid of [
+      '0001-01-01',
+      '2024-02-29',
+      '2026-08-23',
+      '9999-12-31',
+    ]) {
+      expect(isValidLocalDate(valid), valid).toBe(true)
+    }
+    for (const invalid of [
+      '0000-01-01',
+      '2026-00-01',
+      '2026-13-01',
+      '2026-02-30',
+      '2025-02-29',
+      '2026-8-23',
+      '2026/08/23',
+      null,
+    ]) {
+      expect(isValidLocalDate(invalid), String(invalid)).toBe(false)
+    }
+  })
+
+  test('derives today with local calendar getters rather than UTC serialization', () => {
+    const date = {
+      getFullYear: () => 2026,
+      getMonth: () => 7,
+      getDate: () => 23,
+      toISOString: () => {
+        throw new Error('UTC serialization must not be used')
+      },
+    } as unknown as Date
+
+    expect(localDateFromDate(date)).toBe('2026-08-23')
+  })
+
+  test.each([
+    { dueDate: null, status: 'todo', expected: false },
+    { dueDate: '2026-08-22', status: 'todo', expected: true },
+    { dueDate: '2026-08-22', status: 'doing', expected: true },
+    { dueDate: '2026-08-23', status: 'todo', expected: false },
+    { dueDate: '2026-08-24', status: 'todo', expected: false },
+    { dueDate: '2026-08-22', status: 'completed', expected: false },
+    { dueDate: '2026-08-22', status: 'cancelled', expected: false },
+  ] as const)(
+    'derives overdue for $status with deadline $dueDate as $expected',
+    ({ dueDate, status, expected }) => {
+      expect(isTaskOverdue({ ...TASK, dueDate, status }, '2026-08-23')).toBe(
+        expected,
+      )
+    },
+  )
+
+  test.each([
+    { isUrgent: true, dueDate: '2026-08-24', status: 'todo', expected: true },
+    { isUrgent: false, dueDate: '2026-08-24', status: 'todo', expected: false },
+    { isUrgent: false, dueDate: '2026-08-22', status: 'todo', expected: true },
+    { isUrgent: true, dueDate: '2026-08-22', status: 'todo', expected: true },
+    {
+      isUrgent: false,
+      dueDate: '2026-08-22',
+      status: 'completed',
+      expected: false,
+    },
+    {
+      isUrgent: true,
+      dueDate: '2026-08-22',
+      status: 'completed',
+      expected: true,
+    },
+  ] as const)(
+    'derives effective urgency from base urgency and overdue',
+    ({ isUrgent, dueDate, status, expected }) => {
+      expect(
+        isTaskEffectivelyUrgent(
+          { ...TASK, isUrgent, dueDate, status },
+          '2026-08-23',
+        ),
+      ).toBe(expected)
+    },
+  )
 
   test('validates the frozen status and operation values', () => {
     for (const status of TASK_STATUSES) {

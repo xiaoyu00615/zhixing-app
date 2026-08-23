@@ -142,6 +142,27 @@ async function handleRequest(value: unknown): Promise<void> {
           state.database.changeTaskStatus(request.input),
         )
         return
+      case 'task.setImportance':
+        success(
+          request.requestId,
+          state.database.setTaskImportance(request.input),
+        )
+        return
+      case 'task.setUrgency':
+        success(request.requestId, state.database.setTaskUrgency(request.input))
+        return
+      case 'task.setDeadline':
+        success(
+          request.requestId,
+          state.database.setTaskDeadline(request.input),
+        )
+        return
+      case 'task.clearDeadline':
+        success(
+          request.requestId,
+          state.database.clearTaskDeadline(request.input),
+        )
+        return
     }
   } catch (error: unknown) {
     failure(

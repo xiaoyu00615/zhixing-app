@@ -7,13 +7,14 @@ import {
 } from '@/components/tasks/TaskDialogs'
 import { TaskList, type TaskStatusAction } from '@/components/tasks/TaskList'
 import { Button } from '@/components/ui/button'
-import type { Task } from '@/task/model'
+import { localDateFromDate, type LocalDate, type Task } from '@/task/model'
 import { openTaskRuntime } from '@/task/runtime'
 import type { OpenTaskRuntime } from '@/task/runtime.types'
 import { TaskApplicationError, type TaskService } from '@/task/service'
 
 interface TasksPageProps {
   readonly openRuntime?: OpenTaskRuntime
+  readonly today?: LocalDate
 }
 
 interface RenameState {
@@ -58,7 +59,10 @@ function EmptyState({ onCreate }: { readonly onCreate: () => void }) {
   )
 }
 
-export function TasksPage({ openRuntime = openTaskRuntime }: TasksPageProps) {
+export function TasksPage({
+  openRuntime = openTaskRuntime,
+  today = localDateFromDate(new Date()),
+}: TasksPageProps) {
   const mountedRef = useRef(false)
   const [loadAttempt, setLoadAttempt] = useState(0)
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
@@ -68,6 +72,12 @@ export function TasksPage({ openRuntime = openTaskRuntime }: TasksPageProps) {
   const [createOpen, setCreateOpen] = useState(false)
   const [createTitle, setCreateTitle] = useState('')
   const [createError, setCreateError] = useState<string | null>(null)
+  const [createDueDateError, setCreateDueDateError] = useState<string | null>(
+    null,
+  )
+  const [createIsImportant, setCreateIsImportant] = useState(false)
+  const [createIsUrgent, setCreateIsUrgent] = useState(false)
+  const [createDueDate, setCreateDueDate] = useState<LocalDate | null>(null)
   const [isCreating, setIsCreating] = useState(false)
   const [renameState, setRenameState] = useState<RenameState | null>(null)
   const [pendingTaskIds, setPendingTaskIds] = useState<ReadonlySet<string>>(
@@ -172,6 +182,10 @@ export function TasksPage({ openRuntime = openTaskRuntime }: TasksPageProps) {
   function openCreateDialog(): void {
     setCreateTitle('')
     setCreateError(null)
+    setCreateDueDateError(null)
+    setCreateIsImportant(false)
+    setCreateIsUrgent(false)
+    setCreateDueDate(null)
     setCreateOpen(true)
   }
 
@@ -189,14 +203,23 @@ export function TasksPage({ openRuntime = openTaskRuntime }: TasksPageProps) {
     }
     setIsCreating(true)
     setCreateError(null)
+    setCreateDueDateError(null)
     setFeedback(null)
     try {
-      await service.createTask({ title: createTitle })
+      await service.createTask({
+        title: createTitle,
+        isImportant: createIsImportant,
+        isUrgent: createIsUrgent,
+        dueDate: createDueDate,
+      })
       if (!mountedRef.current) {
         return
       }
       setCreateOpen(false)
       setCreateTitle('')
+      setCreateIsImportant(false)
+      setCreateIsUrgent(false)
+      setCreateDueDate(null)
       try {
         await reloadTasks(service)
       } catch {
@@ -214,6 +237,12 @@ export function TasksPage({ openRuntime = openTaskRuntime }: TasksPageProps) {
         error.field === 'title'
       ) {
         setCreateError('请输入任务标题。')
+      } else if (
+        error instanceof TaskApplicationError &&
+        error.code === 'VALIDATION' &&
+        error.field === 'dueDate'
+      ) {
+        setCreateDueDateError('请选择有效的截止日期。')
       } else {
         await handleOperationError(error, service)
       }
@@ -311,6 +340,37 @@ export function TasksPage({ openRuntime = openTaskRuntime }: TasksPageProps) {
     }
   }
 
+  async function runPlanningAction(
+    task: Task,
+    operation: (currentService: TaskService) => Promise<Task>,
+  ) {
+    if (service === null || pendingTaskIds.has(task.id)) {
+      return
+    }
+    setPendingTaskIds((current) => new Set(current).add(task.id))
+    setFeedback(null)
+    try {
+      await operation(service)
+      try {
+        await reloadTasks(service)
+      } catch {
+        if (mountedRef.current) {
+          setFeedback('任务规划已更新，但列表暂时无法刷新，请稍后重试。')
+        }
+      }
+    } catch (error: unknown) {
+      await handleOperationError(error, service)
+    } finally {
+      if (mountedRef.current) {
+        setPendingTaskIds((current) => {
+          const next = new Set(current)
+          next.delete(task.id)
+          return next
+        })
+      }
+    }
+  }
+
   return (
     <section className="space-y-6" aria-labelledby="tasks-page-title">
       <div className="flex items-start justify-between gap-6">
@@ -371,22 +431,53 @@ export function TasksPage({ openRuntime = openTaskRuntime }: TasksPageProps) {
 
       {phase === 'ready' && tasks.length > 0 && (
         <TaskList
+          onClearDeadline={(task) =>
+            void runPlanningAction(task, (currentService) =>
+              currentService.clearTaskDeadline(task.id),
+            )
+          }
           onRename={openRenameDialog}
+          onSetDeadline={(task, dueDate) =>
+            void runPlanningAction(task, (currentService) =>
+              currentService.setTaskDeadline(task.id, dueDate),
+            )
+          }
+          onSetImportance={(task, isImportant) =>
+            void runPlanningAction(task, (currentService) =>
+              currentService.setTaskImportance(task.id, isImportant),
+            )
+          }
+          onSetUrgency={(task, isUrgent) =>
+            void runPlanningAction(task, (currentService) =>
+              currentService.setTaskUrgency(task.id, isUrgent),
+            )
+          }
           onStatusAction={(task, action) => void runStatusAction(task, action)}
           pendingTaskIds={pendingTaskIds}
           tasks={tasks}
+          today={today}
         />
       )}
 
       <CreateTaskDialog
+        dueDate={createDueDate}
+        dueDateError={createDueDateError}
         error={createError}
+        isImportant={createIsImportant}
+        isUrgent={createIsUrgent}
         open={createOpen}
+        onDueDateChange={(dueDate) => {
+          setCreateDueDate(dueDate)
+          setCreateDueDateError(null)
+        }}
+        onImportanceChange={setCreateIsImportant}
         onOpenChange={setCreateOpen}
         onSubmit={() => void submitCreate()}
         onTitleChange={(title) => {
           setCreateTitle(title)
           setCreateError(null)
         }}
+        onUrgencyChange={setCreateIsUrgent}
         pending={isCreating}
         title={createTitle}
       />

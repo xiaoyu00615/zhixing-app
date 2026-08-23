@@ -1,9 +1,12 @@
-import type { Task, TaskStatusOperation } from '@/task/model'
+import type { LocalDate, Task, TaskStatusOperation } from '@/task/model'
 
 export interface CreateTaskInput {
   readonly id: string
   readonly title: string
   readonly createdAtMs: number
+  readonly isImportant?: boolean
+  readonly isUrgent?: boolean
+  readonly dueDate?: LocalDate | null
 }
 
 export interface RenameTaskInput {
@@ -18,11 +21,38 @@ export interface ChangeTaskStatusInput {
   readonly updatedAtMs: number
 }
 
+export interface SetTaskImportanceInput {
+  readonly id: string
+  readonly isImportant: boolean
+  readonly updatedAtMs: number
+}
+
+export interface SetTaskUrgencyInput {
+  readonly id: string
+  readonly isUrgent: boolean
+  readonly updatedAtMs: number
+}
+
+export interface SetTaskDeadlineInput {
+  readonly id: string
+  readonly dueDate: LocalDate
+  readonly updatedAtMs: number
+}
+
+export interface ClearTaskDeadlineInput {
+  readonly id: string
+  readonly updatedAtMs: number
+}
+
 export interface TaskRepository {
   createTask(input: CreateTaskInput): Promise<Task>
   listTasks(): Promise<readonly Task[]>
   renameTask(input: RenameTaskInput): Promise<Task>
   changeTaskStatus(input: ChangeTaskStatusInput): Promise<Task>
+  setTaskImportance(input: SetTaskImportanceInput): Promise<Task>
+  setTaskUrgency(input: SetTaskUrgencyInput): Promise<Task>
+  setTaskDeadline(input: SetTaskDeadlineInput): Promise<Task>
+  clearTaskDeadline(input: ClearTaskDeadlineInput): Promise<Task>
 }
 
 export const TASK_REPOSITORY_ERROR_CODES = [
@@ -40,6 +70,10 @@ export type TaskRepositoryOperation =
   | 'listTasks'
   | 'renameTask'
   | 'changeTaskStatus'
+  | 'setTaskImportance'
+  | 'setTaskUrgency'
+  | 'setTaskDeadline'
+  | 'clearTaskDeadline'
 
 const SAFE_ERROR_MESSAGES: Record<TaskRepositoryErrorCode, string> = {
   NOT_FOUND: 'Task not found.',

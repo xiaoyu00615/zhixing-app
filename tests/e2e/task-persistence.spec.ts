@@ -15,6 +15,9 @@ interface BrowserTask {
   readonly status: string
   readonly createdAtMs: number
   readonly updatedAtMs: number
+  readonly isImportant: boolean
+  readonly isUrgent: boolean
+  readonly dueDate: string | null
 }
 
 interface BrowserHarness {
@@ -29,6 +32,9 @@ interface BrowserHarness {
     id: string
     title: string
     createdAtMs: number
+    isImportant?: boolean
+    isUrgent?: boolean
+    dueDate?: string | null
   }): Promise<BrowserTask>
   listTasks(): Promise<readonly BrowserTask[]>
   renameTask(input: {
@@ -110,6 +116,9 @@ test('persists Task operations in OPFS across a browser restart', async ({
             id: ids.c,
             title: 'Third',
             createdAtMs: 50,
+            isImportant: true,
+            isUrgent: true,
+            dueDate: '2026-08-23',
           }),
           (
             window as unknown as HarnessWindow
@@ -182,6 +191,9 @@ test('persists Task operations in OPFS across a browser restart', async ({
         status: 'doing',
         createdAtMs: 10,
         updatedAtMs: 100,
+        isImportant: false,
+        isUrgent: false,
+        dueDate: null,
       },
       {
         id: TASK_IDS.b,
@@ -189,6 +201,9 @@ test('persists Task operations in OPFS across a browser restart', async ({
         status: 'todo',
         createdAtMs: 20,
         updatedAtMs: 100,
+        isImportant: false,
+        isUrgent: false,
+        dueDate: null,
       },
       {
         id: TASK_IDS.c,
@@ -196,6 +211,9 @@ test('persists Task operations in OPFS across a browser restart', async ({
         status: 'todo',
         createdAtMs: 50,
         updatedAtMs: 50,
+        isImportant: true,
+        isUrgent: true,
+        dueDate: '2026-08-23',
       },
     ]
     await expect(
@@ -221,6 +239,51 @@ test('persists Task operations in OPFS across a browser restart', async ({
       (window as unknown as HarnessWindow).__taskPersistenceHarness.listTasks(),
     )
     expect(afterRestart).toEqual(expectedTasks)
+
+    await page.goto(`${configuredBaseURL}/tasks`)
+    await expect(page.getByText('Third', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: '取消重要：Third' }).click()
+    await expect(
+      page.getByRole('button', { name: '设为重要：Third' }),
+    ).toBeVisible()
+    await page.getByRole('button', { name: '取消基础紧急：Third' }).click()
+    await expect(
+      page.getByRole('button', { name: '设为基础紧急：Third' }),
+    ).toBeVisible()
+    await page.getByLabel('任务截止日期：Third').fill('2026-09-30')
+    await expect(page.getByLabel('任务截止日期：Third')).toHaveValue(
+      '2026-09-30',
+    )
+
+    page = await openHarnessPage(context, configuredBaseURL)
+    const afterPlanningChanges = await page.evaluate(() =>
+      (window as unknown as HarnessWindow).__taskPersistenceHarness.listTasks(),
+    )
+    expect(
+      afterPlanningChanges.find((task) => task.id === TASK_IDS.c),
+    ).toMatchObject({
+      isImportant: false,
+      isUrgent: false,
+      dueDate: '2026-09-30',
+    })
+
+    await context.close()
+    context = null
+    context = await chromium.launchPersistentContext(profilePath, {
+      channel: 'chromium',
+      headless: true,
+    })
+    page = await openHarnessPage(context, configuredBaseURL)
+    const afterPlanningRestart = await page.evaluate(() =>
+      (window as unknown as HarnessWindow).__taskPersistenceHarness.listTasks(),
+    )
+    expect(
+      afterPlanningRestart.find((task) => task.id === TASK_IDS.c),
+    ).toMatchObject({
+      isImportant: false,
+      isUrgent: false,
+      dueDate: '2026-09-30',
+    })
 
     await page.evaluate(() =>
       (window as unknown as HarnessWindow).__taskPersistenceHarness.shutdown(),

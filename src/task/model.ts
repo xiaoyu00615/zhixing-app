@@ -16,12 +16,17 @@ export const TASK_STATUS_OPERATIONS = [
 
 export type TaskStatusOperation = (typeof TASK_STATUS_OPERATIONS)[number]
 
+export type LocalDate = string
+
 export interface Task {
   readonly id: string
   readonly title: string
   readonly status: TaskStatus
   readonly createdAtMs: number
   readonly updatedAtMs: number
+  readonly isImportant: boolean
+  readonly isUrgent: boolean
+  readonly dueDate: LocalDate | null
 }
 
 const CANONICAL_LOWERCASE_UUID =
@@ -55,6 +60,64 @@ export function isNonNegativeSafeIntegerMilliseconds(
   value: unknown,
 ): value is number {
   return Number.isSafeInteger(value) && typeof value === 'number' && value >= 0
+}
+
+const LOCAL_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+}
+
+export function isValidLocalDate(value: unknown): value is LocalDate {
+  if (typeof value !== 'string') {
+    return false
+  }
+  const match = LOCAL_DATE_PATTERN.exec(value)
+  if (match === null) {
+    return false
+  }
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  if (year < 1 || month < 1 || month > 12 || day < 1) {
+    return false
+  }
+  const daysInMonth = [
+    31,
+    isLeapYear(year) ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ][month - 1]
+  return daysInMonth !== undefined && day <= daysInMonth
+}
+
+export function localDateFromDate(date: Date): LocalDate {
+  const year = date.getFullYear().toString().padStart(4, '0')
+  const month = (date.getMonth() + 1).toString().padStart(2, '0')
+  const day = date.getDate().toString().padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+export function isTaskOverdue(task: Task, today: LocalDate): boolean {
+  return (
+    isValidLocalDate(today) &&
+    task.dueDate !== null &&
+    isValidLocalDate(task.dueDate) &&
+    task.dueDate < today &&
+    (task.status === 'todo' || task.status === 'doing')
+  )
+}
+
+export function isTaskEffectivelyUrgent(task: Task, today: LocalDate): boolean {
+  return task.isUrgent || isTaskOverdue(task, today)
 }
 
 /**

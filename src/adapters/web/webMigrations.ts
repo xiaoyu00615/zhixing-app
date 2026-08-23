@@ -1,6 +1,7 @@
 import type { Database } from '@sqlite.org/sqlite-wasm'
 
 import createTasksSql from '../../../src-tauri/migrations/0001_create_tasks.sql?raw'
+import addTaskPlanningFieldsSql from '../../../src-tauri/migrations/0002_add_task_planning_fields.sql?raw'
 
 export interface WebMigrationDefinition {
   readonly version: number
@@ -43,6 +44,12 @@ export const WEB_MIGRATIONS: readonly WebMigrationDefinition[] = [
     version: 1,
     id: '0001_create_tasks',
     sql: createTasksSql,
+    highRisk: false,
+  },
+  {
+    version: 2,
+    id: '0002_add_task_planning_fields',
+    sql: addTaskPlanningFieldsSql,
     highRisk: false,
   },
 ]

@@ -11,6 +11,9 @@ const TASK: Task = {
   status: 'todo',
   createdAtMs: 100,
   updatedAtMs: 100,
+  isImportant: false,
+  isUrgent: false,
+  dueDate: null,
 }
 
 const runtimeMocks = vi.hoisted(() => ({

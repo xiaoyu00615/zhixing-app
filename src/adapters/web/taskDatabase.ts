@@ -6,13 +6,18 @@ import {
   isNonNegativeSafeIntegerMilliseconds,
   isTaskStatus,
   isTaskStatusOperation,
+  isValidLocalDate,
   resolveTaskStatusTransition,
   type Task,
 } from '@/task/model'
 import type {
   ChangeTaskStatusInput,
+  ClearTaskDeadlineInput,
   CreateTaskInput,
   RenameTaskInput,
+  SetTaskDeadlineInput,
+  SetTaskImportanceInput,
+  SetTaskUrgencyInput,
   TaskRepositoryErrorCode,
 } from '@/task/repository'
 import {
@@ -30,6 +35,9 @@ export class TaskDatabaseError extends Error {
   }
 }
 
+const TASK_COLUMNS = `id, title, status, created_at_ms, updated_at_ms,
+                      is_important, is_urgent, due_date`
+
 function parseTaskRow(row: Record<string, unknown> | undefined): Task | null {
   if (row === undefined) {
     return null
@@ -41,6 +49,9 @@ function parseTaskRow(row: Record<string, unknown> | undefined): Task | null {
     status,
     created_at_ms: createdAtMs,
     updated_at_ms: updatedAtMs,
+    is_important: isImportant,
+    is_urgent: isUrgent,
+    due_date: dueDate,
   } = row
   if (
     !isCanonicalLowercaseUuid(id) ||
@@ -48,18 +59,48 @@ function parseTaskRow(row: Record<string, unknown> | undefined): Task | null {
     !isTaskStatus(status) ||
     !isNonNegativeSafeIntegerMilliseconds(createdAtMs) ||
     !isNonNegativeSafeIntegerMilliseconds(updatedAtMs) ||
-    updatedAtMs < createdAtMs
+    updatedAtMs < createdAtMs ||
+    (isImportant !== 0 && isImportant !== 1) ||
+    (isUrgent !== 0 && isUrgent !== 1) ||
+    (dueDate !== null && !isValidLocalDate(dueDate))
   ) {
     throw new TaskDatabaseError('PERSISTENCE_FAILED')
   }
-  return { id, title, status, createdAtMs, updatedAtMs }
+  return {
+    id,
+    title,
+    status,
+    createdAtMs,
+    updatedAtMs,
+    isImportant: isImportant === 1,
+    isUrgent: isUrgent === 1,
+    dueDate,
+  }
 }
 
 function validateCreateInput(input: CreateTaskInput): void {
   if (
     !isCanonicalLowercaseUuid(input.id) ||
     !isNonEmptyTaskTitle(input.title) ||
-    !isNonNegativeSafeIntegerMilliseconds(input.createdAtMs)
+    !isNonNegativeSafeIntegerMilliseconds(input.createdAtMs) ||
+    (input.isImportant !== undefined &&
+      typeof input.isImportant !== 'boolean') ||
+    (input.isUrgent !== undefined && typeof input.isUrgent !== 'boolean') ||
+    (input.dueDate !== undefined &&
+      input.dueDate !== null &&
+      !isValidLocalDate(input.dueDate))
+  ) {
+    throw new TaskDatabaseError('PERSISTENCE_FAILED')
+  }
+}
+
+function validatePlanningBaseInput(input: {
+  readonly id: string
+  readonly updatedAtMs: number
+}): void {
+  if (
+    !isCanonicalLowercaseUuid(input.id) ||
+    !isNonNegativeSafeIntegerMilliseconds(input.updatedAtMs)
   ) {
     throw new TaskDatabaseError('PERSISTENCE_FAILED')
   }
@@ -109,9 +150,18 @@ export class WebTaskDatabase {
       return this.#database.transaction(() => {
         this.#database.exec({
           sql: `INSERT INTO tasks
-                (id, title, status, created_at_ms, updated_at_ms)
-                VALUES (?, ?, 'todo', ?, ?)`,
-          bind: [input.id, input.title, input.createdAtMs, input.createdAtMs],
+                (id, title, status, created_at_ms, updated_at_ms,
+                 is_important, is_urgent, due_date)
+                VALUES (?, ?, 'todo', ?, ?, ?, ?, ?)`,
+          bind: [
+            input.id,
+            input.title,
+            input.createdAtMs,
+            input.createdAtMs,
+            input.isImportant === true ? 1 : 0,
+            input.isUrgent === true ? 1 : 0,
+            input.dueDate ?? null,
+          ],
         })
         return this.requireTask(input.id)
       })
@@ -127,7 +177,7 @@ export class WebTaskDatabase {
     try {
       return this.#database
         .selectObjects(
-          `SELECT id, title, status, created_at_ms, updated_at_ms
+          `SELECT ${TASK_COLUMNS}
            FROM tasks ORDER BY updated_at_ms DESC, id ASC`,
         )
         .map((row) => {
@@ -198,10 +248,84 @@ export class WebTaskDatabase {
     }
   }
 
+  setTaskImportance(input: SetTaskImportanceInput): Task {
+    validatePlanningBaseInput(input)
+    if (typeof input.isImportant !== 'boolean') {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    return this.updatePlanningField(
+      input.id,
+      'is_important',
+      input.isImportant ? 1 : 0,
+      input.updatedAtMs,
+    )
+  }
+
+  setTaskUrgency(input: SetTaskUrgencyInput): Task {
+    validatePlanningBaseInput(input)
+    if (typeof input.isUrgent !== 'boolean') {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    return this.updatePlanningField(
+      input.id,
+      'is_urgent',
+      input.isUrgent ? 1 : 0,
+      input.updatedAtMs,
+    )
+  }
+
+  setTaskDeadline(input: SetTaskDeadlineInput): Task {
+    validatePlanningBaseInput(input)
+    if (!isValidLocalDate(input.dueDate)) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    return this.updatePlanningField(
+      input.id,
+      'due_date',
+      input.dueDate,
+      input.updatedAtMs,
+    )
+  }
+
+  clearTaskDeadline(input: ClearTaskDeadlineInput): Task {
+    validatePlanningBaseInput(input)
+    return this.updatePlanningField(
+      input.id,
+      'due_date',
+      null,
+      input.updatedAtMs,
+    )
+  }
+
+  private updatePlanningField(
+    id: string,
+    column: 'is_important' | 'is_urgent' | 'due_date',
+    value: number | string | null,
+    updatedAtMs: number,
+  ): Task {
+    try {
+      return this.#database.transaction(() => {
+        this.#database.exec({
+          sql: `UPDATE tasks SET ${column} = ?, updated_at_ms = ? WHERE id = ?`,
+          bind: [value, updatedAtMs, id],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+        return this.requireTask(id)
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) {
+        throw error
+      }
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
   private requireTask(id: string): Task {
     const task = parseTaskRow(
       this.#database.selectObject(
-        `SELECT id, title, status, created_at_ms, updated_at_ms
+        `SELECT ${TASK_COLUMNS}
          FROM tasks WHERE id = ?`,
         [id],
       ),

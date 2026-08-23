@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 use crate::task::{
-    ChangeTaskStatusInput, CreateTaskInput, RenameTaskInput, TaskDbService, TaskError, TaskRecord,
-    TaskStatusOperation,
+    ChangeTaskStatusInput, ClearTaskDeadlineInput, CreateTaskInput, RenameTaskInput,
+    SetTaskDeadlineInput, SetTaskImportanceInput, SetTaskUrgencyInput, TaskDbService, TaskError,
+    TaskRecord, TaskStatusOperation,
 };
 use crate::RuntimeStatus;
 
@@ -23,6 +24,12 @@ pub(crate) struct CreateTaskDto {
     id: String,
     title: String,
     created_at_ms: i64,
+    #[serde(default)]
+    is_important: bool,
+    #[serde(default)]
+    is_urgent: bool,
+    #[serde(default)]
+    due_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +48,37 @@ pub(crate) struct ChangeTaskStatusDto {
     updated_at_ms: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetTaskImportanceDto {
+    id: String,
+    is_important: bool,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetTaskUrgencyDto {
+    id: String,
+    is_urgent: bool,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetTaskDeadlineDto {
+    id: String,
+    due_date: String,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ClearTaskDeadlineDto {
+    id: String,
+    updated_at_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TaskDto {
@@ -49,6 +87,9 @@ pub(crate) struct TaskDto {
     status: String,
     created_at_ms: i64,
     updated_at_ms: i64,
+    is_important: bool,
+    is_urgent: bool,
+    due_date: Option<String>,
 }
 
 impl From<TaskRecord> for TaskDto {
@@ -59,6 +100,9 @@ impl From<TaskRecord> for TaskDto {
             status: task.status.as_str().to_string(),
             created_at_ms: task.created_at_ms,
             updated_at_ms: task.updated_at_ms,
+            is_important: task.is_important,
+            is_urgent: task.is_urgent,
+            due_date: task.due_date,
         }
     }
 }
@@ -105,6 +149,9 @@ pub(crate) fn task_create(
             id: input.id,
             title: input.title,
             created_at_ms: input.created_at_ms,
+            is_important: input.is_important,
+            is_urgent: input.is_urgent,
+            due_date: input.due_date,
         },
     )
     .map(TaskDto::from)
@@ -162,6 +209,81 @@ pub(crate) fn task_change_status(
     .map_err(Into::into)
 }
 
+#[tauri::command]
+pub(crate) fn task_set_importance(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: SetTaskImportanceDto,
+) -> Result<TaskDto, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    TaskDbService::set_importance(
+        &connection,
+        SetTaskImportanceInput {
+            id: input.id,
+            is_important: input.is_important,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(TaskDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn task_set_urgency(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: SetTaskUrgencyDto,
+) -> Result<TaskDto, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    TaskDbService::set_urgency(
+        &connection,
+        SetTaskUrgencyInput {
+            id: input.id,
+            is_urgent: input.is_urgent,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(TaskDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn task_set_deadline(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: SetTaskDeadlineDto,
+) -> Result<TaskDto, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    TaskDbService::set_deadline(
+        &connection,
+        SetTaskDeadlineInput {
+            id: input.id,
+            due_date: input.due_date,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(TaskDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn task_clear_deadline(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: ClearTaskDeadlineDto,
+) -> Result<TaskDto, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    TaskDbService::clear_deadline(
+        &connection,
+        ClearTaskDeadlineInput {
+            id: input.id,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(TaskDto::from)
+    .map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,13 +295,19 @@ mod tests {
             id: "00000000-0000-4000-8000-000000000001".into(),
             title: "Task".into(),
             created_at_ms: 10,
+            is_important: true,
+            is_urgent: false,
+            due_date: Some("2026-08-23".into()),
         };
         assert_eq!(
             serde_json::to_value(input).unwrap(),
             serde_json::json!({
                 "id": "00000000-0000-4000-8000-000000000001",
                 "title": "Task",
-                "createdAtMs": 10
+                "createdAtMs": 10,
+                "isImportant": true,
+                "isUrgent": false,
+                "dueDate": "2026-08-23"
             })
         );
 
@@ -189,6 +317,9 @@ mod tests {
             status: TaskStatus::Todo,
             created_at_ms: 10,
             updated_at_ms: 10,
+            is_important: true,
+            is_urgent: false,
+            due_date: Some("2026-08-23".into()),
         });
         assert_eq!(
             serde_json::to_value(output).unwrap(),
@@ -197,7 +328,10 @@ mod tests {
                 "title": "Task",
                 "status": "todo",
                 "createdAtMs": 10,
-                "updatedAtMs": 10
+                "updatedAtMs": 10,
+                "isImportant": true,
+                "isUrgent": false,
+                "dueDate": "2026-08-23"
             })
         );
     }

@@ -10,15 +10,22 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import type { Task } from '@/task/model'
+import type { LocalDate, Task } from '@/task/model'
 
 interface CreateTaskDialogProps {
   readonly open: boolean
   readonly title: string
   readonly error: string | null
+  readonly dueDateError: string | null
+  readonly isImportant: boolean
+  readonly isUrgent: boolean
+  readonly dueDate: LocalDate | null
   readonly pending: boolean
   readonly onOpenChange: (open: boolean) => void
   readonly onTitleChange: (title: string) => void
+  readonly onImportanceChange: (isImportant: boolean) => void
+  readonly onUrgencyChange: (isUrgent: boolean) => void
+  readonly onDueDateChange: (dueDate: LocalDate | null) => void
   readonly onSubmit: () => void
 }
 
@@ -26,9 +33,16 @@ export function CreateTaskDialog({
   open,
   title,
   error,
+  dueDateError,
+  isImportant,
+  isUrgent,
+  dueDate,
   pending,
   onOpenChange,
   onTitleChange,
+  onImportanceChange,
+  onUrgencyChange,
+  onDueDateChange,
   onSubmit,
 }: CreateTaskDialogProps) {
   function submit(event: FormEvent<HTMLFormElement>): void {
@@ -53,27 +67,85 @@ export function CreateTaskDialog({
               输入任务标题。任务将保存到当前本地数据存储。
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-2">
-            <label className="text-body font-medium" htmlFor="create-title">
-              标题
-            </label>
-            <Input
-              aria-describedby={
-                error === null ? undefined : 'create-title-error'
-              }
-              aria-invalid={error !== null}
-              autoFocus
-              disabled={pending}
-              id="create-title"
-              onChange={(event) => onTitleChange(event.target.value)}
-              placeholder="输入任务标题"
-              value={title}
-            />
-            {error !== null && (
-              <p className="text-auxiliary text-danger" id="create-title-error">
-                {error}
-              </p>
-            )}
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-body font-medium" htmlFor="create-title">
+                标题
+              </label>
+              <Input
+                aria-describedby={
+                  error === null ? undefined : 'create-title-error'
+                }
+                aria-invalid={error !== null}
+                autoFocus
+                disabled={pending}
+                id="create-title"
+                onChange={(event) => onTitleChange(event.target.value)}
+                placeholder="输入任务标题"
+                value={title}
+              />
+              {error !== null && (
+                <p
+                  className="text-auxiliary text-danger"
+                  id="create-title-error"
+                >
+                  {error}
+                </p>
+              )}
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="flex items-center gap-2 text-body text-foreground">
+                <input
+                  checked={isImportant}
+                  className="size-[18px] accent-primary"
+                  disabled={pending}
+                  onChange={(event) => onImportanceChange(event.target.checked)}
+                  type="checkbox"
+                />
+                重要任务
+              </label>
+              <label className="flex items-center gap-2 text-body text-foreground">
+                <input
+                  checked={isUrgent}
+                  className="size-[18px] accent-primary"
+                  disabled={pending}
+                  onChange={(event) => onUrgencyChange(event.target.checked)}
+                  type="checkbox"
+                />
+                基础紧急
+              </label>
+            </div>
+            <div className="space-y-2">
+              <label
+                className="text-body font-medium"
+                htmlFor="create-due-date"
+              >
+                截止日期
+              </label>
+              <Input
+                aria-describedby={
+                  dueDateError === null ? undefined : 'create-due-date-error'
+                }
+                aria-invalid={dueDateError !== null}
+                disabled={pending}
+                id="create-due-date"
+                onChange={(event) =>
+                  onDueDateChange(
+                    event.target.value === '' ? null : event.target.value,
+                  )
+                }
+                type="date"
+                value={dueDate ?? ''}
+              />
+              {dueDateError !== null && (
+                <p
+                  className="text-auxiliary text-danger"
+                  id="create-due-date-error"
+                >
+                  {dueDateError}
+                </p>
+              )}
+            </div>
           </div>
           <DialogFooter>
             <Button disabled={pending} type="submit">

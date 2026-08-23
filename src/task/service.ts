@@ -1,6 +1,8 @@
 import {
   isCanonicalLowercaseUuid,
   isNonNegativeSafeIntegerMilliseconds,
+  isValidLocalDate,
+  type LocalDate,
   type Task,
   type TaskStatusOperation,
 } from '@/task/model'
@@ -16,7 +18,8 @@ export const TASK_APPLICATION_ERROR_CODES = [
 export type TaskApplicationErrorCode =
   (typeof TASK_APPLICATION_ERROR_CODES)[number]
 
-export type TaskApplicationErrorField = 'id' | 'title'
+export type TaskApplicationErrorField =
+  'id' | 'title' | 'dueDate' | 'importance' | 'urgency'
 
 const SAFE_ERROR_MESSAGES: Record<TaskApplicationErrorCode, string> = {
   VALIDATION: 'Task input is invalid.',
@@ -69,6 +72,20 @@ function validateTaskId(id: string): void {
   if (!isCanonicalLowercaseUuid(id)) {
     throw new TaskApplicationError('VALIDATION', 'id')
   }
+}
+
+function readBoolean(value: unknown, field: 'importance' | 'urgency'): boolean {
+  if (typeof value !== 'boolean') {
+    throw new TaskApplicationError('VALIDATION', field)
+  }
+  return value
+}
+
+function readDueDate(value: unknown): LocalDate {
+  if (!isValidLocalDate(value)) {
+    throw new TaskApplicationError('VALIDATION', 'dueDate')
+  }
+  return value
 }
 
 function readGeneratedTaskId(generateTaskId: GenerateTaskId): string {
@@ -142,12 +159,36 @@ export function createTaskService({
   }
 
   return {
-    async createTask(input: { readonly title: string }): Promise<Task> {
+    async createTask(input: {
+      readonly title: string
+      readonly isImportant?: boolean
+      readonly isUrgent?: boolean
+      readonly dueDate?: LocalDate | null
+    }): Promise<Task> {
       const title = normalizeTitle(input.title)
+      const isImportant =
+        input.isImportant === undefined
+          ? false
+          : readBoolean(input.isImportant, 'importance')
+      const isUrgent =
+        input.isUrgent === undefined
+          ? false
+          : readBoolean(input.isUrgent, 'urgency')
+      const dueDate =
+        input.dueDate === undefined || input.dueDate === null
+          ? null
+          : readDueDate(input.dueDate)
       const id = readGeneratedTaskId(generateTaskId)
       const createdAtMs = readNowMs(nowMs)
       return callRepository(() =>
-        repository.createTask({ id, title, createdAtMs }),
+        repository.createTask({
+          id,
+          title,
+          createdAtMs,
+          isImportant,
+          isUrgent,
+          dueDate,
+        }),
       )
     },
 
@@ -181,6 +222,45 @@ export function createTaskService({
 
     reopenTask(id: string): Promise<Task> {
       return changeStatus(id, 'reopen')
+    },
+
+    async setTaskImportance(id: string, isImportant: boolean): Promise<Task> {
+      validateTaskId(id)
+      const normalized = readBoolean(isImportant, 'importance')
+      const updatedAtMs = readNowMs(nowMs)
+      return callRepository(() =>
+        repository.setTaskImportance({
+          id,
+          isImportant: normalized,
+          updatedAtMs,
+        }),
+      )
+    },
+
+    async setTaskUrgency(id: string, isUrgent: boolean): Promise<Task> {
+      validateTaskId(id)
+      const normalized = readBoolean(isUrgent, 'urgency')
+      const updatedAtMs = readNowMs(nowMs)
+      return callRepository(() =>
+        repository.setTaskUrgency({ id, isUrgent: normalized, updatedAtMs }),
+      )
+    },
+
+    async setTaskDeadline(id: string, dueDate: LocalDate): Promise<Task> {
+      validateTaskId(id)
+      const normalized = readDueDate(dueDate)
+      const updatedAtMs = readNowMs(nowMs)
+      return callRepository(() =>
+        repository.setTaskDeadline({ id, dueDate: normalized, updatedAtMs }),
+      )
+    },
+
+    async clearTaskDeadline(id: string): Promise<Task> {
+      validateTaskId(id)
+      const updatedAtMs = readNowMs(nowMs)
+      return callRepository(() =>
+        repository.clearTaskDeadline({ id, updatedAtMs }),
+      )
     },
   }
 }
