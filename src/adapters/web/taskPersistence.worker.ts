@@ -163,6 +163,24 @@ async function handleRequest(value: unknown): Promise<void> {
           state.database.clearTaskDeadline(request.input),
         )
         return
+      case 'task.setProject':
+        success(request.requestId, state.database.setTaskProject(request.input))
+        return
+      case 'task.clearProject':
+        success(
+          request.requestId,
+          state.database.clearTaskProject(request.input),
+        )
+        return
+      case 'project.create':
+        success(request.requestId, state.database.createProject(request.input))
+        return
+      case 'project.list':
+        success(request.requestId, state.database.listProjects())
+        return
+      case 'project.rename':
+        success(request.requestId, state.database.renameProject(request.input))
+        return
     }
   } catch (error: unknown) {
     failure(

@@ -47,6 +47,7 @@ const TASK: Task = {
   isImportant: false,
   isUrgent: false,
   dueDate: null,
+  projectId: null,
 }
 
 describe('Task model persistence contract', () => {

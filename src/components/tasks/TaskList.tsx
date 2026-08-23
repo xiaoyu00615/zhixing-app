@@ -13,6 +13,8 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { ProjectChip } from '@/components/tasks/ProjectChip'
+import type { Project } from '@/project/model'
 import {
   isTaskEffectivelyUrgent,
   isTaskOverdue,
@@ -26,6 +28,7 @@ export type TaskStatusAction =
 
 interface TaskListProps {
   readonly tasks: readonly Task[]
+  readonly projects: readonly Project[]
   readonly today: LocalDate
   readonly pendingTaskIds: ReadonlySet<string>
   readonly onOpenDetail: (task: Task) => void
@@ -74,6 +77,7 @@ function formatUpdatedAt(updatedAtMs: number): string {
 
 export function TaskList({
   tasks,
+  projects,
   today,
   pendingTaskIds,
   onOpenDetail,
@@ -84,6 +88,7 @@ export function TaskList({
   onSetDeadline,
   onClearDeadline,
 }: TaskListProps) {
+  const projectsById = new Map(projects.map((project) => [project.id, project]))
   return (
     <div className="overflow-hidden rounded-lg border border-border bg-surface">
       <ul aria-label="任务列表" className="divide-y divide-border">
@@ -159,6 +164,12 @@ export function TaskList({
                 </div>
 
                 <div className="mt-2 flex flex-wrap items-center gap-x-1 gap-y-1 text-auxiliary text-foreground-tertiary">
+                  {task.projectId !== null &&
+                    projectsById.has(task.projectId) && (
+                      <ProjectChip
+                        project={projectsById.get(task.projectId)!}
+                      />
+                    )}
                   <span className="mr-1">
                     更新于 {formatUpdatedAt(task.updatedAtMs)}
                   </span>

@@ -3,10 +3,13 @@
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
+use crate::project::{
+    CreateProjectInput, ProjectDbService, ProjectError, ProjectRecord, RenameProjectInput,
+};
 use crate::task::{
-    ChangeTaskStatusInput, ClearTaskDeadlineInput, CreateTaskInput, RenameTaskInput,
-    SetTaskDeadlineInput, SetTaskImportanceInput, SetTaskUrgencyInput, TaskDbService, TaskError,
-    TaskRecord, TaskStatusOperation,
+    ChangeTaskStatusInput, ClearTaskDeadlineInput, ClearTaskProjectInput, CreateTaskInput,
+    RenameTaskInput, SetTaskDeadlineInput, SetTaskImportanceInput, SetTaskProjectInput,
+    SetTaskUrgencyInput, TaskDbService, TaskError, TaskRecord, TaskStatusOperation,
 };
 use crate::RuntimeStatus;
 
@@ -30,6 +33,8 @@ pub(crate) struct CreateTaskDto {
     is_urgent: bool,
     #[serde(default)]
     due_date: Option<String>,
+    #[serde(default)]
+    project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +84,21 @@ pub(crate) struct ClearTaskDeadlineDto {
     updated_at_ms: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetTaskProjectDto {
+    id: String,
+    project_id: String,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ClearTaskProjectDto {
+    id: String,
+    updated_at_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TaskDto {
@@ -90,6 +110,7 @@ pub(crate) struct TaskDto {
     is_important: bool,
     is_urgent: bool,
     due_date: Option<String>,
+    project_id: Option<String>,
 }
 
 impl From<TaskRecord> for TaskDto {
@@ -103,6 +124,7 @@ impl From<TaskRecord> for TaskDto {
             is_important: task.is_important,
             is_urgent: task.is_urgent,
             due_date: task.due_date,
+            project_id: task.project_id,
         }
     }
 }
@@ -152,6 +174,7 @@ pub(crate) fn task_create(
             is_important: input.is_important,
             is_urgent: input.is_urgent,
             due_date: input.due_date,
+            project_id: input.project_id,
         },
     )
     .map(TaskDto::from)
@@ -284,6 +307,134 @@ pub(crate) fn task_clear_deadline(
     .map_err(Into::into)
 }
 
+#[tauri::command]
+pub(crate) fn task_set_project(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: SetTaskProjectDto,
+) -> Result<TaskDto, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    TaskDbService::set_project(
+        &connection,
+        SetTaskProjectInput {
+            id: input.id,
+            project_id: input.project_id,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(TaskDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn task_clear_project(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: ClearTaskProjectDto,
+) -> Result<TaskDto, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    TaskDbService::clear_project(
+        &connection,
+        ClearTaskProjectInput {
+            id: input.id,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(TaskDto::from)
+    .map_err(Into::into)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreateProjectDto {
+    id: String,
+    name: String,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RenameProjectDto {
+    id: String,
+    name: String,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectDto {
+    id: String,
+    name: String,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+}
+impl From<ProjectRecord> for ProjectDto {
+    fn from(project: ProjectRecord) -> Self {
+        Self {
+            id: project.id,
+            name: project.name,
+            created_at_ms: project.created_at_ms,
+            updated_at_ms: project.updated_at_ms,
+        }
+    }
+}
+
+fn project_error(error: ProjectError) -> TaskCommandErrorDto {
+    TaskCommandErrorDto {
+        code: error.code(),
+        message: error.safe_message(),
+    }
+}
+
+#[tauri::command]
+pub(crate) fn project_create(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: CreateProjectDto,
+) -> Result<ProjectDto, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    ProjectDbService::create(
+        &connection,
+        CreateProjectInput {
+            id: input.id,
+            name: input.name,
+            created_at_ms: input.created_at_ms,
+        },
+    )
+    .map(ProjectDto::from)
+    .map_err(project_error)
+}
+
+#[tauri::command]
+pub(crate) fn project_list(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+) -> Result<Vec<ProjectDto>, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    ProjectDbService::list(&connection)
+        .map(|projects| projects.into_iter().map(ProjectDto::from).collect())
+        .map_err(project_error)
+}
+
+#[tauri::command]
+pub(crate) fn project_rename(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: RenameProjectDto,
+) -> Result<ProjectDto, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    ProjectDbService::rename(
+        &connection,
+        RenameProjectInput {
+            id: input.id,
+            name: input.name,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(ProjectDto::from)
+    .map_err(project_error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +449,7 @@ mod tests {
             is_important: true,
             is_urgent: false,
             due_date: Some("2026-08-23".into()),
+            project_id: None,
         };
         assert_eq!(
             serde_json::to_value(input).unwrap(),
@@ -307,7 +459,8 @@ mod tests {
                 "createdAtMs": 10,
                 "isImportant": true,
                 "isUrgent": false,
-                "dueDate": "2026-08-23"
+                "dueDate": "2026-08-23",
+                "projectId": null
             })
         );
 
@@ -320,6 +473,7 @@ mod tests {
             is_important: true,
             is_urgent: false,
             due_date: Some("2026-08-23".into()),
+            project_id: None,
         });
         assert_eq!(
             serde_json::to_value(output).unwrap(),
@@ -331,7 +485,8 @@ mod tests {
                 "updatedAtMs": 10,
                 "isImportant": true,
                 "isUrgent": false,
-                "dueDate": "2026-08-23"
+                "dueDate": "2026-08-23",
+                "projectId": null
             })
         );
     }

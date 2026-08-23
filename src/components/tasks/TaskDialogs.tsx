@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import type { LocalDate, Task } from '@/task/model'
+import type { Project } from '@/project/model'
 
 interface CreateTaskDialogProps {
   readonly open: boolean
@@ -21,12 +22,15 @@ interface CreateTaskDialogProps {
   readonly isImportant: boolean
   readonly isUrgent: boolean
   readonly dueDate: LocalDate | null
+  readonly projectId: string | null
+  readonly projects: readonly Project[]
   readonly pending: boolean
   readonly onOpenChange: (open: boolean) => void
   readonly onTitleChange: (title: string) => void
   readonly onImportanceChange: (isImportant: boolean) => void
   readonly onUrgencyChange: (isUrgent: boolean) => void
   readonly onDueDateChange: (dueDate: LocalDate | null) => void
+  readonly onProjectChange: (projectId: string | null) => void
   readonly onSubmit: () => void
 }
 
@@ -38,12 +42,15 @@ export function CreateTaskDialog({
   isImportant,
   isUrgent,
   dueDate,
+  projectId,
+  projects,
   pending,
   onOpenChange,
   onTitleChange,
   onImportanceChange,
   onUrgencyChange,
   onDueDateChange,
+  onProjectChange,
   onSubmit,
 }: CreateTaskDialogProps) {
   function submit(event: FormEvent<HTMLFormElement>): void {
@@ -184,6 +191,32 @@ export function CreateTaskDialog({
                   {dueDateError}
                 </p>
               )}
+            </div>
+            <div className="space-y-2">
+              <label
+                className="text-body font-medium"
+                id="create-project-label"
+              >
+                所属项目
+              </label>
+              <select
+                aria-labelledby="create-project-label"
+                className="h-9 w-full rounded-sm border border-border bg-surface px-3 text-sm outline-none focus-visible:border-[var(--focus-color)] focus-visible:[box-shadow:var(--focus-ring)]"
+                disabled={pending}
+                value={projectId ?? 'none'}
+                onChange={(event) =>
+                  onProjectChange(
+                    event.target.value === 'none' ? null : event.target.value,
+                  )
+                }
+              >
+                <option value="none">无项目</option>
+                {projects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
           <DialogFooter className="-mx-6 -mb-6 px-6 py-4">

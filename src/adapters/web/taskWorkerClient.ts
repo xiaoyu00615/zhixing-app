@@ -8,6 +8,10 @@ import type {
   SetTaskUrgencyInput,
   TaskRepositoryErrorCode,
 } from '@/task/repository'
+import type {
+  CreateProjectInput,
+  RenameProjectInput,
+} from '@/project/repository'
 import {
   parseTaskWorkerResponse,
   parseWebPersistenceCapability,
@@ -135,6 +139,46 @@ export class TaskWorkerClient {
     return this.send((requestId) => ({
       requestId,
       type: 'task.clearDeadline',
+      input,
+    }))
+  }
+
+  setTaskProject(
+    input: import('@/task/repository').SetTaskProjectInput,
+  ): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'task.setProject',
+      input,
+    }))
+  }
+
+  clearTaskProject(
+    input: import('@/task/repository').ClearTaskProjectInput,
+  ): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'task.clearProject',
+      input,
+    }))
+  }
+
+  createProject(input: CreateProjectInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'project.create',
+      input,
+    }))
+  }
+
+  listProjects(): Promise<unknown> {
+    return this.send((requestId) => ({ requestId, type: 'project.list' }))
+  }
+
+  renameProject(input: RenameProjectInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'project.rename',
       input,
     }))
   }

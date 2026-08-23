@@ -40,6 +40,7 @@ const TASK = {
   isImportant: false,
   isUrgent: false,
   dueDate: null,
+  projectId: null,
 } as const
 
 class FakeWorker implements TaskWorkerEndpoint {
@@ -123,6 +124,12 @@ class ContractWorker implements TaskWorkerEndpoint {
           break
         case 'task.clearDeadline':
           result = this.backend.clearTaskDeadline(request.input)
+          break
+        case 'task.setProject':
+          result = this.backend.setTaskProject(request.input)
+          break
+        case 'task.clearProject':
+          result = this.backend.clearTaskProject(request.input)
           break
         case 'shutdown':
           result = null
@@ -482,10 +489,16 @@ describe('Web migrations', () => {
         checksumSha256: await sha256Hex(WEB_MIGRATIONS[1]?.sql ?? ''),
         appliedAtMs: 123,
       },
+      {
+        version: 3,
+        id: '0003_add_task_projects',
+        checksumSha256: await sha256Hex(WEB_MIGRATIONS[2]?.sql ?? ''),
+        appliedAtMs: 123,
+      },
     ])
   })
 
-  test('upgrades an exact v1 prefix and is idempotent after v2', async () => {
+  test('upgrades an exact v1 prefix and is idempotent after v3', async () => {
     const store = new FakeMigrationStore()
     await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 1), () => 123)
     expect(store.history.map((row) => row.version)).toEqual([1])
@@ -495,7 +508,19 @@ describe('Web migrations', () => {
     expect(store.executedSql).toEqual(
       WEB_MIGRATIONS.map((migration) => migration.sql),
     )
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3])
+  })
+
+  test('upgrades an exact v2 prefix to Project migration 3', async () => {
+    const store = new FakeMigrationStore()
+    await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 2), () => 123)
     expect(store.history.map((row) => row.version)).toEqual([1, 2])
+    await runWebMigrations(store, WEB_MIGRATIONS, () => 456)
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3])
+    expect(store.history[2]).toMatchObject({
+      id: '0003_add_task_projects',
+      appliedAtMs: 456,
+    })
   })
 
   test('fails closed on id and checksum mismatch', async () => {

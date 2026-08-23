@@ -7,6 +7,7 @@ export interface CreateTaskInput {
   readonly isImportant?: boolean
   readonly isUrgent?: boolean
   readonly dueDate?: LocalDate | null
+  readonly projectId?: string | null
 }
 
 export interface RenameTaskInput {
@@ -44,6 +45,17 @@ export interface ClearTaskDeadlineInput {
   readonly updatedAtMs: number
 }
 
+export interface SetTaskProjectInput {
+  readonly id: string
+  readonly projectId: string
+  readonly updatedAtMs: number
+}
+
+export interface ClearTaskProjectInput {
+  readonly id: string
+  readonly updatedAtMs: number
+}
+
 export interface TaskRepository {
   createTask(input: CreateTaskInput): Promise<Task>
   listTasks(): Promise<readonly Task[]>
@@ -53,6 +65,8 @@ export interface TaskRepository {
   setTaskUrgency(input: SetTaskUrgencyInput): Promise<Task>
   setTaskDeadline(input: SetTaskDeadlineInput): Promise<Task>
   clearTaskDeadline(input: ClearTaskDeadlineInput): Promise<Task>
+  setTaskProject(input: SetTaskProjectInput): Promise<Task>
+  clearTaskProject(input: ClearTaskProjectInput): Promise<Task>
 }
 
 export const TASK_REPOSITORY_ERROR_CODES = [
@@ -74,6 +88,8 @@ export type TaskRepositoryOperation =
   | 'setTaskUrgency'
   | 'setTaskDeadline'
   | 'clearTaskDeadline'
+  | 'setTaskProject'
+  | 'clearTaskProject'
 
 const SAFE_ERROR_MESSAGES: Record<TaskRepositoryErrorCode, string> = {
   NOT_FOUND: 'Task not found.',

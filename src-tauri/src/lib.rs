@@ -30,6 +30,7 @@ mod bootstrap;
 mod commands;
 mod db;
 mod diagnostics;
+mod project;
 mod storage;
 mod task;
 
@@ -189,7 +190,12 @@ pub fn run() {
             commands::task_set_importance,
             commands::task_set_urgency,
             commands::task_set_deadline,
-            commands::task_clear_deadline
+            commands::task_clear_deadline,
+            commands::task_set_project,
+            commands::task_clear_project,
+            commands::project_create,
+            commands::project_list,
+            commands::project_rename
         ])
         .setup(|app| {
             // 🔒 冻结 §3：路径统一通过 PathResolver。
@@ -714,7 +720,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(rows, 2, "Production Migrations 1-2 必须写入 history");
+        assert_eq!(rows, 3, "Production Migrations 1-3 必须写入 history");
         let task_table: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
@@ -723,11 +729,19 @@ mod tests {
             )
             .unwrap();
         assert_eq!(task_table, 1, "Migration 1 必须创建 tasks");
+        let project_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(project_table, 1, "Migration 3 必须创建 projects");
         // No unapproved business tables exist.
         let others: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master \
-                 WHERE type='table' AND name NOT IN ('schema_migrations', 'tasks')",
+                 WHERE type='table' AND name NOT IN ('schema_migrations', 'tasks', 'projects')",
                 [],
                 |r| r.get(0),
             )
@@ -754,12 +768,12 @@ mod tests {
         let manifest_bytes_before =
             fs::read(data_root.join(MANIFEST_FILENAME)).unwrap();
 
-        // (2) Production already applied v1-v2; insert an unknown v3.
+        // (2) Production already applied v1-v3; insert an unknown v4.
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
             conn.execute_batch(
                 "INSERT INTO schema_migrations(version,id,checksum_sha256,applied_at_ms) \
-                 VALUES(3,'m3','sha3',101);",
+                 VALUES(4,'m4','sha4',101);",
             )
             .unwrap();
         }
@@ -792,10 +806,10 @@ mod tests {
         assert_eq!(device_id_1.as_str(), loaded2.device_id.as_str());
         assert!(db_path.exists(), "失败不得删 zhixing.db");
 
-        // (4) Remove only the injected v3 row; approved v1-v2 remain intact.
+        // (4) Remove only the injected v4 row; approved v1-v3 remain intact.
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
-            conn.execute_batch("DELETE FROM schema_migrations WHERE version = 3;")
+            conn.execute_batch("DELETE FROM schema_migrations WHERE version = 4;")
                 .unwrap();
         }
         let status = run_bootstrap_pipeline(&cfg, &local);

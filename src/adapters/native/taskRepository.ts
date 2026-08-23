@@ -44,6 +44,7 @@ function parseTaskDto(
     isImportant,
     isUrgent,
     dueDate,
+    projectId,
   } = value
   if (
     !isCanonicalLowercaseUuid(id) ||
@@ -54,7 +55,8 @@ function parseTaskDto(
     updatedAtMs < createdAtMs ||
     typeof isImportant !== 'boolean' ||
     typeof isUrgent !== 'boolean' ||
-    (dueDate !== null && !isValidLocalDate(dueDate))
+    (dueDate !== null && !isValidLocalDate(dueDate)) ||
+    (projectId !== null && !isCanonicalLowercaseUuid(projectId))
   ) {
     throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
   }
@@ -68,6 +70,7 @@ function parseTaskDto(
     isImportant,
     isUrgent,
     dueDate,
+    projectId,
   }
 }
 
@@ -133,7 +136,10 @@ export class NativeTaskRepository implements TaskRepository {
       (input.isUrgent !== undefined && typeof input.isUrgent !== 'boolean') ||
       (input.dueDate !== undefined &&
         input.dueDate !== null &&
-        !isValidLocalDate(input.dueDate))
+        !isValidLocalDate(input.dueDate)) ||
+      (input.projectId !== undefined &&
+        input.projectId !== null &&
+        !isCanonicalLowercaseUuid(input.projectId))
     ) {
       throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
     }
@@ -144,6 +150,7 @@ export class NativeTaskRepository implements TaskRepository {
         isImportant: input.isImportant ?? false,
         isUrgent: input.isUrgent ?? false,
         dueDate: input.dueDate ?? null,
+        projectId: input.projectId ?? null,
       },
     })
     return parseTaskDto(dto, operation)
@@ -218,6 +225,28 @@ export class NativeTaskRepository implements TaskRepository {
     )
   }
 
+  async setTaskProject(
+    input: import('@/task/repository').SetTaskProjectInput,
+  ): Promise<Task> {
+    return this.invokePlanning(
+      'setTaskProject',
+      'task_set_project',
+      input,
+      isCanonicalLowercaseUuid(input.projectId),
+    )
+  }
+
+  async clearTaskProject(
+    input: import('@/task/repository').ClearTaskProjectInput,
+  ): Promise<Task> {
+    return this.invokePlanning(
+      'clearTaskProject',
+      'task_clear_project',
+      input,
+      true,
+    )
+  }
+
   private async invokePlanning(
     operation: Extract<
       TaskRepositoryOperation,
@@ -225,6 +254,8 @@ export class NativeTaskRepository implements TaskRepository {
       | 'setTaskUrgency'
       | 'setTaskDeadline'
       | 'clearTaskDeadline'
+      | 'setTaskProject'
+      | 'clearTaskProject'
     >,
     command: string,
     input: { readonly id: string; readonly updatedAtMs: number },

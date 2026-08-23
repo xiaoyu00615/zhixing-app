@@ -10,6 +10,8 @@ import {
 } from 'lucide-react'
 
 import type { TaskStatusAction } from '@/components/tasks/TaskList'
+import { ProjectChip } from '@/components/tasks/ProjectChip'
+import type { Project } from '@/project/model'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -24,6 +26,7 @@ import {
 
 interface TaskQuadrantViewProps {
   readonly tasks: readonly Task[]
+  readonly projects: readonly Project[]
   readonly today: LocalDate
   readonly pendingTaskIds: ReadonlySet<string>
   readonly onCreate: () => void
@@ -79,6 +82,7 @@ const QUADRANT_PRESENTATION: ReadonlyArray<{
 
 export function TaskQuadrantView({
   tasks,
+  projects,
   today,
   pendingTaskIds,
   onCreate,
@@ -90,6 +94,7 @@ export function TaskQuadrantView({
   onClearDeadline,
 }: TaskQuadrantViewProps) {
   const groups = groupTasksByQuadrant(tasks, today)
+  const projectsById = new Map(projects.map((project) => [project.id, project]))
   const activeTaskCount = QUADRANT_PRESENTATION.reduce(
     (total, quadrant) => total + groups[quadrant.key].length,
     0,
@@ -178,6 +183,12 @@ export function TaskQuadrantView({
                               {task.title}
                             </button>
                             <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                              {task.projectId !== null &&
+                                projectsById.has(task.projectId) && (
+                                  <ProjectChip
+                                    project={projectsById.get(task.projectId)!}
+                                  />
+                                )}
                               <Badge variant="secondary">
                                 {task.status === 'doing' ? '进行中' : '待开始'}
                               </Badge>

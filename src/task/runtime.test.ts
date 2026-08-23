@@ -14,12 +14,14 @@ const TASK: Task = {
   isImportant: false,
   isUrgent: false,
   dueDate: null,
+  projectId: null,
 }
 
 const runtimeMocks = vi.hoisted(() => ({
   openWebTaskRepository: vi.fn(),
   nativeConstructed: vi.fn(),
   nativeListTasks: vi.fn(),
+  nativeListProjects: vi.fn(),
 }))
 
 vi.mock('@/adapters/web', () => ({
@@ -48,12 +50,18 @@ vi.mock('@/adapters/native', () => ({
       return Promise.resolve(TASK)
     }
   },
+  NativeProjectRepository: class {
+    listProjects(): Promise<readonly never[]> {
+      return runtimeMocks.nativeListProjects() as Promise<readonly never[]>
+    }
+  },
 }))
 
 describe('Task runtime composition', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     runtimeMocks.nativeListTasks.mockResolvedValue([TASK])
+    runtimeMocks.nativeListProjects.mockResolvedValue([])
   })
 
   test('Web composition opens only Web persistence and preserves disposal', async () => {
@@ -67,6 +75,11 @@ describe('Task runtime composition', () => {
     runtimeMocks.openWebTaskRepository.mockResolvedValue({
       capability: { status: 'AVAILABLE' },
       repository,
+      projectRepository: {
+        createProject: vi.fn(),
+        listProjects: vi.fn(() => Promise.resolve([])),
+        renameProject: vi.fn(),
+      },
       dispose,
     })
 

@@ -18,6 +18,14 @@ interface BrowserTask {
   readonly isImportant: boolean
   readonly isUrgent: boolean
   readonly dueDate: string | null
+  readonly projectId: string | null
+}
+
+interface BrowserProject {
+  readonly id: string
+  readonly name: string
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
 }
 
 interface BrowserHarness {
@@ -35,6 +43,7 @@ interface BrowserHarness {
     isImportant?: boolean
     isUrgent?: boolean
     dueDate?: string | null
+    projectId?: string | null
   }): Promise<BrowserTask>
   listTasks(): Promise<readonly BrowserTask[]>
   renameTask(input: {
@@ -47,6 +56,17 @@ interface BrowserHarness {
     operation: 'start'
     updatedAtMs: number
   }): Promise<BrowserTask>
+  createProject(input: {
+    id: string
+    name: string
+    createdAtMs: number
+  }): Promise<BrowserProject>
+  listProjects(): Promise<readonly BrowserProject[]>
+  renameProject(input: {
+    id: string
+    name: string
+    updatedAtMs: number
+  }): Promise<BrowserProject>
   shutdown(): Promise<void>
 }
 
@@ -57,6 +77,7 @@ const TASK_IDS = {
   b: '00000000-0000-4000-8000-000000000002',
   c: '00000000-0000-4000-8000-000000000003',
 } as const
+const PROJECT_ID = '00000000-0000-4000-8000-000000000101'
 
 async function openHarnessPage(
   context: BrowserContext,
@@ -108,7 +129,50 @@ test('persists Task operations in OPFS across a browser restart', async ({
     await expect(page.locator('#capability')).toHaveText('AVAILABLE')
 
     await page.evaluate(
-      ({ ids }) =>
+      ({ id }) =>
+        (
+          window as unknown as HarnessWindow
+        ).__taskPersistenceHarness.createProject({
+          id,
+          name: 'Work',
+          createdAtMs: 5,
+        }),
+      { id: PROJECT_ID },
+    )
+
+    const missingProjectError = await page.evaluate(
+      async ({ id }) => {
+        try {
+          await (
+            window as unknown as HarnessWindow
+          ).__taskPersistenceHarness.createTask({
+            id,
+            title: 'Missing project',
+            createdAtMs: 6,
+            projectId: '00000000-0000-4000-8000-000000000199',
+          })
+          return null
+        } catch (error: unknown) {
+          const safe = error as { code?: unknown; message?: unknown }
+          return { code: safe.code, message: safe.message }
+        }
+      },
+      { id: '00000000-0000-4000-8000-000000000004' },
+    )
+    expect(missingProjectError).toMatchObject({ code: 'NOT_FOUND' })
+    expect(missingProjectError?.message).not.toMatch(
+      /SQL|constraint|private|opfs|WASM|stack|DOMException|token|secret/i,
+    )
+    await expect(
+      page.evaluate(() =>
+        (
+          window as unknown as HarnessWindow
+        ).__taskPersistenceHarness.listTasks(),
+      ),
+    ).resolves.toEqual([])
+
+    await page.evaluate(
+      ({ ids, projectId }) =>
         Promise.all([
           (
             window as unknown as HarnessWindow
@@ -119,6 +183,7 @@ test('persists Task operations in OPFS across a browser restart', async ({
             isImportant: true,
             isUrgent: true,
             dueDate: '2026-08-23',
+            projectId,
           }),
           (
             window as unknown as HarnessWindow
@@ -135,7 +200,7 @@ test('persists Task operations in OPFS across a browser restart', async ({
             createdAtMs: 10,
           }),
         ]),
-      { ids: TASK_IDS },
+      { ids: TASK_IDS, projectId: PROJECT_ID },
     )
 
     const duplicateError = await page.evaluate(
@@ -183,6 +248,17 @@ test('persists Task operations in OPFS across a browser restart', async ({
         }),
       { id: TASK_IDS.a },
     )
+    await page.evaluate(
+      ({ id }) =>
+        (
+          window as unknown as HarnessWindow
+        ).__taskPersistenceHarness.renameProject({
+          id,
+          name: 'Work renamed',
+          updatedAtMs: 101,
+        }),
+      { id: PROJECT_ID },
+    )
 
     const expectedTasks: readonly BrowserTask[] = [
       {
@@ -194,6 +270,7 @@ test('persists Task operations in OPFS across a browser restart', async ({
         isImportant: false,
         isUrgent: false,
         dueDate: null,
+        projectId: null,
       },
       {
         id: TASK_IDS.b,
@@ -204,6 +281,7 @@ test('persists Task operations in OPFS across a browser restart', async ({
         isImportant: false,
         isUrgent: false,
         dueDate: null,
+        projectId: null,
       },
       {
         id: TASK_IDS.c,
@@ -214,6 +292,7 @@ test('persists Task operations in OPFS across a browser restart', async ({
         isImportant: true,
         isUrgent: true,
         dueDate: '2026-08-23',
+        projectId: PROJECT_ID,
       },
     ]
     await expect(
@@ -239,6 +318,20 @@ test('persists Task operations in OPFS across a browser restart', async ({
       (window as unknown as HarnessWindow).__taskPersistenceHarness.listTasks(),
     )
     expect(afterRestart).toEqual(expectedTasks)
+    await expect(
+      page.evaluate(() =>
+        (
+          window as unknown as HarnessWindow
+        ).__taskPersistenceHarness.listProjects(),
+      ),
+    ).resolves.toEqual([
+      {
+        id: PROJECT_ID,
+        name: 'Work renamed',
+        createdAtMs: 5,
+        updatedAtMs: 101,
+      },
+    ])
 
     await page.goto(`${configuredBaseURL}/tasks`)
     await expect(page.getByText('Third', { exact: true })).toBeVisible()

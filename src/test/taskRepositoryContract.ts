@@ -94,6 +94,7 @@ export class TaskRepositoryContractBackend {
       isImportant: input.isImportant ?? false,
       isUrgent: input.isUrgent ?? false,
       dueDate: input.dueDate ?? null,
+      projectId: input.projectId ?? null,
     }
     this.#tasks.set(task.id, task)
     return { ...task }
@@ -179,10 +180,24 @@ export class TaskRepositoryContractBackend {
     return this.updatePlanning(input.id, input.updatedAtMs, { dueDate: null })
   }
 
+  setTaskProject(input: import('@/task/repository').SetTaskProjectInput): Task {
+    return this.updatePlanning(input.id, input.updatedAtMs, {
+      projectId: input.projectId,
+    })
+  }
+
+  clearTaskProject(
+    input: import('@/task/repository').ClearTaskProjectInput,
+  ): Task {
+    return this.updatePlanning(input.id, input.updatedAtMs, { projectId: null })
+  }
+
   private updatePlanning(
     id: string,
     updatedAtMs: number,
-    change: Partial<Pick<Task, 'isImportant' | 'isUrgent' | 'dueDate'>>,
+    change: Partial<
+      Pick<Task, 'isImportant' | 'isUrgent' | 'dueDate' | 'projectId'>
+    >,
   ): Task {
     this.consumeFailure()
     const current = this.#tasks.get(id)
@@ -277,6 +292,7 @@ export function defineTaskRepositoryContract(
         isImportant: false,
         isUrgent: false,
         dueDate: null,
+        projectId: null,
       })
       await expectSafeError(
         repository.createTask({
@@ -390,6 +406,32 @@ export function defineTaskRepositoryContract(
         updatedAtMs: 500,
       })
       await expect(repository.listTasks()).resolves.toEqual([cleared])
+    })
+
+    test('creates with project atomically and supports set and clear project', async () => {
+      const { repository } = createFixture()
+      const projectId = '00000000-0000-4000-8000-000000000101'
+      const created = await repository.createTask({
+        id: TASK_CONTRACT_IDS.a,
+        title: 'Project task',
+        createdAtMs: 100,
+        projectId,
+      })
+      expect(created.projectId).toBe(projectId)
+      const changed = await repository.setTaskProject({
+        id: created.id,
+        projectId: '00000000-0000-4000-8000-000000000102',
+        updatedAtMs: 200,
+      })
+      expect(changed).toMatchObject({
+        projectId: '00000000-0000-4000-8000-000000000102',
+        updatedAtMs: 200,
+      })
+      const cleared = await repository.clearTaskProject({
+        id: created.id,
+        updatedAtMs: 300,
+      })
+      expect(cleared).toMatchObject({ projectId: null, updatedAtMs: 300 })
     })
 
     test('maps missing planning operations to NOT_FOUND', async () => {

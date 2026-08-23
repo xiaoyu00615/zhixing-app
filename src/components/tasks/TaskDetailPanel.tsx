@@ -4,6 +4,7 @@ import {
   Check,
   CirclePlay,
   Clock3,
+  Folder,
   Pencil,
   RotateCcw,
   Star,
@@ -22,6 +23,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import type { Project } from '@/project/model'
 import {
   isTaskEffectivelyUrgent,
   isTaskOverdue,
@@ -32,6 +34,7 @@ import {
 
 interface TaskDetailPanelProps {
   readonly task: Task | null
+  readonly projects: readonly Project[]
   readonly today: LocalDate
   readonly pending: boolean
   readonly onOpenChange: (open: boolean) => void
@@ -41,6 +44,8 @@ interface TaskDetailPanelProps {
   readonly onSetUrgency: (task: Task, isUrgent: boolean) => void
   readonly onSetDeadline: (task: Task, dueDate: LocalDate) => void
   readonly onClearDeadline: (task: Task) => void
+  readonly onSetProject: (task: Task, projectId: string) => void
+  readonly onClearProject: (task: Task) => void
 }
 
 const STATUS_PRESENTATION: Record<
@@ -98,6 +103,7 @@ function DetailRow({
 
 export function TaskDetailPanel({
   task,
+  projects,
   today,
   pending,
   onOpenChange,
@@ -107,6 +113,8 @@ export function TaskDetailPanel({
   onSetUrgency,
   onSetDeadline,
   onClearDeadline,
+  onSetProject,
+  onClearProject,
 }: TaskDetailPanelProps) {
   if (task === null) {
     return null
@@ -244,6 +252,32 @@ export function TaskDetailPanel({
                 任务属性
               </h3>
               <dl>
+                <DetailRow label="所属项目">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <Folder
+                      className="size-4 shrink-0 text-foreground-tertiary"
+                      aria-hidden="true"
+                    />
+                    <select
+                      aria-label={`详情所属项目：${task.title}`}
+                      className="h-9 min-w-0 flex-1 rounded-sm border border-border bg-surface px-3 text-sm outline-none focus-visible:border-[var(--focus-color)] focus-visible:[box-shadow:var(--focus-ring)]"
+                      disabled={pending}
+                      value={task.projectId ?? 'none'}
+                      onChange={(event) =>
+                        event.target.value === 'none'
+                          ? onClearProject(task)
+                          : onSetProject(task, event.target.value)
+                      }
+                    >
+                      <option value="none">无项目</option>
+                      {projects.map((project) => (
+                        <option key={project.id} value={project.id}>
+                          {project.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </DetailRow>
                 <DetailRow label="重要程度">
                   <Button
                     aria-label={`${task.isImportant ? '取消重要' : '设为重要'}：${task.title}`}

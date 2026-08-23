@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react'
 
 import { TaskList, type TaskStatusAction } from '@/components/tasks/TaskList'
 import { Button } from '@/components/ui/button'
+import type { Project } from '@/project/model'
 import {
   buildTaskCalendarMonth,
   isTaskOverdue,
@@ -16,6 +17,7 @@ import {
 
 interface TaskCalendarViewProps {
   readonly tasks: readonly Task[]
+  readonly projects: readonly Project[]
   readonly today: LocalDate
   readonly pendingTaskIds: ReadonlySet<string>
   readonly onCreate: () => void
@@ -66,16 +68,19 @@ function CalendarCell({
   today,
   onSelect,
   onOpenDetail,
+  projects,
 }: {
   readonly day: TaskCalendarDay
   readonly selectedDate: LocalDate
   readonly today: LocalDate
   readonly onSelect: (day: TaskCalendarDay) => void
   readonly onOpenDetail: (task: Task) => void
+  readonly projects: readonly Project[]
 }) {
   const selected = day.date === selectedDate
   const isToday = day.date === today
   const shownTasks = day.tasks.slice(0, 3)
+  const projectsById = new Map(projects.map((project) => [project.id, project]))
 
   return (
     <div
@@ -113,6 +118,9 @@ function CalendarCell({
             title={task.title}
             type="button"
           >
+            {task.projectId !== null && projectsById.has(task.projectId)
+              ? `${projectsById.get(task.projectId)!.name} · `
+              : ''}
             {task.title}
           </button>
         ))}
@@ -133,6 +141,7 @@ function CalendarCell({
 
 export function TaskCalendarView({
   tasks,
+  projects,
   today,
   pendingTaskIds,
   onCreate,
@@ -243,6 +252,7 @@ export function TaskCalendarView({
                     day={day}
                     key={day.date}
                     onOpenDetail={onOpenDetail}
+                    projects={projects}
                     onSelect={selectDay}
                     selectedDate={selectedDate}
                     today={today}
@@ -295,6 +305,7 @@ export function TaskCalendarView({
           ) : (
             <div className="mt-4 max-h-[600px] overflow-y-auto">
               <TaskList
+                projects={projects}
                 onClearDeadline={onClearDeadline}
                 onOpenDetail={onOpenDetail}
                 onRename={onRename}

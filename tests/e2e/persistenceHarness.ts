@@ -1,6 +1,12 @@
 import { openWebTaskRepository } from '@/adapters/web'
 import type { WebPersistenceCapability } from '@/adapters/web'
 import type { Task } from '@/task/model'
+import type { Project } from '@/project/model'
+import type {
+  CreateProjectInput,
+  ProjectRepository,
+  RenameProjectInput,
+} from '@/project/repository'
 import type {
   ChangeTaskStatusInput,
   CreateTaskInput,
@@ -14,6 +20,15 @@ interface PersistenceHarness {
   listTasks(): Promise<readonly Task[]>
   renameTask(input: RenameTaskInput): Promise<Task>
   changeTaskStatus(input: ChangeTaskStatusInput): Promise<Task>
+  setTaskProject(
+    input: import('@/task/repository').SetTaskProjectInput,
+  ): Promise<Task>
+  clearTaskProject(
+    input: import('@/task/repository').ClearTaskProjectInput,
+  ): Promise<Task>
+  createProject(input: CreateProjectInput): Promise<Project>
+  listProjects(): Promise<readonly Project[]>
+  renameProject(input: RenameProjectInput): Promise<Project>
   shutdown(): Promise<void>
 }
 
@@ -33,6 +48,13 @@ async function requireRepository(): Promise<TaskRepository> {
   return result.repository
 }
 
+async function requireProjectRepository(): Promise<ProjectRepository> {
+  const result = await opened
+  if (!('projectRepository' in result))
+    throw new Error('Project persistence is unavailable.')
+  return result.projectRepository
+}
+
 window.__taskPersistenceHarness = {
   async capability() {
     return (await opened).capability
@@ -48,6 +70,21 @@ window.__taskPersistenceHarness = {
   },
   async changeTaskStatus(input) {
     return (await requireRepository()).changeTaskStatus(input)
+  },
+  async setTaskProject(input) {
+    return (await requireRepository()).setTaskProject(input)
+  },
+  async clearTaskProject(input) {
+    return (await requireRepository()).clearTaskProject(input)
+  },
+  async createProject(input) {
+    return (await requireProjectRepository()).createProject(input)
+  },
+  async listProjects() {
+    return (await requireProjectRepository()).listProjects()
+  },
+  async renameProject(input) {
+    return (await requireProjectRepository()).renameProject(input)
   },
   async shutdown() {
     const result = await opened

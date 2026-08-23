@@ -20,6 +20,11 @@ import type {
   SetTaskUrgencyInput,
   TaskRepositoryErrorCode,
 } from '@/task/repository'
+import { isNonEmptyProjectName, type Project } from '@/project/model'
+import type {
+  CreateProjectInput,
+  RenameProjectInput,
+} from '@/project/repository'
 import {
   runWebMigrations,
   SqliteWebMigrationStore,
@@ -36,7 +41,8 @@ export class TaskDatabaseError extends Error {
 }
 
 const TASK_COLUMNS = `id, title, status, created_at_ms, updated_at_ms,
-                      is_important, is_urgent, due_date`
+                      is_important, is_urgent, due_date, project_id`
+const PROJECT_COLUMNS = 'id, name, created_at_ms, updated_at_ms'
 
 function parseTaskRow(row: Record<string, unknown> | undefined): Task | null {
   if (row === undefined) {
@@ -52,6 +58,7 @@ function parseTaskRow(row: Record<string, unknown> | undefined): Task | null {
     is_important: isImportant,
     is_urgent: isUrgent,
     due_date: dueDate,
+    project_id: projectId,
   } = row
   if (
     !isCanonicalLowercaseUuid(id) ||
@@ -62,7 +69,8 @@ function parseTaskRow(row: Record<string, unknown> | undefined): Task | null {
     updatedAtMs < createdAtMs ||
     (isImportant !== 0 && isImportant !== 1) ||
     (isUrgent !== 0 && isUrgent !== 1) ||
-    (dueDate !== null && !isValidLocalDate(dueDate))
+    (dueDate !== null && !isValidLocalDate(dueDate)) ||
+    (projectId !== null && !isCanonicalLowercaseUuid(projectId))
   ) {
     throw new TaskDatabaseError('PERSISTENCE_FAILED')
   }
@@ -75,6 +83,7 @@ function parseTaskRow(row: Record<string, unknown> | undefined): Task | null {
     isImportant: isImportant === 1,
     isUrgent: isUrgent === 1,
     dueDate,
+    projectId,
   }
 }
 
@@ -88,7 +97,10 @@ function validateCreateInput(input: CreateTaskInput): void {
     (input.isUrgent !== undefined && typeof input.isUrgent !== 'boolean') ||
     (input.dueDate !== undefined &&
       input.dueDate !== null &&
-      !isValidLocalDate(input.dueDate))
+      !isValidLocalDate(input.dueDate)) ||
+    (input.projectId !== undefined &&
+      input.projectId !== null &&
+      !isCanonicalLowercaseUuid(input.projectId))
   ) {
     throw new TaskDatabaseError('PERSISTENCE_FAILED')
   }
@@ -134,6 +146,7 @@ export class WebTaskDatabase {
   }
 
   static async initialize(database: Database): Promise<WebTaskDatabase> {
+    database.exec('PRAGMA foreign_keys = ON')
     await runWebMigrations(new SqliteWebMigrationStore(database))
     const taskDatabase = new WebTaskDatabase(database)
     taskDatabase.assertSane()
@@ -148,11 +161,14 @@ export class WebTaskDatabase {
     validateCreateInput(input)
     try {
       return this.#database.transaction(() => {
+        if (input.projectId !== undefined && input.projectId !== null) {
+          this.requireProject(input.projectId)
+        }
         this.#database.exec({
           sql: `INSERT INTO tasks
                 (id, title, status, created_at_ms, updated_at_ms,
-                 is_important, is_urgent, due_date)
-                VALUES (?, ?, 'todo', ?, ?, ?, ?, ?)`,
+                is_important, is_urgent, due_date, project_id)
+                VALUES (?, ?, 'todo', ?, ?, ?, ?, ?, ?)`,
           bind: [
             input.id,
             input.title,
@@ -161,6 +177,7 @@ export class WebTaskDatabase {
             input.isImportant === true ? 1 : 0,
             input.isUrgent === true ? 1 : 0,
             input.dueDate ?? null,
+            input.projectId ?? null,
           ],
         })
         return this.requireTask(input.id)
@@ -297,9 +314,77 @@ export class WebTaskDatabase {
     )
   }
 
+  setTaskProject(input: import('@/task/repository').SetTaskProjectInput): Task {
+    validatePlanningBaseInput(input)
+    if (!isCanonicalLowercaseUuid(input.projectId))
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    this.requireProject(input.projectId)
+    return this.updatePlanningField(
+      input.id,
+      'project_id',
+      input.projectId,
+      input.updatedAtMs,
+    )
+  }
+
+  clearTaskProject(
+    input: import('@/task/repository').ClearTaskProjectInput,
+  ): Task {
+    validatePlanningBaseInput(input)
+    return this.updatePlanningField(
+      input.id,
+      'project_id',
+      null,
+      input.updatedAtMs,
+    )
+  }
+
+  createProject(input: CreateProjectInput): Project {
+    this.validateProjectInput(input.id, input.name, input.createdAtMs)
+    try {
+      this.#database.exec({
+        sql: `INSERT INTO projects(id, name, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?)`,
+        bind: [input.id, input.name, input.createdAtMs, input.createdAtMs],
+      })
+      return this.requireProject(input.id)
+    } catch (error) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  listProjects(): readonly Project[] {
+    try {
+      return this.#database
+        .selectObjects(
+          `SELECT ${PROJECT_COLUMNS} FROM projects ORDER BY updated_at_ms DESC, id ASC`,
+        )
+        .map((row) => this.parseProjectRow(row))
+    } catch (error) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  renameProject(input: RenameProjectInput): Project {
+    this.validateProjectInput(input.id, input.name, input.updatedAtMs)
+    try {
+      this.#database.exec({
+        sql: 'UPDATE projects SET name = ?, updated_at_ms = ? WHERE id = ?',
+        bind: [input.name, input.updatedAtMs, input.id],
+      })
+      if (this.#database.changes() !== 1)
+        throw new TaskDatabaseError('NOT_FOUND')
+      return this.requireProject(input.id)
+    } catch (error) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
   private updatePlanningField(
     id: string,
-    column: 'is_important' | 'is_urgent' | 'due_date',
+    column: 'is_important' | 'is_urgent' | 'due_date' | 'project_id',
     value: number | string | null,
     updatedAtMs: number,
   ): Task {
@@ -336,13 +421,63 @@ export class WebTaskDatabase {
     return task
   }
 
+  private parseProjectRow(row: Record<string, unknown> | undefined): Project {
+    if (row === undefined) throw new TaskDatabaseError('NOT_FOUND')
+    const {
+      id,
+      name,
+      created_at_ms: createdAtMs,
+      updated_at_ms: updatedAtMs,
+    } = row
+    if (
+      !isCanonicalLowercaseUuid(id) ||
+      !isNonEmptyProjectName(name) ||
+      !isNonNegativeSafeIntegerMilliseconds(createdAtMs) ||
+      !isNonNegativeSafeIntegerMilliseconds(updatedAtMs) ||
+      updatedAtMs < createdAtMs
+    )
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    return { id, name, createdAtMs, updatedAtMs }
+  }
+
+  private requireProject(id: string): Project {
+    return this.parseProjectRow(
+      this.#database.selectObject(
+        `SELECT ${PROJECT_COLUMNS} FROM projects WHERE id = ?`,
+        [id],
+      ),
+    )
+  }
+
+  private validateProjectInput(
+    id: string,
+    name: string,
+    timestamp: number,
+  ): void {
+    if (
+      !isCanonicalLowercaseUuid(id) ||
+      !isNonEmptyProjectName(name) ||
+      !isNonNegativeSafeIntegerMilliseconds(timestamp)
+    )
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+  }
+
   private assertSane(): void {
     const tasksTableCount = this.#database.selectValue(
       `SELECT COUNT(*) FROM sqlite_schema
        WHERE type = 'table' AND name = 'tasks'`,
     )
     const quickCheck = this.#database.selectValue('PRAGMA quick_check(1)')
-    if (tasksTableCount !== 1 || quickCheck !== 'ok') {
+    const foreignKeys = this.#database.selectValue('PRAGMA foreign_keys')
+    const projectsTableCount = this.#database.selectValue(
+      `SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'projects'`,
+    )
+    if (
+      tasksTableCount !== 1 ||
+      projectsTableCount !== 1 ||
+      quickCheck !== 'ok' ||
+      foreignKeys !== 1
+    ) {
       throw new TaskDatabaseError('PERSISTENCE_FAILED')
     }
   }

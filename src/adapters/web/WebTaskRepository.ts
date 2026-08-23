@@ -29,6 +29,7 @@ import {
   isRecord,
   type WebPersistenceCapability,
 } from '@/adapters/web/taskWorkerProtocol'
+import { WebProjectRepository } from '@/adapters/web/WebProjectRepository'
 
 function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
   if (!isRecord(value)) {
@@ -44,6 +45,7 @@ function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
     isImportant,
     isUrgent,
     dueDate,
+    projectId,
   } = value
   if (
     !isCanonicalLowercaseUuid(id) ||
@@ -54,7 +56,8 @@ function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
     updatedAtMs < createdAtMs ||
     typeof isImportant !== 'boolean' ||
     typeof isUrgent !== 'boolean' ||
-    (dueDate !== null && !isValidLocalDate(dueDate))
+    (dueDate !== null && !isValidLocalDate(dueDate)) ||
+    (projectId !== null && !isCanonicalLowercaseUuid(projectId))
   ) {
     throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
   }
@@ -67,6 +70,7 @@ function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
     isImportant,
     isUrgent,
     dueDate,
+    projectId,
   }
 }
 
@@ -125,7 +129,10 @@ export class WebTaskRepository implements TaskRepository {
       (input.isUrgent !== undefined && typeof input.isUrgent !== 'boolean') ||
       (input.dueDate !== undefined &&
         input.dueDate !== null &&
-        !isValidLocalDate(input.dueDate))
+        !isValidLocalDate(input.dueDate)) ||
+      (input.projectId !== undefined &&
+        input.projectId !== null &&
+        !isCanonicalLowercaseUuid(input.projectId))
     ) {
       throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
     }
@@ -136,6 +143,7 @@ export class WebTaskRepository implements TaskRepository {
           isImportant: input.isImportant ?? false,
           isUrgent: input.isUrgent ?? false,
           dueDate: input.dueDate ?? null,
+          projectId: input.projectId ?? null,
         }),
         operation,
       )
@@ -219,6 +227,28 @@ export class WebTaskRepository implements TaskRepository {
     )
   }
 
+  async setTaskProject(
+    input: import('@/task/repository').SetTaskProjectInput,
+  ): Promise<Task> {
+    return this.callPlanning(
+      'setTaskProject',
+      input,
+      () => this.#client.setTaskProject(input),
+      isCanonicalLowercaseUuid(input.projectId),
+    )
+  }
+
+  async clearTaskProject(
+    input: import('@/task/repository').ClearTaskProjectInput,
+  ): Promise<Task> {
+    return this.callPlanning(
+      'clearTaskProject',
+      input,
+      () => this.#client.clearTaskProject(input),
+      true,
+    )
+  }
+
   private async callPlanning(
     operation: Extract<
       TaskRepositoryOperation,
@@ -226,6 +256,8 @@ export class WebTaskRepository implements TaskRepository {
       | 'setTaskUrgency'
       | 'setTaskDeadline'
       | 'clearTaskDeadline'
+      | 'setTaskProject'
+      | 'clearTaskProject'
     >,
     input: { readonly id: string; readonly updatedAtMs: number },
     call: () => Promise<unknown>,
@@ -254,6 +286,7 @@ export type OpenWebTaskRepositoryResult =
   | {
       readonly capability: { readonly status: 'AVAILABLE' }
       readonly repository: WebTaskRepository
+      readonly projectRepository: import('@/project/repository').ProjectRepository
       readonly dispose: () => Promise<void>
     }
   | {
@@ -305,6 +338,7 @@ export async function openWebTaskRepository(
     return {
       capability,
       repository: new WebTaskRepository(client),
+      projectRepository: new WebProjectRepository(client),
       dispose: () => client.shutdown(),
     }
   } catch {

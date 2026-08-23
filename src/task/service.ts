@@ -19,7 +19,7 @@ export type TaskApplicationErrorCode =
   (typeof TASK_APPLICATION_ERROR_CODES)[number]
 
 export type TaskApplicationErrorField =
-  'id' | 'title' | 'dueDate' | 'importance' | 'urgency'
+  'id' | 'title' | 'dueDate' | 'importance' | 'urgency' | 'projectId'
 
 const SAFE_ERROR_MESSAGES: Record<TaskApplicationErrorCode, string> = {
   VALIDATION: 'Task input is invalid.',
@@ -72,6 +72,13 @@ function validateTaskId(id: string): void {
   if (!isCanonicalLowercaseUuid(id)) {
     throw new TaskApplicationError('VALIDATION', 'id')
   }
+}
+
+function readProjectId(projectId: unknown): string {
+  if (!isCanonicalLowercaseUuid(projectId)) {
+    throw new TaskApplicationError('VALIDATION', 'projectId')
+  }
+  return projectId
 }
 
 function readBoolean(value: unknown, field: 'importance' | 'urgency'): boolean {
@@ -164,6 +171,7 @@ export function createTaskService({
       readonly isImportant?: boolean
       readonly isUrgent?: boolean
       readonly dueDate?: LocalDate | null
+      readonly projectId?: string | null
     }): Promise<Task> {
       const title = normalizeTitle(input.title)
       const isImportant =
@@ -178,6 +186,10 @@ export function createTaskService({
         input.dueDate === undefined || input.dueDate === null
           ? null
           : readDueDate(input.dueDate)
+      const projectId =
+        input.projectId === undefined || input.projectId === null
+          ? null
+          : readProjectId(input.projectId)
       const id = readGeneratedTaskId(generateTaskId)
       const createdAtMs = readNowMs(nowMs)
       return callRepository(() =>
@@ -188,6 +200,7 @@ export function createTaskService({
           isImportant,
           isUrgent,
           dueDate,
+          projectId,
         }),
       )
     },
@@ -260,6 +273,27 @@ export function createTaskService({
       const updatedAtMs = readNowMs(nowMs)
       return callRepository(() =>
         repository.clearTaskDeadline({ id, updatedAtMs }),
+      )
+    },
+
+    async setTaskProject(id: string, projectId: string): Promise<Task> {
+      validateTaskId(id)
+      const normalizedProjectId = readProjectId(projectId)
+      const updatedAtMs = readNowMs(nowMs)
+      return callRepository(() =>
+        repository.setTaskProject({
+          id,
+          projectId: normalizedProjectId,
+          updatedAtMs,
+        }),
+      )
+    },
+
+    async clearTaskProject(id: string): Promise<Task> {
+      validateTaskId(id)
+      const updatedAtMs = readNowMs(nowMs)
+      return callRepository(() =>
+        repository.clearTaskProject({ id, updatedAtMs }),
       )
     },
   }

@@ -31,6 +31,7 @@ const TASK: Task = {
   isImportant: false,
   isUrgent: false,
   dueDate: null,
+  projectId: null,
 }
 
 function createFakeRepository() {
@@ -88,6 +89,22 @@ function createFakeRepository() {
         updatedAtMs: input.updatedAtMs,
       }),
   )
+  const setTaskProject = vi.fn(
+    (input: import('@/task/repository').SetTaskProjectInput): Promise<Task> =>
+      Promise.resolve({
+        ...TASK,
+        projectId: input.projectId,
+        updatedAtMs: input.updatedAtMs,
+      }),
+  )
+  const clearTaskProject = vi.fn(
+    (input: import('@/task/repository').ClearTaskProjectInput): Promise<Task> =>
+      Promise.resolve({
+        ...TASK,
+        projectId: null,
+        updatedAtMs: input.updatedAtMs,
+      }),
+  )
   const repository: TaskRepository = {
     createTask,
     listTasks,
@@ -97,6 +114,8 @@ function createFakeRepository() {
     setTaskUrgency,
     setTaskDeadline,
     clearTaskDeadline,
+    setTaskProject,
+    clearTaskProject,
   }
   return {
     repository,
@@ -108,6 +127,8 @@ function createFakeRepository() {
     setTaskUrgency,
     setTaskDeadline,
     clearTaskDeadline,
+    setTaskProject,
+    clearTaskProject,
   }
 }
 
@@ -140,6 +161,8 @@ test('TaskService exposes only the approved business API and error codes', () =>
     'setTaskUrgency',
     'setTaskDeadline',
     'clearTaskDeadline',
+    'setTaskProject',
+    'clearTaskProject',
   ])
   expect(TASK_APPLICATION_ERROR_CODES).toEqual([
     'VALIDATION',
@@ -172,6 +195,7 @@ describe('TaskService createTask', () => {
       isImportant: false,
       isUrgent: false,
       dueDate: null,
+      projectId: null,
     })
   })
 
@@ -188,6 +212,7 @@ describe('TaskService createTask', () => {
       isImportant: true,
       isUrgent: true,
       dueDate: '2024-02-29',
+      projectId: null,
     })
 
     expect(fake.createTask).toHaveBeenCalledOnce()
@@ -198,6 +223,7 @@ describe('TaskService createTask', () => {
       isImportant: true,
       isUrgent: true,
       dueDate: '2024-02-29',
+      projectId: null,
     })
   })
 
@@ -566,5 +592,58 @@ describe('TaskService listTasks', () => {
     const service = createTaskService({ repository: fake.repository })
 
     await expectApplicationError(service.listTasks(), 'UNAVAILABLE')
+  })
+})
+
+describe('TaskService project assignment', () => {
+  test('creates with project in the single repository create call', async () => {
+    const fake = createFakeRepository()
+    const service = createTaskService({
+      repository: fake.repository,
+      generateTaskId: () => ID,
+      nowMs: () => 200,
+    })
+    const projectId = '00000000-0000-4000-8000-000000000101'
+    await service.createTask({ title: ' Project task ', projectId })
+    expect(fake.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: ID,
+        title: 'Project task',
+        projectId,
+        createdAtMs: 200,
+      }),
+    )
+    expect(fake.createTask).toHaveBeenCalledOnce()
+  })
+
+  test('sets and clears project with fresh timestamps', async () => {
+    const fake = createFakeRepository()
+    const service = createTaskService({
+      repository: fake.repository,
+      nowMs: () => 300,
+    })
+    const projectId = '00000000-0000-4000-8000-000000000101'
+    await service.setTaskProject(ID, projectId)
+    expect(fake.setTaskProject).toHaveBeenCalledWith({
+      id: ID,
+      projectId,
+      updatedAtMs: 300,
+    })
+    await service.clearTaskProject(ID)
+    expect(fake.clearTaskProject).toHaveBeenCalledWith({
+      id: ID,
+      updatedAtMs: 300,
+    })
+  })
+
+  test('rejects invalid project id before persistence', async () => {
+    const fake = createFakeRepository()
+    const service = createTaskService({ repository: fake.repository })
+    await expectApplicationError(
+      service.setTaskProject(ID, 'INVALID'),
+      'VALIDATION',
+      'projectId',
+    )
+    expect(fake.setTaskProject).not.toHaveBeenCalled()
   })
 })

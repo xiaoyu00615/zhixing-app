@@ -27,6 +27,7 @@ export interface Task {
   readonly isImportant: boolean
   readonly isUrgent: boolean
   readonly dueDate: LocalDate | null
+  readonly projectId: string | null
 }
 
 export const TASK_QUADRANTS = [

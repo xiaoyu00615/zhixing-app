@@ -5,3 +5,4 @@ export {
   type OpenWebTaskRepositoryResult,
 } from './WebTaskRepository'
 export type { WebPersistenceCapability } from './taskWorkerProtocol'
+export { WebProjectRepository } from './WebProjectRepository'

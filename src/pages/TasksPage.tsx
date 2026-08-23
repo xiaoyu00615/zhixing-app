@@ -1,8 +1,10 @@
 import {
   CalendarDays,
   CalendarRange,
+  FolderKanban,
   LayoutGrid,
   ListTodo,
+  Pencil,
   Plus,
   RotateCcw,
   X,
@@ -18,11 +20,14 @@ import { TaskCalendarView } from '@/components/tasks/TaskCalendarView'
 import { TaskDateView } from '@/components/tasks/TaskDateView'
 import { TaskList, type TaskStatusAction } from '@/components/tasks/TaskList'
 import { TaskQuadrantView } from '@/components/tasks/TaskQuadrantView'
+import { ProjectDialog } from '@/components/tasks/ProjectDialogs'
 import { Button } from '@/components/ui/button'
 import { localDateFromDate, type LocalDate, type Task } from '@/task/model'
 import { openTaskRuntime } from '@/task/runtime'
 import type { OpenTaskRuntime } from '@/task/runtime.types'
 import { TaskApplicationError, type TaskService } from '@/task/service'
+import type { Project } from '@/project/model'
+import { ProjectApplicationError, type ProjectService } from '@/project/service'
 
 interface TasksPageProps {
   readonly openRuntime?: OpenTaskRuntime
@@ -79,7 +84,12 @@ export function TasksPage({
   const [loadAttempt, setLoadAttempt] = useState(0)
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
   const [service, setService] = useState<TaskService | null>(null)
+  const [projectService, setProjectService] = useState<ProjectService | null>(
+    null,
+  )
   const [tasks, setTasks] = useState<readonly Task[]>([])
+  const [projects, setProjects] = useState<readonly Project[]>([])
+  const [projectFilter, setProjectFilter] = useState<string>('all')
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null)
   const [view, setView] = useState<'list' | 'quadrant' | 'date' | 'calendar'>(
     'list',
@@ -94,11 +104,19 @@ export function TasksPage({
   const [createIsImportant, setCreateIsImportant] = useState(false)
   const [createIsUrgent, setCreateIsUrgent] = useState(false)
   const [createDueDate, setCreateDueDate] = useState<LocalDate | null>(null)
+  const [createProjectId, setCreateProjectId] = useState<string | null>(null)
   const [isCreating, setIsCreating] = useState(false)
   const [renameState, setRenameState] = useState<RenameState | null>(null)
   const [pendingTaskIds, setPendingTaskIds] = useState<ReadonlySet<string>>(
     new Set(),
   )
+  const [projectDialog, setProjectDialog] = useState<{
+    mode: 'create' | 'rename'
+    projectId: string | null
+    name: string
+    error: string | null
+  } | null>(null)
+  const [projectPending, setProjectPending] = useState(false)
 
   useEffect(() => {
     mountedRef.current = true
@@ -131,13 +149,18 @@ export function TasksPage({
           await disposeRuntime()
           return
         }
-        const loadedTasks = await runtime.service.listTasks()
+        const [loadedTasks, loadedProjects] = await Promise.all([
+          runtime.service.listTasks(),
+          runtime.projectService.listProjects(),
+        ])
         if (!active) {
           await disposeRuntime()
           return
         }
         setService(runtime.service)
+        setProjectService(runtime.projectService)
         setTasks(loadedTasks)
+        setProjects(loadedProjects)
         setPhase('ready')
       } catch {
         await disposeRuntime()
@@ -158,6 +181,11 @@ export function TasksPage({
     if (mountedRef.current) {
       setTasks(loadedTasks)
     }
+  }, [])
+
+  const reloadProjects = useCallback(async (currentService: ProjectService) => {
+    const loadedProjects = await currentService.listProjects()
+    if (mountedRef.current) setProjects(loadedProjects)
   }, [])
 
   const handleOperationError = useCallback(
@@ -202,13 +230,16 @@ export function TasksPage({
     setCreateIsImportant(false)
     setCreateIsUrgent(false)
     setCreateDueDate(null)
+    setCreateProjectId(null)
     setCreateOpen(true)
   }
 
   function retryLoad(): void {
     setPhase('loading')
     setService(null)
+    setProjectService(null)
     setTasks([])
+    setProjects([])
     setFeedback(null)
     setLoadAttempt((attempt) => attempt + 1)
   }
@@ -227,6 +258,7 @@ export function TasksPage({
         isImportant: createIsImportant,
         isUrgent: createIsUrgent,
         dueDate: createDueDate,
+        projectId: createProjectId,
       })
       if (!mountedRef.current) {
         return
@@ -236,6 +268,7 @@ export function TasksPage({
       setCreateIsImportant(false)
       setCreateIsUrgent(false)
       setCreateDueDate(null)
+      setCreateProjectId(null)
       try {
         await reloadTasks(service)
       } catch {
@@ -387,6 +420,45 @@ export function TasksPage({
     }
   }
 
+  async function submitProject(): Promise<void> {
+    if (projectService === null || projectDialog === null || projectPending)
+      return
+    setProjectPending(true)
+    setProjectDialog({ ...projectDialog, error: null })
+    try {
+      if (projectDialog.mode === 'create') {
+        await projectService.createProject(projectDialog.name)
+      } else if (projectDialog.projectId !== null) {
+        await projectService.renameProject(
+          projectDialog.projectId,
+          projectDialog.name,
+        )
+      }
+      if (!mountedRef.current) return
+      setProjectDialog(null)
+      await reloadProjects(projectService)
+    } catch (error: unknown) {
+      if (!mountedRef.current) return
+      if (
+        error instanceof ProjectApplicationError &&
+        error.code === 'VALIDATION' &&
+        error.field === 'name'
+      ) {
+        setProjectDialog({ ...projectDialog, error: '请输入项目名称。' })
+      } else {
+        setFeedback('项目操作暂时无法完成，请重试。')
+      }
+    } finally {
+      if (mountedRef.current) setProjectPending(false)
+    }
+  }
+
+  const visibleTasks = tasks.filter((task) => {
+    if (projectFilter === 'all') return true
+    if (projectFilter === 'none') return task.projectId === null
+    return task.projectId === projectFilter
+  })
+
   const detailTask =
     detailTaskId === null
       ? null
@@ -477,7 +549,9 @@ export function TasksPage({
 
           <div className="flex items-center gap-3 pb-2.5">
             <span className="text-auxiliary text-foreground-secondary">
-              {tasks.length} 项任务
+              {projectFilter === 'all'
+                ? `${tasks.length} 项任务`
+                : `${visibleTasks.length} / ${tasks.length} 项任务`}
             </span>
             {tasks.length > 0 && (
               <Button onClick={openCreateDialog} type="button">
@@ -485,6 +559,79 @@ export function TasksPage({
                 新建任务
               </Button>
             )}
+          </div>
+        </div>
+      )}
+
+      {phase === 'ready' && (
+        <div
+          className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-surface px-3 py-2.5"
+          aria-label="项目筛选"
+        >
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <span className="mr-1 inline-flex items-center gap-1.5 px-1 text-auxiliary font-medium text-foreground-tertiary">
+              <FolderKanban className="size-4" aria-hidden="true" />
+              项目
+            </span>
+            {[
+              { id: 'all', name: '全部' },
+              { id: 'none', name: '无项目' },
+              ...projects,
+            ].map((project) => (
+              <Button
+                key={project.id}
+                aria-pressed={projectFilter === project.id}
+                className={
+                  projectFilter === project.id
+                    ? 'bg-primary-softest text-primary hover:bg-primary-softest'
+                    : undefined
+                }
+                size="sm"
+                type="button"
+                variant="ghost"
+                onClick={() => setProjectFilter(project.id)}
+              >
+                {project.name}
+              </Button>
+            ))}
+          </div>
+          <div className="flex items-center gap-1">
+            {projects.map((project) => (
+              <Button
+                key={project.id}
+                aria-label={`重命名项目：${project.name}`}
+                size="icon-sm"
+                title={`重命名 ${project.name}`}
+                type="button"
+                variant="ghost"
+                onClick={() =>
+                  setProjectDialog({
+                    mode: 'rename',
+                    projectId: project.id,
+                    name: project.name,
+                    error: null,
+                  })
+                }
+              >
+                <Pencil aria-hidden="true" />
+              </Button>
+            ))}
+            <Button
+              size="sm"
+              type="button"
+              variant="outline"
+              onClick={() =>
+                setProjectDialog({
+                  mode: 'create',
+                  projectId: null,
+                  name: '',
+                  error: null,
+                })
+              }
+            >
+              <Plus data-icon="inline-start" />
+              新建项目
+            </Button>
           </div>
         </div>
       )}
@@ -527,10 +674,11 @@ export function TasksPage({
           id="task-list-panel"
           role="tabpanel"
         >
-          {tasks.length === 0 ? (
+          {visibleTasks.length === 0 ? (
             <EmptyState onCreate={openCreateDialog} />
           ) : (
             <TaskList
+              projects={projects}
               onClearDeadline={(task) =>
                 void runPlanningAction(task, (currentService) =>
                   currentService.clearTaskDeadline(task.id),
@@ -557,7 +705,7 @@ export function TasksPage({
                 void runStatusAction(task, action)
               }
               pendingTaskIds={pendingTaskIds}
-              tasks={tasks}
+              tasks={visibleTasks}
               today={today}
             />
           )}
@@ -571,6 +719,7 @@ export function TasksPage({
           role="tabpanel"
         >
           <TaskQuadrantView
+            projects={projects}
             onClearDeadline={(task) =>
               void runPlanningAction(task, (currentService) =>
                 currentService.clearTaskDeadline(task.id),
@@ -597,7 +746,7 @@ export function TasksPage({
               void runStatusAction(task, action)
             }
             pendingTaskIds={pendingTaskIds}
-            tasks={tasks}
+            tasks={visibleTasks}
             today={today}
           />
         </div>
@@ -610,6 +759,7 @@ export function TasksPage({
           role="tabpanel"
         >
           <TaskDateView
+            projects={projects}
             onClearDeadline={(task) =>
               void runPlanningAction(task, (currentService) =>
                 currentService.clearTaskDeadline(task.id),
@@ -637,7 +787,7 @@ export function TasksPage({
               void runStatusAction(task, action)
             }
             pendingTaskIds={pendingTaskIds}
-            tasks={tasks}
+            tasks={visibleTasks}
             today={today}
           />
         </div>
@@ -650,6 +800,7 @@ export function TasksPage({
           role="tabpanel"
         >
           <TaskCalendarView
+            projects={projects}
             onClearDeadline={(task) =>
               void runPlanningAction(task, (currentService) =>
                 currentService.clearTaskDeadline(task.id),
@@ -677,13 +828,14 @@ export function TasksPage({
               void runStatusAction(task, action)
             }
             pendingTaskIds={pendingTaskIds}
-            tasks={tasks}
+            tasks={visibleTasks}
             today={today}
           />
         </div>
       )}
 
       <TaskDetailPanel
+        projects={projects}
         onClearDeadline={(task) =>
           void runPlanningAction(task, (currentService) =>
             currentService.clearTaskDeadline(task.id),
@@ -710,6 +862,16 @@ export function TasksPage({
             currentService.setTaskUrgency(task.id, isUrgent),
           )
         }
+        onSetProject={(task, projectId) =>
+          void runPlanningAction(task, (currentService) =>
+            currentService.setTaskProject(task.id, projectId),
+          )
+        }
+        onClearProject={(task) =>
+          void runPlanningAction(task, (currentService) =>
+            currentService.clearTaskProject(task.id),
+          )
+        }
         onStatusAction={(task, action) => void runStatusAction(task, action)}
         pending={detailTask !== null && pendingTaskIds.has(detailTask.id)}
         task={detailTask}
@@ -717,6 +879,8 @@ export function TasksPage({
       />
 
       <CreateTaskDialog
+        projects={projects}
+        projectId={createProjectId}
         dueDate={createDueDate}
         dueDateError={createDueDateError}
         error={createError}
@@ -735,6 +899,7 @@ export function TasksPage({
           setCreateError(null)
         }}
         onUrgencyChange={setCreateIsUrgent}
+        onProjectChange={setCreateProjectId}
         pending={isCreating}
         title={createTitle}
       />
@@ -753,6 +918,22 @@ export function TasksPage({
         }
         task={renameState?.task ?? null}
         title={renameState?.title ?? ''}
+      />
+
+      <ProjectDialog
+        mode={projectDialog?.mode ?? 'create'}
+        open={projectDialog !== null}
+        name={projectDialog?.name ?? ''}
+        error={projectDialog?.error ?? null}
+        pending={projectPending}
+        onOpenChange={(open) => {
+          if (!open) setProjectDialog(null)
+        }}
+        onNameChange={(name) => {
+          if (projectDialog !== null)
+            setProjectDialog({ ...projectDialog, name, error: null })
+        }}
+        onSubmit={() => void submitProject()}
       />
     </section>
   )

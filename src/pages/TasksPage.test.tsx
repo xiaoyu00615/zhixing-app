@@ -12,8 +12,10 @@ import { describe, expect, test, vi } from 'vitest'
 
 import { TasksPage } from '@/pages/TasksPage'
 import type { Task } from '@/task/model'
+import type { Project } from '@/project/model'
 import type { OpenTaskRuntime, TaskRuntime } from '@/task/runtime.types'
 import { TaskApplicationError, type TaskService } from '@/task/service'
+import type { ProjectService } from '@/project/service'
 
 const TASK_ID = '00000000-0000-4000-8000-000000000001'
 const TASK: Task = {
@@ -25,6 +27,7 @@ const TASK: Task = {
   isImportant: false,
   isUrgent: false,
   dueDate: null,
+  projectId: null,
 }
 
 function taskFixture(
@@ -63,6 +66,10 @@ function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
   setTaskDeadline.mockResolvedValue(TASK)
   const clearTaskDeadline = vi.fn<TaskService['clearTaskDeadline']>()
   clearTaskDeadline.mockResolvedValue(TASK)
+  const setTaskProject = vi.fn<TaskService['setTaskProject']>()
+  setTaskProject.mockResolvedValue(TASK)
+  const clearTaskProject = vi.fn<TaskService['clearTaskProject']>()
+  clearTaskProject.mockResolvedValue(TASK)
 
   const service: TaskService = {
     createTask,
@@ -76,6 +83,8 @@ function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
     setTaskUrgency,
     setTaskDeadline,
     clearTaskDeadline,
+    setTaskProject,
+    clearTaskProject,
   }
   return {
     service,
@@ -90,13 +99,38 @@ function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
     setTaskUrgency,
     setTaskDeadline,
     clearTaskDeadline,
+    setTaskProject,
+    clearTaskProject,
   }
 }
 
-function createRuntime(service: TaskService) {
+function createRuntime(
+  service: TaskService,
+  projects: readonly Project[] = [],
+) {
   const dispose = vi.fn(() => Promise.resolve())
-  const runtime: TaskRuntime = { service, dispose }
-  return { runtime, dispose }
+  const createProject = vi.fn<ProjectService['createProject']>()
+  createProject.mockImplementation((name: string) =>
+    Promise.resolve({
+      id: '00000000-0000-4000-8000-000000000101',
+      name,
+      createdAtMs: 100,
+      updatedAtMs: 100,
+    }),
+  )
+  const listProjects = vi.fn<ProjectService['listProjects']>()
+  listProjects.mockResolvedValue(projects)
+  const renameProject = vi.fn<ProjectService['renameProject']>()
+  renameProject.mockImplementation((id: string, name: string) =>
+    Promise.resolve({ id, name, createdAtMs: 100, updatedAtMs: 200 }),
+  )
+  const projectService: ProjectService = {
+    createProject,
+    listProjects,
+    renameProject,
+  }
+  const runtime: TaskRuntime = { service, projectService, dispose }
+  return { runtime, dispose, createProject, listProjects, renameProject }
 }
 
 function resolvedRuntime(service: TaskService) {
@@ -207,6 +241,114 @@ describe('TasksPage loading and lifecycle', () => {
   })
 })
 
+describe('TasksPage Project V1 UI', () => {
+  const WORK: Project = {
+    id: '00000000-0000-4000-8000-000000000101',
+    name: '工作',
+    createdAtMs: 100,
+    updatedAtMs: 100,
+  }
+
+  test('filters project tasks and creates a task with the selected project atomically', async () => {
+    const user = userEvent.setup()
+    const workTask = taskFixture(81, '项目任务', { projectId: WORK.id })
+    const looseTask = taskFixture(82, '无项目任务')
+    const fake = createServiceDouble([workTask, looseTask])
+    const current = createRuntime(fake.service, [WORK])
+    render(
+      <TasksPage
+        openRuntime={vi.fn(() => Promise.resolve(current.runtime))}
+        today="2026-08-23"
+      />,
+    )
+    await screen.findByText('项目任务')
+
+    await user.click(screen.getByRole('button', { name: '工作' }))
+    expect(screen.getByText('项目任务')).toBeInTheDocument()
+    expect(screen.queryByText('无项目任务')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '新建任务' }))
+    await user.type(screen.getByRole('textbox', { name: '标题' }), '新项目任务')
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '所属项目' }),
+      WORK.id,
+    )
+    await user.click(screen.getByRole('button', { name: '创建任务' }))
+    expect(fake.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ title: '新项目任务', projectId: WORK.id }),
+    )
+  })
+
+  test('changes and clears project from the shared task detail panel', async () => {
+    const user = userEvent.setup()
+    const task = taskFixture(83, '详情项目任务')
+    const assigned = { ...task, projectId: WORK.id, updatedAtMs: 200 }
+    const fake = createServiceDouble([task])
+    fake.listTasks
+      .mockResolvedValueOnce([task])
+      .mockResolvedValueOnce([assigned])
+      .mockResolvedValueOnce([
+        { ...assigned, projectId: null, updatedAtMs: 300 },
+      ])
+    const current = createRuntime(fake.service, [WORK])
+    render(
+      <TasksPage
+        openRuntime={vi.fn(() => Promise.resolve(current.runtime))}
+        today="2026-08-23"
+      />,
+    )
+    await screen.findByText(task.title)
+    await user.click(
+      screen.getByRole('button', { name: `查看任务详情：${task.title}` }),
+    )
+    const select = screen.getByRole('combobox', {
+      name: `详情所属项目：${task.title}`,
+    })
+    await user.selectOptions(select, WORK.id)
+    expect(fake.setTaskProject).toHaveBeenCalledWith(task.id, WORK.id)
+    await waitFor(() =>
+      expect(
+        screen.getByRole('combobox', { name: `详情所属项目：${task.title}` }),
+      ).toHaveTextContent('工作'),
+    )
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: `详情所属项目：${task.title}` }),
+      'none',
+    )
+    expect(fake.clearTaskProject).toHaveBeenCalledWith(task.id)
+  })
+
+  test('creates and renames projects without exposing delete', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([])
+    const current = createRuntime(fake.service, [WORK])
+    render(
+      <TasksPage
+        openRuntime={vi.fn(() => Promise.resolve(current.runtime))}
+        today="2026-08-23"
+      />,
+    )
+    await screen.findByRole('button', { name: '新建项目' })
+    await user.click(screen.getByRole('button', { name: '新建项目' }))
+    await user.type(
+      screen.getByRole('textbox', { name: '项目名称' }),
+      ' 新项目 ',
+    )
+    await user.click(screen.getByRole('button', { name: '创建项目' }))
+    expect(current.createProject).toHaveBeenCalledWith(' 新项目 ')
+    expect(
+      screen.queryByRole('button', { name: /删除项目/ }),
+    ).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '重命名项目：工作' }))
+    const nameInput = screen.getByRole('textbox', { name: '项目名称' })
+    await user.clear(nameInput)
+    await user.type(nameInput, '工作项目')
+    await user.click(screen.getByRole('button', { name: '保存名称' }))
+    expect(current.renameProject).toHaveBeenCalledWith(WORK.id, '工作项目')
+  })
+})
+
 describe('TasksPage create and rename', () => {
   test('creates through TaskService and reloads repository ordering', async () => {
     const user = userEvent.setup()
@@ -228,6 +370,7 @@ describe('TasksPage create and rename', () => {
       isImportant: false,
       isUrgent: false,
       dueDate: null,
+      projectId: null,
     })
     expect(await screen.findByText(TASK.title)).toBeInTheDocument()
     expect(fake.listTasks).toHaveBeenCalledTimes(2)
@@ -241,6 +384,7 @@ describe('TasksPage create and rename', () => {
       isImportant: true,
       isUrgent: true,
       dueDate: '2026-08-23',
+      projectId: null,
     }
     const fake = createServiceDouble([])
     fake.createTask.mockResolvedValueOnce(planned)
@@ -263,6 +407,7 @@ describe('TasksPage create and rename', () => {
       isImportant: true,
       isUrgent: true,
       dueDate: '2026-08-23',
+      projectId: null,
     })
     expect(await screen.findByText('Planned')).toBeInTheDocument()
     expect(fake.listTasks).toHaveBeenCalledTimes(2)

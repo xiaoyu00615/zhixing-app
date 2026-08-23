@@ -16,6 +16,10 @@ import {
   type SetTaskUrgencyInput,
   type TaskRepositoryErrorCode,
 } from '@/task/repository'
+import type {
+  CreateProjectInput,
+  RenameProjectInput,
+} from '@/project/repository'
 
 export type WebPersistenceCapability =
   | { readonly status: 'AVAILABLE' }
@@ -67,6 +71,27 @@ export type TaskWorkerRequest =
       readonly type: 'task.clearDeadline'
       readonly input: ClearTaskDeadlineInput
     }
+  | {
+      readonly requestId: number
+      readonly type: 'task.setProject'
+      readonly input: import('@/task/repository').SetTaskProjectInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'task.clearProject'
+      readonly input: import('@/task/repository').ClearTaskProjectInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'project.create'
+      readonly input: CreateProjectInput
+    }
+  | { readonly requestId: number; readonly type: 'project.list' }
+  | {
+      readonly requestId: number
+      readonly type: 'project.rename'
+      readonly input: RenameProjectInput
+    }
   | { readonly requestId: number; readonly type: 'shutdown' }
 
 export interface TaskWorkerSuccessResponse {
@@ -107,7 +132,24 @@ function isCreateInput(value: unknown): value is CreateTaskInput {
     (value.isUrgent === undefined || typeof value.isUrgent === 'boolean') &&
     (value.dueDate === undefined ||
       value.dueDate === null ||
-      isValidLocalDate(value.dueDate))
+      isValidLocalDate(value.dueDate)) &&
+    (value.projectId === undefined ||
+      value.projectId === null ||
+      isCanonicalLowercaseUuid(value.projectId))
+  )
+}
+
+function isProjectInput(
+  value: unknown,
+  withCreatedAt: boolean,
+): value is CreateProjectInput | RenameProjectInput {
+  return (
+    isRecord(value) &&
+    isCanonicalLowercaseUuid(value.id) &&
+    isNonEmptyTaskTitle(value.name) &&
+    (withCreatedAt
+      ? isNonNegativeSafeIntegerMilliseconds(value.createdAtMs)
+      : isNonNegativeSafeIntegerMilliseconds(value.updatedAtMs))
   )
 }
 
@@ -157,6 +199,7 @@ export function parseTaskWorkerRequest(
   switch (value.type) {
     case 'initialize':
     case 'task.list':
+    case 'project.list':
     case 'shutdown':
       return { requestId: value.requestId, type: value.type }
     case 'task.create':
@@ -219,6 +262,43 @@ export function parseTaskWorkerRequest(
               id: value.input.id,
               updatedAtMs: value.input.updatedAtMs,
             },
+          }
+        : null
+    case 'task.setProject':
+      return isPlanningBaseInput(value.input) &&
+        isCanonicalLowercaseUuid(value.input.projectId)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: {
+              id: value.input.id,
+              projectId: value.input.projectId,
+              updatedAtMs: value.input.updatedAtMs,
+            },
+          }
+        : null
+    case 'task.clearProject':
+      return isPlanningBaseInput(value.input)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: { id: value.input.id, updatedAtMs: value.input.updatedAtMs },
+          }
+        : null
+    case 'project.create':
+      return isProjectInput(value.input, true)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input as CreateProjectInput,
+          }
+        : null
+    case 'project.rename':
+      return isProjectInput(value.input, false)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input as RenameProjectInput,
           }
         : null
     default:
