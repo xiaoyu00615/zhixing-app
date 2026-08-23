@@ -1,0 +1,394 @@
+import { act, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { StrictMode } from 'react'
+import { describe, expect, test, vi } from 'vitest'
+
+import { TasksPage } from '@/pages/TasksPage'
+import type { Task } from '@/task/model'
+import type { OpenTaskRuntime, TaskRuntime } from '@/task/runtime.types'
+import { TaskApplicationError, type TaskService } from '@/task/service'
+
+const TASK_ID = '00000000-0000-4000-8000-000000000001'
+const TASK: Task = {
+  id: TASK_ID,
+  title: '整理桌面',
+  status: 'todo',
+  createdAtMs: 100,
+  updatedAtMs: 100,
+}
+
+function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
+  const createTask = vi.fn<TaskService['createTask']>()
+  createTask.mockResolvedValue(TASK)
+  const listTasks = vi.fn<TaskService['listTasks']>()
+  listTasks.mockResolvedValue(initialTasks)
+  const renameTask = vi.fn<TaskService['renameTask']>()
+  renameTask.mockResolvedValue(TASK)
+  const startTask = vi.fn<TaskService['startTask']>()
+  startTask.mockResolvedValue({ ...TASK, status: 'doing' })
+  const completeTask = vi.fn<TaskService['completeTask']>()
+  completeTask.mockResolvedValue({ ...TASK, status: 'completed' })
+  const cancelTask = vi.fn<TaskService['cancelTask']>()
+  cancelTask.mockResolvedValue({ ...TASK, status: 'cancelled' })
+  const reopenTask = vi.fn<TaskService['reopenTask']>()
+  reopenTask.mockResolvedValue(TASK)
+
+  const service: TaskService = {
+    createTask,
+    listTasks,
+    renameTask,
+    startTask,
+    completeTask,
+    cancelTask,
+    reopenTask,
+  }
+  return {
+    service,
+    createTask,
+    listTasks,
+    renameTask,
+    startTask,
+    completeTask,
+    cancelTask,
+    reopenTask,
+  }
+}
+
+function createRuntime(service: TaskService) {
+  const dispose = vi.fn(() => Promise.resolve())
+  const runtime: TaskRuntime = { service, dispose }
+  return { runtime, dispose }
+}
+
+function resolvedRuntime(service: TaskService) {
+  const current = createRuntime(service)
+  const openRuntime = vi.fn<OpenTaskRuntime>()
+  openRuntime.mockResolvedValue(current.runtime)
+  return { openRuntime, ...current }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+describe('TasksPage loading and lifecycle', () => {
+  test('moves from loading to the empty state', async () => {
+    const fake = createServiceDouble([])
+    const current = createRuntime(fake.service)
+    const opening = deferred<TaskRuntime>()
+    const openRuntime = vi.fn<OpenTaskRuntime>(() => opening.promise)
+
+    render(<TasksPage openRuntime={openRuntime} />)
+
+    expect(
+      screen.getByRole('status', { name: '正在加载任务' }),
+    ).toBeInTheDocument()
+    act(() => {
+      opening.resolve(current.runtime)
+    })
+    expect(await screen.findByText('还没有任务')).toBeInTheDocument()
+  })
+
+  test('renders the repository task list and meaningful status actions', async () => {
+    const fake = createServiceDouble()
+    const { openRuntime } = resolvedRuntime(fake.service)
+
+    render(<TasksPage openRuntime={openRuntime} />)
+
+    const list = await screen.findByRole('list', { name: '任务列表' })
+    expect(within(list).getByText(TASK.title)).toBeInTheDocument()
+    expect(within(list).getByText('待开始')).toBeInTheDocument()
+    expect(
+      within(list).getByRole('button', { name: `开始任务：${TASK.title}` }),
+    ).toBeInTheDocument()
+    expect(
+      within(list).getByRole('button', { name: `完成任务：${TASK.title}` }),
+    ).toBeInTheDocument()
+    expect(
+      within(list).getByRole('button', { name: `取消任务：${TASK.title}` }),
+    ).toBeInTheDocument()
+  })
+
+  test('shows a safe load error and retry opens a fresh runtime', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([])
+    const current = createRuntime(fake.service)
+    const openRuntime = vi.fn<OpenTaskRuntime>()
+    openRuntime
+      .mockRejectedValueOnce(new TaskApplicationError('UNAVAILABLE'))
+      .mockResolvedValueOnce(current.runtime)
+
+    render(<TasksPage openRuntime={openRuntime} />)
+
+    const alert = await screen.findByRole('alert')
+    expect(within(alert).getByText('无法加载任务')).toBeInTheDocument()
+    expect(alert).not.toHaveTextContent(/SQL|OPFS|Worker|UNAVAILABLE/)
+    await user.click(within(alert).getByRole('button', { name: '重试' }))
+    expect(await screen.findByText('还没有任务')).toBeInTheDocument()
+    expect(openRuntime).toHaveBeenCalledTimes(2)
+  })
+
+  test('disposes the runtime on unmount', async () => {
+    const fake = createServiceDouble([])
+    const current = resolvedRuntime(fake.service)
+    const view = render(<TasksPage openRuntime={current.openRuntime} />)
+    await screen.findByText('还没有任务')
+
+    view.unmount()
+
+    await waitFor(() => expect(current.dispose).toHaveBeenCalledOnce())
+  })
+
+  test('StrictMode disposes the superseded runtime without leaking it', async () => {
+    const fake = createServiceDouble([])
+    const first = createRuntime(fake.service)
+    const second = createRuntime(fake.service)
+    const openRuntime = vi.fn<OpenTaskRuntime>()
+    openRuntime
+      .mockResolvedValueOnce(first.runtime)
+      .mockResolvedValueOnce(second.runtime)
+
+    const view = render(
+      <StrictMode>
+        <TasksPage openRuntime={openRuntime} />
+      </StrictMode>,
+    )
+
+    await screen.findByText('还没有任务')
+    await waitFor(() => expect(openRuntime).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(first.dispose).toHaveBeenCalledOnce())
+    view.unmount()
+    await waitFor(() => expect(second.dispose).toHaveBeenCalledOnce())
+  })
+})
+
+describe('TasksPage create and rename', () => {
+  test('creates through TaskService and reloads repository ordering', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([])
+    fake.listTasks.mockResolvedValueOnce([]).mockResolvedValueOnce([TASK])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} />)
+    await screen.findByText('还没有任务')
+
+    await user.click(screen.getByRole('button', { name: '新建任务' }))
+    await user.type(
+      screen.getByRole('textbox', { name: '标题' }),
+      '  整理桌面  ',
+    )
+    await user.click(screen.getByRole('button', { name: '创建任务' }))
+
+    expect(fake.createTask).toHaveBeenCalledWith({ title: '  整理桌面  ' })
+    expect(await screen.findByText(TASK.title)).toBeInTheDocument()
+    expect(fake.listTasks).toHaveBeenCalledTimes(2)
+  })
+
+  test('shows create VALIDATION beside the title input', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([])
+    fake.createTask.mockRejectedValueOnce(
+      new TaskApplicationError('VALIDATION', 'title'),
+    )
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} />)
+    await screen.findByText('还没有任务')
+
+    await user.click(screen.getByRole('button', { name: '新建任务' }))
+    await user.click(screen.getByRole('button', { name: '创建任务' }))
+
+    const input = screen.getByRole('textbox', { name: '标题' })
+    expect(input).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByText('请输入任务标题。')).toBeInTheDocument()
+  })
+
+  test('renames through TaskService and reloads the list', async () => {
+    const user = userEvent.setup()
+    const renamed = { ...TASK, title: '整理工作台', updatedAtMs: 200 }
+    const fake = createServiceDouble()
+    fake.renameTask.mockResolvedValueOnce(renamed)
+    fake.listTasks
+      .mockResolvedValueOnce([TASK])
+      .mockResolvedValueOnce([renamed])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} />)
+    await screen.findByText(TASK.title)
+
+    await user.click(
+      screen.getByRole('button', { name: `重命名任务：${TASK.title}` }),
+    )
+    const input = screen.getByRole('textbox', { name: '标题' })
+    await user.clear(input)
+    await user.type(input, renamed.title)
+    await user.click(screen.getByRole('button', { name: '保存修改' }))
+
+    expect(fake.renameTask).toHaveBeenCalledWith({
+      id: TASK_ID,
+      title: renamed.title,
+    })
+    expect(await screen.findByText(renamed.title)).toBeInTheDocument()
+  })
+
+  test('shows rename VALIDATION beside the title input', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble()
+    fake.renameTask.mockRejectedValueOnce(
+      new TaskApplicationError('VALIDATION', 'title'),
+    )
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} />)
+    await screen.findByText(TASK.title)
+
+    await user.click(
+      screen.getByRole('button', { name: `重命名任务：${TASK.title}` }),
+    )
+    const input = screen.getByRole('textbox', { name: '标题' })
+    await user.clear(input)
+    await user.click(screen.getByRole('button', { name: '保存修改' }))
+
+    expect(input).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByText('请输入任务标题。')).toBeInTheDocument()
+  })
+
+  test('closes a missing rename and refreshes the list', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble()
+    fake.renameTask.mockRejectedValueOnce(new TaskApplicationError('NOT_FOUND'))
+    fake.listTasks.mockResolvedValueOnce([TASK]).mockResolvedValueOnce([])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} />)
+    await screen.findByText(TASK.title)
+
+    await user.click(
+      screen.getByRole('button', { name: `重命名任务：${TASK.title}` }),
+    )
+    await user.click(screen.getByRole('button', { name: '保存修改' }))
+
+    expect(
+      await screen.findByText('任务已不存在，列表已刷新。'),
+    ).toBeInTheDocument()
+    expect(await screen.findByText('还没有任务')).toBeInTheDocument()
+    expect(fake.listTasks).toHaveBeenCalledTimes(2)
+  })
+
+  test('prevents duplicate create submission while pending', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([])
+    const creating = deferred<Task>()
+    fake.createTask.mockReturnValueOnce(creating.promise)
+    fake.listTasks.mockResolvedValueOnce([]).mockResolvedValueOnce([TASK])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} />)
+    await screen.findByText('还没有任务')
+
+    await user.click(screen.getByRole('button', { name: '新建任务' }))
+    await user.type(screen.getByRole('textbox', { name: '标题' }), TASK.title)
+    await user.click(screen.getByRole('button', { name: '创建任务' }))
+    const pendingButton = screen.getByRole('button', { name: '正在创建…' })
+    expect(pendingButton).toBeDisabled()
+    await user.click(pendingButton)
+    expect(fake.createTask).toHaveBeenCalledOnce()
+
+    act(() => {
+      creating.resolve(TASK)
+    })
+    expect(await screen.findByText(TASK.title)).toBeInTheDocument()
+  })
+})
+
+describe('TasksPage status actions and feedback', () => {
+  test.each([
+    {
+      label: `开始任务：${TASK.title}`,
+      task: TASK,
+      method: 'startTask' as const,
+      nextStatus: 'doing' as const,
+    },
+    {
+      label: `完成任务：${TASK.title}`,
+      task: TASK,
+      method: 'completeTask' as const,
+      nextStatus: 'completed' as const,
+    },
+    {
+      label: `取消任务：${TASK.title}`,
+      task: TASK,
+      method: 'cancelTask' as const,
+      nextStatus: 'cancelled' as const,
+    },
+    {
+      label: `恢复任务：${TASK.title}`,
+      task: { ...TASK, status: 'completed' as const },
+      method: 'reopenTask' as const,
+      nextStatus: 'todo' as const,
+    },
+  ])(
+    '$method calls TaskService and reloads',
+    async ({ label, task, method, nextStatus }) => {
+      const user = userEvent.setup()
+      const nextTask = { ...task, status: nextStatus, updatedAtMs: 200 }
+      const fake = createServiceDouble([task])
+      fake.listTasks
+        .mockResolvedValueOnce([task])
+        .mockResolvedValueOnce([nextTask])
+      const { openRuntime } = resolvedRuntime(fake.service)
+      render(<TasksPage openRuntime={openRuntime} />)
+      await screen.findByText(task.title)
+
+      await user.click(screen.getByRole('button', { name: label }))
+
+      expect(fake[method]).toHaveBeenCalledWith(task.id)
+      expect(fake.listTasks).toHaveBeenCalledTimes(2)
+    },
+  )
+
+  test('refreshes after STATUS_CONFLICT', async () => {
+    const user = userEvent.setup()
+    const doing = { ...TASK, status: 'doing' as const, updatedAtMs: 200 }
+    const fake = createServiceDouble()
+    fake.startTask.mockRejectedValueOnce(
+      new TaskApplicationError('STATUS_CONFLICT'),
+    )
+    fake.listTasks.mockResolvedValueOnce([TASK]).mockResolvedValueOnce([doing])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} />)
+    await screen.findByText(TASK.title)
+
+    await user.click(
+      screen.getByRole('button', { name: `开始任务：${TASK.title}` }),
+    )
+
+    expect(
+      await screen.findByText('任务状态已经发生变化，列表已刷新。'),
+    ).toBeInTheDocument()
+    expect(await screen.findByText('进行中')).toBeInTheDocument()
+    expect(fake.listTasks).toHaveBeenCalledTimes(2)
+  })
+
+  test('shows safe UNAVAILABLE feedback and leaves the action retryable', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble()
+    fake.startTask.mockRejectedValueOnce(
+      new TaskApplicationError('UNAVAILABLE'),
+    )
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} />)
+    await screen.findByText(TASK.title)
+
+    const button = screen.getByRole('button', {
+      name: `开始任务：${TASK.title}`,
+    })
+    await user.click(button)
+
+    expect(
+      await screen.findByText('操作暂时无法完成，请重试。'),
+    ).toBeInTheDocument()
+    expect(button).toBeEnabled()
+    expect(document.body).not.toHaveTextContent(/SQL|OPFS|Worker|UNAVAILABLE/)
+  })
+})
