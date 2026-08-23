@@ -21,6 +21,7 @@ interface TaskDateViewProps {
   readonly today: LocalDate
   readonly pendingTaskIds: ReadonlySet<string>
   readonly onCreate: () => void
+  readonly onOpenDetail: (task: Task) => void
   readonly onRename: (task: Task) => void
   readonly onStatusAction: (task: Task, action: TaskStatusAction) => void
   readonly onSetImportance: (task: Task, isImportant: boolean) => void
@@ -63,6 +64,7 @@ export function TaskDateView({
   today,
   pendingTaskIds,
   onCreate,
+  onOpenDetail,
   onRename,
   onStatusAction,
   onSetImportance,
@@ -70,8 +72,7 @@ export function TaskDateView({
   onSetDeadline,
   onClearDeadline,
 }: TaskDateViewProps) {
-  const [selectedGroup, setSelectedGroup] =
-    useState<TaskDateGroup>('today')
+  const [selectedGroup, setSelectedGroup] = useState<TaskDateGroup>('today')
   const groups = groupTasksByDate(tasks, today)
   const selectedTasks = groups[selectedGroup]
   const presentation = DATE_GROUP_PRESENTATION[selectedGroup]
@@ -169,6 +170,7 @@ export function TaskDateView({
         ) : (
           <TaskList
             onClearDeadline={onClearDeadline}
+            onOpenDetail={onOpenDetail}
             onRename={onRename}
             onSetDeadline={onSetDeadline}
             onSetImportance={onSetImportance}

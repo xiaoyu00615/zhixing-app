@@ -13,6 +13,7 @@ import {
   CreateTaskDialog,
   RenameTaskDialog,
 } from '@/components/tasks/TaskDialogs'
+import { TaskDetailPanel } from '@/components/tasks/TaskDetailPanel'
 import { TaskCalendarView } from '@/components/tasks/TaskCalendarView'
 import { TaskDateView } from '@/components/tasks/TaskDateView'
 import { TaskList, type TaskStatusAction } from '@/components/tasks/TaskList'
@@ -79,6 +80,7 @@ export function TasksPage({
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
   const [service, setService] = useState<TaskService | null>(null)
   const [tasks, setTasks] = useState<readonly Task[]>([])
+  const [detailTaskId, setDetailTaskId] = useState<string | null>(null)
   const [view, setView] = useState<'list' | 'quadrant' | 'date' | 'calendar'>(
     'list',
   )
@@ -385,6 +387,11 @@ export function TasksPage({
     }
   }
 
+  const detailTask =
+    detailTaskId === null
+      ? null
+      : (tasks.find((task) => task.id === detailTaskId) ?? null)
+
   return (
     <section className="min-w-0 space-y-5" aria-labelledby="tasks-page-title">
       <h2 className="sr-only" id="tasks-page-title">
@@ -529,6 +536,7 @@ export function TasksPage({
                   currentService.clearTaskDeadline(task.id),
                 )
               }
+              onOpenDetail={(task) => setDetailTaskId(task.id)}
               onRename={openRenameDialog}
               onSetDeadline={(task, dueDate) =>
                 void runPlanningAction(task, (currentService) =>
@@ -569,6 +577,7 @@ export function TasksPage({
               )
             }
             onCreate={openCreateDialog}
+            onOpenDetail={(task) => setDetailTaskId(task.id)}
             onSetDeadline={(task, dueDate) =>
               void runPlanningAction(task, (currentService) =>
                 currentService.setTaskDeadline(task.id, dueDate),
@@ -607,6 +616,7 @@ export function TasksPage({
               )
             }
             onCreate={openCreateDialog}
+            onOpenDetail={(task) => setDetailTaskId(task.id)}
             onRename={openRenameDialog}
             onSetDeadline={(task, dueDate) =>
               void runPlanningAction(task, (currentService) =>
@@ -646,6 +656,7 @@ export function TasksPage({
               )
             }
             onCreate={openCreateDialog}
+            onOpenDetail={(task) => setDetailTaskId(task.id)}
             onRename={openRenameDialog}
             onSetDeadline={(task, dueDate) =>
               void runPlanningAction(task, (currentService) =>
@@ -671,6 +682,39 @@ export function TasksPage({
           />
         </div>
       )}
+
+      <TaskDetailPanel
+        onClearDeadline={(task) =>
+          void runPlanningAction(task, (currentService) =>
+            currentService.clearTaskDeadline(task.id),
+          )
+        }
+        onOpenChange={(open) => {
+          if (!open) {
+            setDetailTaskId(null)
+          }
+        }}
+        onRename={openRenameDialog}
+        onSetDeadline={(task, dueDate) =>
+          void runPlanningAction(task, (currentService) =>
+            currentService.setTaskDeadline(task.id, dueDate),
+          )
+        }
+        onSetImportance={(task, isImportant) =>
+          void runPlanningAction(task, (currentService) =>
+            currentService.setTaskImportance(task.id, isImportant),
+          )
+        }
+        onSetUrgency={(task, isUrgent) =>
+          void runPlanningAction(task, (currentService) =>
+            currentService.setTaskUrgency(task.id, isUrgent),
+          )
+        }
+        onStatusAction={(task, action) => void runStatusAction(task, action)}
+        pending={detailTask !== null && pendingTaskIds.has(detailTask.id)}
+        task={detailTask}
+        today={today}
+      />
 
       <CreateTaskDialog
         dueDate={createDueDate}

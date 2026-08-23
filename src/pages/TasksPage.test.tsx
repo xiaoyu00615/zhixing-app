@@ -911,6 +911,250 @@ describe('TasksPage calendar view', () => {
   })
 })
 
+describe('TasksPage task detail panel', () => {
+  test('opens the same detail panel from list, quadrant, date, and calendar views', async () => {
+    const user = userEvent.setup()
+    const task = taskFixture(101, '跨视图详情任务', {
+      dueDate: '2026-08-23',
+      isImportant: true,
+    })
+    const fake = createServiceDouble([task])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByRole('list', { name: '任务列表' })
+
+    await user.click(
+      screen.getByRole('button', {
+        name: `查看任务详情：${task.title}`,
+      }),
+    )
+    expect(
+      screen.getByRole('dialog', { name: `任务详情：${task.title}` }),
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '关闭' }))
+
+    await user.click(screen.getByRole('tab', { name: '四象限' }))
+    const quadrant = screen.getByRole('region', { name: '任务四象限' })
+    await user.click(
+      within(quadrant).getByRole('button', {
+        name: `查看任务详情：${task.title}`,
+      }),
+    )
+    expect(
+      screen.getByRole('dialog', { name: `任务详情：${task.title}` }),
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '关闭' }))
+
+    await user.click(screen.getByRole('tab', { name: '日期' }))
+    const dateView = screen.getByRole('region', { name: '任务日期视图' })
+    await user.click(
+      within(dateView).getByRole('button', {
+        name: `查看任务详情：${task.title}`,
+      }),
+    )
+    expect(
+      screen.getByRole('dialog', { name: `任务详情：${task.title}` }),
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '关闭' }))
+
+    await user.click(screen.getByRole('tab', { name: '日历' }))
+    const calendarGrid = screen.getByRole('grid', {
+      name: '2026年8月任务月历',
+    })
+    await user.click(
+      within(calendarGrid).getByRole('button', {
+        name: `查看任务详情：${task.title}，截止日期 2026-08-23`,
+      }),
+    )
+    expect(
+      screen.getByRole('dialog', { name: `任务详情：${task.title}` }),
+    ).toBeInTheDocument()
+  })
+
+  test('re-derives planning fields from the latest reloaded Task', async () => {
+    const user = userEvent.setup()
+    const task = taskFixture(102, '详情规划任务', {
+      dueDate: '2026-08-22',
+    })
+    const important = { ...task, isImportant: true, updatedAtMs: 200 }
+    const urgent = { ...important, isUrgent: true, updatedAtMs: 300 }
+    const moved = { ...urgent, dueDate: '2026-08-24', updatedAtMs: 400 }
+    const cleared = { ...moved, dueDate: null, updatedAtMs: 500 }
+    const fake = createServiceDouble([task])
+    fake.setTaskImportance.mockResolvedValueOnce(important)
+    fake.setTaskUrgency.mockResolvedValueOnce(urgent)
+    fake.setTaskDeadline.mockResolvedValueOnce(moved)
+    fake.clearTaskDeadline.mockResolvedValueOnce(cleared)
+    fake.listTasks
+      .mockResolvedValueOnce([task])
+      .mockResolvedValueOnce([important])
+      .mockResolvedValueOnce([urgent])
+      .mockResolvedValueOnce([moved])
+      .mockResolvedValueOnce([cleared])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByText(task.title)
+    await user.click(
+      screen.getByRole('button', { name: `查看任务详情：${task.title}` }),
+    )
+
+    let detail = screen.getByRole('dialog', {
+      name: `任务详情：${task.title}`,
+    })
+    expect(within(detail).getByText('已逾期')).toBeInTheDocument()
+    expect(within(detail).getByText('由逾期产生')).toBeInTheDocument()
+
+    await user.click(
+      within(detail).getByRole('button', {
+        name: `设为重要：${task.title}`,
+      }),
+    )
+    await waitFor(() =>
+      expect(
+        within(detail).getByRole('button', {
+          name: `取消重要：${task.title}`,
+        }),
+      ).toBeInTheDocument(),
+    )
+
+    await user.click(
+      within(detail).getByRole('button', {
+        name: `设为基础紧急：${task.title}`,
+      }),
+    )
+    await waitFor(() =>
+      expect(
+        within(detail).getByRole('button', {
+          name: `取消基础紧急：${task.title}`,
+        }),
+      ).toBeInTheDocument(),
+    )
+
+    fireEvent.change(
+      within(detail).getByLabelText(`详情截止日期：${task.title}`),
+      { target: { value: '2026-08-24' } },
+    )
+    await waitFor(() => {
+      detail = screen.getByRole('dialog', {
+        name: `任务详情：${task.title}`,
+      })
+      expect(within(detail).queryByText('已逾期')).not.toBeInTheDocument()
+      expect(
+        within(detail).getByLabelText(`详情截止日期：${task.title}`),
+      ).toHaveValue('2026-08-24')
+    })
+
+    await user.click(
+      within(detail).getByRole('button', {
+        name: `清除详情截止日期：${task.title}`,
+      }),
+    )
+    await waitFor(() =>
+      expect(
+        within(detail).getByLabelText(`详情截止日期：${task.title}`),
+      ).toHaveValue(''),
+    )
+    expect(fake.listTasks).toHaveBeenCalledTimes(5)
+  })
+
+  test('keeps detail open and current through status transitions', async () => {
+    const user = userEvent.setup()
+    const task = taskFixture(103, '详情状态任务')
+    const doing = { ...task, status: 'doing' as const, updatedAtMs: 200 }
+    const cancelled = {
+      ...doing,
+      status: 'cancelled' as const,
+      updatedAtMs: 300,
+    }
+    const reopened = { ...cancelled, status: 'todo' as const, updatedAtMs: 400 }
+    const completed = {
+      ...reopened,
+      status: 'completed' as const,
+      updatedAtMs: 500,
+    }
+    const fake = createServiceDouble([task])
+    fake.startTask.mockResolvedValueOnce(doing)
+    fake.cancelTask.mockResolvedValueOnce(cancelled)
+    fake.reopenTask.mockResolvedValueOnce(reopened)
+    fake.completeTask.mockResolvedValueOnce(completed)
+    fake.listTasks
+      .mockResolvedValueOnce([task])
+      .mockResolvedValueOnce([doing])
+      .mockResolvedValueOnce([cancelled])
+      .mockResolvedValueOnce([reopened])
+      .mockResolvedValueOnce([completed])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByText(task.title)
+    await user.click(
+      screen.getByRole('button', { name: `查看任务详情：${task.title}` }),
+    )
+
+    const detail = screen.getByRole('dialog', {
+      name: `任务详情：${task.title}`,
+    })
+    await user.click(within(detail).getByRole('button', { name: '开始' }))
+    expect(await within(detail).findByText('进行中')).toBeInTheDocument()
+
+    await user.click(within(detail).getByRole('button', { name: '取消' }))
+    expect(await within(detail).findByText('已取消')).toBeInTheDocument()
+
+    await user.click(within(detail).getByRole('button', { name: '恢复' }))
+    expect(await within(detail).findByText('待开始')).toBeInTheDocument()
+
+    await user.click(within(detail).getByRole('button', { name: '完成' }))
+    expect(await within(detail).findByText('已完成')).toBeInTheDocument()
+    expect(
+      screen.getByRole('dialog', { name: `任务详情：${task.title}` }),
+    ).toBeInTheDocument()
+    expect(fake.listTasks).toHaveBeenCalledTimes(5)
+  })
+
+  test('opens the existing rename flow and displays the reloaded title', async () => {
+    const user = userEvent.setup()
+    const task = taskFixture(104, '详情原始标题')
+    const renamed = { ...task, title: '详情更新标题', updatedAtMs: 200 }
+    const fake = createServiceDouble([task])
+    fake.renameTask.mockResolvedValueOnce(renamed)
+    fake.listTasks
+      .mockResolvedValueOnce([task])
+      .mockResolvedValueOnce([renamed])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByText(task.title)
+    await user.click(
+      screen.getByRole('button', { name: `查看任务详情：${task.title}` }),
+    )
+
+    const detail = screen.getByRole('dialog', {
+      name: `任务详情：${task.title}`,
+    })
+    await user.click(
+      within(detail).getByRole('button', {
+        name: `重命名任务：${task.title}`,
+      }),
+    )
+    const renameDialog = screen.getByRole('dialog', { name: '重命名任务' })
+    const input = within(renameDialog).getByLabelText('标题')
+    await user.clear(input)
+    await user.type(input, renamed.title)
+    await user.click(
+      within(renameDialog).getByRole('button', { name: '保存修改' }),
+    )
+
+    expect(
+      await screen.findByRole('dialog', {
+        name: `任务详情：${renamed.title}`,
+      }),
+    ).toBeInTheDocument()
+    expect(fake.renameTask).toHaveBeenCalledWith({
+      id: task.id,
+      title: renamed.title,
+    })
+    expect(fake.listTasks).toHaveBeenCalledTimes(2)
+  })
+})
+
 describe('TasksPage quadrant view', () => {
   test('defaults to list and switches to correctly grouped quadrants', async () => {
     const user = userEvent.setup()

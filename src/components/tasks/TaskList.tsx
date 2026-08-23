@@ -28,6 +28,7 @@ interface TaskListProps {
   readonly tasks: readonly Task[]
   readonly today: LocalDate
   readonly pendingTaskIds: ReadonlySet<string>
+  readonly onOpenDetail: (task: Task) => void
   readonly onRename: (task: Task) => void
   readonly onStatusAction: (task: Task, action: TaskStatusAction) => void
   readonly onSetImportance: (task: Task, isImportant: boolean) => void
@@ -75,6 +76,7 @@ export function TaskList({
   tasks,
   today,
   pendingTaskIds,
+  onOpenDetail,
   onRename,
   onStatusAction,
   onSetImportance,
@@ -130,15 +132,18 @@ export function TaskList({
 
               <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
-                  <p
-                    className={`min-w-0 break-words text-[15px] leading-6 font-semibold text-foreground ${
+                  <button
+                    aria-label={`查看任务详情：${task.title}`}
+                    className={`min-w-0 break-words rounded-xs text-left text-[15px] leading-6 font-semibold text-foreground hover:text-primary focus-visible:outline-none focus-visible:[box-shadow:var(--focus-ring)] ${
                       task.status === 'completed' || task.status === 'cancelled'
                         ? 'text-foreground-secondary line-through decoration-border'
                         : ''
                     }`}
+                    onClick={() => onOpenDetail(task)}
+                    type="button"
                   >
                     {task.title}
-                  </p>
+                  </button>
                   <Badge className={status.className} variant="outline">
                     {status.label}
                   </Badge>
@@ -154,7 +159,9 @@ export function TaskList({
                 </div>
 
                 <div className="mt-2 flex flex-wrap items-center gap-x-1 gap-y-1 text-auxiliary text-foreground-tertiary">
-                  <span className="mr-1">更新于 {formatUpdatedAt(task.updatedAtMs)}</span>
+                  <span className="mr-1">
+                    更新于 {formatUpdatedAt(task.updatedAtMs)}
+                  </span>
                   <span aria-hidden="true" className="text-border-strong">
                     ·
                   </span>
@@ -286,9 +293,7 @@ export function TaskList({
                           aria-label={`取消任务：${task.title}`}
                           className="text-foreground-tertiary hover:bg-danger-soft hover:text-danger"
                           disabled={pending}
-                          onClick={() =>
-                            onStatusAction(task, 'cancelTask')
-                          }
+                          onClick={() => onStatusAction(task, 'cancelTask')}
                           size="icon-sm"
                           title="取消任务"
                           type="button"

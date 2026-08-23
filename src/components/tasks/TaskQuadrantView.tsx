@@ -27,6 +27,7 @@ interface TaskQuadrantViewProps {
   readonly today: LocalDate
   readonly pendingTaskIds: ReadonlySet<string>
   readonly onCreate: () => void
+  readonly onOpenDetail: (task: Task) => void
   readonly onStatusAction: (task: Task, action: TaskStatusAction) => void
   readonly onSetImportance: (task: Task, isImportant: boolean) => void
   readonly onSetUrgency: (task: Task, isUrgent: boolean) => void
@@ -81,6 +82,7 @@ export function TaskQuadrantView({
   today,
   pendingTaskIds,
   onCreate,
+  onOpenDetail,
   onStatusAction,
   onSetImportance,
   onSetUrgency,
@@ -148,7 +150,10 @@ export function TaskQuadrantView({
                   暂无任务
                 </p>
               ) : (
-                <ul aria-label={`${quadrant.title}任务`} className="space-y-2.5">
+                <ul
+                  aria-label={`${quadrant.title}任务`}
+                  className="space-y-2.5"
+                >
                   {quadrantTasks.map((task) => {
                     const pending = pendingTaskIds.has(task.id)
                     const overdue = isTaskOverdue(task, today)
@@ -164,9 +169,14 @@ export function TaskQuadrantView({
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0 flex-1">
-                            <p className="break-words text-[15px] leading-6 font-semibold text-foreground">
+                            <button
+                              aria-label={`查看任务详情：${task.title}`}
+                              className="break-words rounded-xs text-left text-[15px] leading-6 font-semibold text-foreground hover:text-primary focus-visible:outline-none focus-visible:[box-shadow:var(--focus-ring)]"
+                              onClick={() => onOpenDetail(task)}
+                              type="button"
+                            >
                               {task.title}
-                            </p>
+                            </button>
                             <div className="mt-2 flex flex-wrap items-center gap-1.5">
                               <Badge variant="secondary">
                                 {task.status === 'doing' ? '进行中' : '待开始'}

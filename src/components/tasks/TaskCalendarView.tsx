@@ -19,6 +19,7 @@ interface TaskCalendarViewProps {
   readonly today: LocalDate
   readonly pendingTaskIds: ReadonlySet<string>
   readonly onCreate: () => void
+  readonly onOpenDetail: (task: Task) => void
   readonly onRename: (task: Task) => void
   readonly onStatusAction: (task: Task, action: TaskStatusAction) => void
   readonly onSetImportance: (task: Task, isImportant: boolean) => void
@@ -64,11 +65,13 @@ function CalendarCell({
   selectedDate,
   today,
   onSelect,
+  onOpenDetail,
 }: {
   readonly day: TaskCalendarDay
   readonly selectedDate: LocalDate
   readonly today: LocalDate
   readonly onSelect: (day: TaskCalendarDay) => void
+  readonly onOpenDetail: (task: Task) => void
 }) {
   const selected = day.date === selectedDate
   const isToday = day.date === today
@@ -100,10 +103,13 @@ function CalendarCell({
       <div className="mt-1 space-y-1">
         {shownTasks.map((task) => (
           <button
-            aria-label={`查看任务：${task.title}，截止日期 ${day.date}`}
+            aria-label={`查看任务详情：${task.title}，截止日期 ${day.date}`}
             className={`block h-6 w-full truncate rounded-[4px] border-l-2 px-1.5 text-left text-[11px] leading-6 font-medium transition-[filter] hover:brightness-[0.97] focus-visible:outline-none focus-visible:[box-shadow:var(--focus-ring)] ${taskAccent(task, today)}`}
             key={task.id}
-            onClick={() => onSelect(day)}
+            onClick={() => {
+              onSelect(day)
+              onOpenDetail(task)
+            }}
             title={task.title}
             type="button"
           >
@@ -130,6 +136,7 @@ export function TaskCalendarView({
   today,
   pendingTaskIds,
   onCreate,
+  onOpenDetail,
   onRename,
   onStatusAction,
   onSetImportance,
@@ -235,6 +242,7 @@ export function TaskCalendarView({
                   <CalendarCell
                     day={day}
                     key={day.date}
+                    onOpenDetail={onOpenDetail}
                     onSelect={selectDay}
                     selectedDate={selectedDate}
                     today={today}
@@ -288,6 +296,7 @@ export function TaskCalendarView({
             <div className="mt-4 max-h-[600px] overflow-y-auto">
               <TaskList
                 onClearDeadline={onClearDeadline}
+                onOpenDetail={onOpenDetail}
                 onRename={onRename}
                 onSetDeadline={onSetDeadline}
                 onSetImportance={onSetImportance}
