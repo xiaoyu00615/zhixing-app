@@ -5,6 +5,7 @@ import addTaskPlanningFieldsSql from '../../../src-tauri/migrations/0002_add_tas
 import addTaskProjectsSql from '../../../src-tauri/migrations/0003_add_task_projects.sql?raw'
 import addTaskTagsSql from '../../../src-tauri/migrations/0004_add_task_tags.sql?raw'
 import addTaskSoftDeleteSql from '../../../src-tauri/migrations/0005_add_task_soft_delete.sql?raw'
+import addCanvasCoreSql from '../../../src-tauri/migrations/0006_add_canvas_core.sql?raw'
 
 export interface WebMigrationDefinition {
   readonly version: number
@@ -71,6 +72,12 @@ export const WEB_MIGRATIONS: readonly WebMigrationDefinition[] = [
     version: 5,
     id: '0005_add_task_soft_delete',
     sql: addTaskSoftDeleteSql,
+    highRisk: false,
+  },
+  {
+    version: 6,
+    id: '0006_add_canvas_core',
+    sql: addCanvasCoreSql,
     highRisk: false,
   },
 ]

@@ -9,11 +9,13 @@
 import { useLocation } from "react-router"
 
 import { findNavItem } from "@/config/navigation"
+import { PATHS } from "@/routes/paths"
 
 export function Topbar() {
   const location = useLocation()
   const current = findNavItem(location.pathname)
-  const title = current?.label ?? "页面未找到"
+  const title = current?.label ??
+    (location.pathname.startsWith(`${PATHS.CANVAS}/`) ? "画布" : "页面未找到")
 
   return (
     <header className="flex h-[var(--topbar-height)] shrink-0 items-center justify-between border-b border-border bg-surface px-6">

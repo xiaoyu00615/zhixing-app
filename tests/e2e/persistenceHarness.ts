@@ -19,6 +19,16 @@ import type {
   RenameTaskInput,
   TaskRepository,
 } from '@/task/repository'
+import type { Canvas, CanvasNode } from '@/canvas/model'
+import type {
+  CanvasRepository,
+  CreateCanvasInput,
+  CreateTextNodeInput,
+  MoveCanvasNodeInput,
+  RenameCanvasInput,
+  UpdateCanvasViewportInput,
+  UpdateTextNodeInput,
+} from '@/canvas/repository'
 
 interface PersistenceHarness {
   capability(): Promise<WebPersistenceCapability>
@@ -47,6 +57,15 @@ interface PersistenceHarness {
   createTag(input: CreateTagInput): Promise<Tag>
   listTags(): Promise<readonly Tag[]>
   renameTag(input: RenameTagInput): Promise<Tag>
+  createCanvas(input: CreateCanvasInput): Promise<Canvas>
+  listCanvases(): Promise<readonly Canvas[]>
+  getCanvas(id: string): Promise<Canvas>
+  renameCanvas(input: RenameCanvasInput): Promise<Canvas>
+  updateCanvasViewport(input: UpdateCanvasViewportInput): Promise<Canvas>
+  createTextNode(input: CreateTextNodeInput): Promise<CanvasNode>
+  listCanvasNodes(canvasId: string): Promise<readonly CanvasNode[]>
+  updateTextNode(input: UpdateTextNodeInput): Promise<CanvasNode>
+  moveCanvasNode(input: MoveCanvasNodeInput): Promise<CanvasNode>
   shutdown(): Promise<void>
 }
 
@@ -78,6 +97,14 @@ async function requireTagRepository(): Promise<TagRepository> {
   if (!('tagRepository' in result))
     throw new Error('Tag persistence is unavailable.')
   return result.tagRepository
+}
+
+async function requireCanvasRepository(): Promise<CanvasRepository> {
+  const result = await opened
+  if (!('canvasRepository' in result)) {
+    throw new Error('Canvas persistence is unavailable.')
+  }
+  return result.canvasRepository
 }
 
 window.__taskPersistenceHarness = {
@@ -134,6 +161,33 @@ window.__taskPersistenceHarness = {
   },
   async renameTag(input) {
     return (await requireTagRepository()).renameTag(input)
+  },
+  async createCanvas(input) {
+    return (await requireCanvasRepository()).createCanvas(input)
+  },
+  async listCanvases() {
+    return (await requireCanvasRepository()).listCanvases()
+  },
+  async getCanvas(id) {
+    return (await requireCanvasRepository()).getCanvas(id)
+  },
+  async renameCanvas(input) {
+    return (await requireCanvasRepository()).renameCanvas(input)
+  },
+  async updateCanvasViewport(input) {
+    return (await requireCanvasRepository()).updateCanvasViewport(input)
+  },
+  async createTextNode(input) {
+    return (await requireCanvasRepository()).createTextNode(input)
+  },
+  async listCanvasNodes(canvasId) {
+    return (await requireCanvasRepository()).listCanvasNodes(canvasId)
+  },
+  async updateTextNode(input) {
+    return (await requireCanvasRepository()).updateTextNode(input)
+  },
+  async moveCanvasNode(input) {
+    return (await requireCanvasRepository()).moveCanvasNode(input)
   },
   async shutdown() {
     const result = await opened

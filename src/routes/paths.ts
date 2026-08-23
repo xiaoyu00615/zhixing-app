@@ -33,5 +33,9 @@ export const PATHS = {
 /** 默认首页路径 */
 export const DEFAULT_PATH = PATHS.TODAY
 
+export function canvasEditorPath(canvasId: string): string {
+  return `${PATHS.CANVAS}/${canvasId}`
+}
+
 /** 通配符路径，用于 404 兜底 */
 export const WILDCARD = "*"

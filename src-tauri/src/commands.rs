@@ -3,6 +3,11 @@
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
+use crate::canvas::{
+    CanvasDbService, CanvasError, CanvasNodeContent, CanvasNodeRecord, CanvasRecord,
+    CanvasViewport, CreateCanvasInput, CreateTextNodeInput, MoveCanvasNodeInput, RenameCanvasInput,
+    UpdateCanvasViewportInput, UpdateTextNodeInput,
+};
 use crate::project::{
     CreateProjectInput, ProjectDbService, ProjectError, ProjectRecord, RenameProjectInput,
 };
@@ -23,7 +28,7 @@ pub fn native_ping() -> &'static str {
     "pong"
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CreateTaskDto {
     id: String,
@@ -636,6 +641,326 @@ pub(crate) fn tag_rename(
     .map_err(tag_error)
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CanvasViewportDto {
+    x: f64,
+    y: f64,
+    zoom: f64,
+}
+
+impl From<CanvasViewport> for CanvasViewportDto {
+    fn from(viewport: CanvasViewport) -> Self {
+        Self {
+            x: viewport.x,
+            y: viewport.y,
+            zoom: viewport.zoom,
+        }
+    }
+}
+
+impl From<CanvasViewportDto> for CanvasViewport {
+    fn from(viewport: CanvasViewportDto) -> Self {
+        Self {
+            x: viewport.x,
+            y: viewport.y,
+            zoom: viewport.zoom,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreateCanvasDto {
+    id: String,
+    title: String,
+    viewport: CanvasViewportDto,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RenameCanvasDto {
+    id: String,
+    title: String,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateCanvasViewportDto {
+    id: String,
+    viewport: CanvasViewportDto,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CanvasIdDto {
+    id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CanvasDto {
+    id: String,
+    title: String,
+    viewport: CanvasViewportDto,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+}
+
+impl From<CanvasRecord> for CanvasDto {
+    fn from(canvas: CanvasRecord) -> Self {
+        Self {
+            id: canvas.id,
+            title: canvas.title,
+            viewport: canvas.viewport.into(),
+            created_at_ms: canvas.created_at_ms,
+            updated_at_ms: canvas.updated_at_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreateTextNodeDto {
+    id: String,
+    canvas_id: String,
+    content: CanvasNodeContent,
+    x: f64,
+    y: f64,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateTextNodeDto {
+    id: String,
+    content: CanvasNodeContent,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MoveCanvasNodeDto {
+    id: String,
+    x: f64,
+    y: f64,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CanvasNodeDto {
+    id: String,
+    canvas_id: String,
+    #[serde(rename = "type")]
+    node_type: String,
+    content: CanvasNodeContent,
+    x: f64,
+    y: f64,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+}
+
+impl From<CanvasNodeRecord> for CanvasNodeDto {
+    fn from(node: CanvasNodeRecord) -> Self {
+        Self {
+            id: node.id,
+            canvas_id: node.canvas_id,
+            node_type: node.node_type,
+            content: node.content,
+            x: node.x,
+            y: node.y,
+            created_at_ms: node.created_at_ms,
+            updated_at_ms: node.updated_at_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct CanvasCommandErrorDto {
+    code: &'static str,
+    message: &'static str,
+}
+
+impl From<CanvasError> for CanvasCommandErrorDto {
+    fn from(error: CanvasError) -> Self {
+        Self {
+            code: error.code(),
+            message: error.safe_message(),
+        }
+    }
+}
+
+fn canvas_connection(
+    app: &tauri::AppHandle,
+    runtime_status: &RuntimeStatus,
+) -> Result<rusqlite::Connection, CanvasCommandErrorDto> {
+    if !matches!(runtime_status, RuntimeStatus::Healthy) {
+        return Err(CanvasError::PersistenceUnavailable.into());
+    }
+    let app_config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|_| CanvasCommandErrorDto::from(CanvasError::PersistenceUnavailable))?;
+    CanvasDbService::open_existing(&app_config_dir).map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_create(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: CreateCanvasDto,
+) -> Result<CanvasDto, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::create_canvas(
+        &connection,
+        CreateCanvasInput {
+            id: input.id,
+            title: input.title,
+            viewport: input.viewport.into(),
+            created_at_ms: input.created_at_ms,
+        },
+    )
+    .map(CanvasDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_list(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+) -> Result<Vec<CanvasDto>, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::list_canvases(&connection)
+        .map(|canvases| canvases.into_iter().map(CanvasDto::from).collect())
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_get(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: CanvasIdDto,
+) -> Result<CanvasDto, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::get_canvas(&connection, &input.id)
+        .map(CanvasDto::from)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_rename(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: RenameCanvasDto,
+) -> Result<CanvasDto, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::rename_canvas(
+        &connection,
+        RenameCanvasInput {
+            id: input.id,
+            title: input.title,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(CanvasDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_update_viewport(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: UpdateCanvasViewportDto,
+) -> Result<CanvasDto, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::update_viewport(
+        &connection,
+        UpdateCanvasViewportInput {
+            id: input.id,
+            viewport: input.viewport.into(),
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(CanvasDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_node_create_text(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: CreateTextNodeDto,
+) -> Result<CanvasNodeDto, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::create_text_node(
+        &connection,
+        CreateTextNodeInput {
+            id: input.id,
+            canvas_id: input.canvas_id,
+            content: input.content,
+            x: input.x,
+            y: input.y,
+            created_at_ms: input.created_at_ms,
+        },
+    )
+    .map(CanvasNodeDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_node_list(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: CanvasIdDto,
+) -> Result<Vec<CanvasNodeDto>, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::list_nodes(&connection, &input.id)
+        .map(|nodes| nodes.into_iter().map(CanvasNodeDto::from).collect())
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_node_update_text(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: UpdateTextNodeDto,
+) -> Result<CanvasNodeDto, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::update_text_node(
+        &connection,
+        UpdateTextNodeInput {
+            id: input.id,
+            content: input.content,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(CanvasNodeDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_node_move(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: MoveCanvasNodeDto,
+) -> Result<CanvasNodeDto, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::move_node(
+        &connection,
+        MoveCanvasNodeInput {
+            id: input.id,
+            x: input.x,
+            y: input.y,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(CanvasNodeDto::from)
+    .map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,6 +1031,52 @@ mod tests {
             serde_json::json!({
                 "id": "00000000-0000-4000-8000-000000000001",
                 "updatedAtMs": 20
+            })
+        );
+
+        let canvas = CanvasDto::from(CanvasRecord {
+            id: "00000000-0000-4000-8000-000000000601".into(),
+            title: "Canvas".into(),
+            viewport: CanvasViewport {
+                x: 12.0,
+                y: -8.0,
+                zoom: 1.25,
+            },
+            created_at_ms: 30,
+            updated_at_ms: 40,
+        });
+        assert_eq!(
+            serde_json::to_value(canvas).unwrap(),
+            serde_json::json!({
+                "id": "00000000-0000-4000-8000-000000000601",
+                "title": "Canvas",
+                "viewport": { "x": 12.0, "y": -8.0, "zoom": 1.25 },
+                "createdAtMs": 30,
+                "updatedAtMs": 40
+            })
+        );
+
+        let node = CanvasNodeDto::from(CanvasNodeRecord {
+            id: "00000000-0000-4000-8000-000000000602".into(),
+            canvas_id: "00000000-0000-4000-8000-000000000601".into(),
+            node_type: "text".into(),
+            content: CanvasNodeContent::Text { text: "Idea".into() },
+            x: 50.0,
+            y: 80.0,
+            created_at_ms: 30,
+            updated_at_ms: 40,
+        });
+        assert_eq!(
+            serde_json::to_value(node).unwrap(),
+            serde_json::json!({
+                "id": "00000000-0000-4000-8000-000000000602",
+                "canvasId": "00000000-0000-4000-8000-000000000601",
+                "type": "text",
+                "content": { "type": "text", "text": "Idea" },
+                "x": 50.0,
+                "y": 80.0,
+                "createdAtMs": 30,
+                "updatedAtMs": 40
             })
         );
     }

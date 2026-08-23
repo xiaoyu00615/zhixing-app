@@ -20,6 +20,14 @@ export default defineConfig(({ mode }) => {
       import.meta.url,
     ),
   )
+  const canvasRuntimeEntry = fileURLToPath(
+    new URL(
+      process.env.TAURI_ENV_PLATFORM === undefined
+        ? './src/canvas/runtime.ts'
+        : './src/canvas/runtime.native.ts',
+      import.meta.url,
+    ),
+  )
 
   return {
     plugins: [react(), tailwindcss()],
@@ -46,6 +54,7 @@ export default defineConfig(({ mode }) => {
     resolve: {
       alias: [
         { find: /^@\/task\/runtime$/, replacement: taskRuntimeEntry },
+        { find: /^@\/canvas\/runtime$/, replacement: canvasRuntimeEntry },
         {
           find: '@',
           replacement: fileURLToPath(new URL('./src', import.meta.url)),

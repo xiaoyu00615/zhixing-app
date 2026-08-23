@@ -24,6 +24,21 @@ import type {
 } from '@/project/repository'
 import { isNonEmptyTagName } from '@/tag/model'
 import type { CreateTagInput, RenameTagInput } from '@/tag/repository'
+import {
+  isCanonicalCanvasId,
+  isCanvasCoordinate,
+  isCanvasViewport,
+  isNonEmptyCanvasTitle,
+  isTextNodeContent,
+} from '@/canvas/model'
+import type {
+  CreateCanvasInput,
+  CreateTextNodeInput,
+  MoveCanvasNodeInput,
+  RenameCanvasInput,
+  UpdateCanvasViewportInput,
+  UpdateTextNodeInput,
+} from '@/canvas/repository'
 
 export type WebPersistenceCapability =
   | { readonly status: 'AVAILABLE' }
@@ -127,6 +142,47 @@ export type TaskWorkerRequest =
       readonly requestId: number
       readonly type: 'tag.rename'
       readonly input: RenameTagInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.create'
+      readonly input: CreateCanvasInput
+    }
+  | { readonly requestId: number; readonly type: 'canvas.list' }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.get'
+      readonly id: string
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.rename'
+      readonly input: RenameCanvasInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.updateViewport'
+      readonly input: UpdateCanvasViewportInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.node.createText'
+      readonly input: CreateTextNodeInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.node.list'
+      readonly canvasId: string
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.node.updateText'
+      readonly input: UpdateTextNodeInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.node.move'
+      readonly input: MoveCanvasNodeInput
     }
   | { readonly requestId: number; readonly type: 'shutdown' }
 
@@ -243,6 +299,43 @@ function isChangeStatusInput(value: unknown): value is ChangeTaskStatusInput {
   )
 }
 
+function isCanvasTimestamp(value: unknown): value is number {
+  return isNonNegativeSafeIntegerMilliseconds(value)
+}
+
+function isCreateCanvasInput(value: unknown): value is CreateCanvasInput {
+  return (
+    isRecord(value) &&
+    isCanonicalCanvasId(value.id) &&
+    isNonEmptyCanvasTitle(value.title) &&
+    isCanvasViewport(value.viewport) &&
+    isCanvasTimestamp(value.createdAtMs)
+  )
+}
+
+function isCanvasUpdateBase(value: unknown): value is Record<string, unknown> & {
+  readonly id: string
+  readonly updatedAtMs: number
+} {
+  return (
+    isRecord(value) &&
+    isCanonicalCanvasId(value.id) &&
+    isCanvasTimestamp(value.updatedAtMs)
+  )
+}
+
+function isCreateTextNodeInput(value: unknown): value is CreateTextNodeInput {
+  return (
+    isRecord(value) &&
+    isCanonicalCanvasId(value.id) &&
+    isCanonicalCanvasId(value.canvasId) &&
+    isTextNodeContent(value.content) &&
+    isCanvasCoordinate(value.x) &&
+    isCanvasCoordinate(value.y) &&
+    isCanvasTimestamp(value.createdAtMs)
+  )
+}
+
 export function parseTaskWorkerRequest(
   value: unknown,
 ): TaskWorkerRequest | null {
@@ -256,6 +349,7 @@ export function parseTaskWorkerRequest(
     case 'task.listTrashed':
     case 'project.list':
     case 'tag.list':
+    case 'canvas.list':
     case 'shutdown':
       return { requestId: value.requestId, type: value.type }
     case 'task.create':
@@ -387,6 +481,63 @@ export function parseTaskWorkerRequest(
             requestId: value.requestId,
             type: value.type,
             input: value.input as RenameTagInput,
+          }
+        : null
+    case 'canvas.create':
+      return isCreateCanvasInput(value.input)
+        ? { requestId: value.requestId, type: value.type, input: value.input }
+        : null
+    case 'canvas.get':
+      return isCanonicalCanvasId(value.id)
+        ? { requestId: value.requestId, type: value.type, id: value.id }
+        : null
+    case 'canvas.rename':
+      return isCanvasUpdateBase(value.input) &&
+        isNonEmptyCanvasTitle(value.input.title)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input as unknown as RenameCanvasInput,
+          }
+        : null
+    case 'canvas.updateViewport':
+      return isCanvasUpdateBase(value.input) &&
+        isCanvasViewport(value.input.viewport)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input as unknown as UpdateCanvasViewportInput,
+          }
+        : null
+    case 'canvas.node.createText':
+      return isCreateTextNodeInput(value.input)
+        ? { requestId: value.requestId, type: value.type, input: value.input }
+        : null
+    case 'canvas.node.list':
+      return isCanonicalCanvasId(value.canvasId)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            canvasId: value.canvasId,
+          }
+        : null
+    case 'canvas.node.updateText':
+      return isCanvasUpdateBase(value.input) &&
+        isTextNodeContent(value.input.content)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input as unknown as UpdateTextNodeInput,
+          }
+        : null
+    case 'canvas.node.move':
+      return isCanvasUpdateBase(value.input) &&
+        isCanvasCoordinate(value.input.x) &&
+        isCanvasCoordinate(value.input.y)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input as unknown as MoveCanvasNodeInput,
           }
         : null
     default:

@@ -7,3 +7,4 @@ export {
 export type { WebPersistenceCapability } from './taskWorkerProtocol'
 export { WebProjectRepository } from './WebProjectRepository'
 export { WebTagRepository } from './WebTagRepository'
+export { WebCanvasRepository } from './WebCanvasRepository'

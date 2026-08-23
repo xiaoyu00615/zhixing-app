@@ -33,6 +33,7 @@ import {
 } from '@/adapters/web/taskWorkerProtocol'
 import { WebProjectRepository } from '@/adapters/web/WebProjectRepository'
 import { WebTagRepository } from '@/adapters/web/WebTagRepository'
+import { WebCanvasRepository } from '@/adapters/web/WebCanvasRepository'
 
 function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
   if (!isRecord(value)) {
@@ -367,6 +368,7 @@ export type OpenWebTaskRepositoryResult =
       readonly repository: WebTaskRepository
       readonly projectRepository: import('@/project/repository').ProjectRepository
       readonly tagRepository: import('@/tag/repository').TagRepository
+      readonly canvasRepository: import('@/canvas/repository').CanvasRepository
       readonly dispose: () => Promise<void>
     }
   | {
@@ -420,6 +422,7 @@ export async function openWebTaskRepository(
       repository: new WebTaskRepository(client),
       projectRepository: new WebProjectRepository(client),
       tagRepository: new WebTagRepository(client),
+      canvasRepository: new WebCanvasRepository(client),
       dispose: () => client.shutdown(),
     }
   } catch {

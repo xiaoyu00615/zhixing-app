@@ -205,6 +205,48 @@ async function handleRequest(value: unknown): Promise<void> {
       case 'tag.rename':
         success(request.requestId, state.database.renameTag(request.input))
         return
+      case 'canvas.create':
+        success(request.requestId, state.database.createCanvas(request.input))
+        return
+      case 'canvas.list':
+        success(request.requestId, state.database.listCanvases())
+        return
+      case 'canvas.get':
+        success(request.requestId, state.database.getCanvas(request.id))
+        return
+      case 'canvas.rename':
+        success(request.requestId, state.database.renameCanvas(request.input))
+        return
+      case 'canvas.updateViewport':
+        success(
+          request.requestId,
+          state.database.updateCanvasViewport(request.input),
+        )
+        return
+      case 'canvas.node.createText':
+        success(
+          request.requestId,
+          state.database.createTextNode(request.input),
+        )
+        return
+      case 'canvas.node.list':
+        success(
+          request.requestId,
+          state.database.listCanvasNodes(request.canvasId),
+        )
+        return
+      case 'canvas.node.updateText':
+        success(
+          request.requestId,
+          state.database.updateTextNode(request.input),
+        )
+        return
+      case 'canvas.node.move':
+        success(
+          request.requestId,
+          state.database.moveCanvasNode(request.input),
+        )
+        return
     }
   } catch (error: unknown) {
     failure(

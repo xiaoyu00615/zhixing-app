@@ -10,6 +10,7 @@ import { Navigate, Route, Routes } from "react-router"
 import { TodayPage } from "@/pages/TodayPage"
 import { TasksPage } from "@/pages/TasksPage"
 import { CanvasPage } from "@/pages/CanvasPage"
+import { CanvasEditorPage } from "@/pages/CanvasEditorPage"
 import { DiaryPage } from "@/pages/DiaryPage"
 import { NotesPage } from "@/pages/NotesPage"
 import { SearchPage } from "@/pages/SearchPage"
@@ -34,6 +35,7 @@ export function AppRoutes() {
       <Route path={PATHS.TODAY} element={<TodayPage />} />
       <Route path={PATHS.TASKS} element={<TasksPage />} />
       <Route path={PATHS.CANVAS} element={<CanvasPage />} />
+      <Route path={`${PATHS.CANVAS}/:canvasId`} element={<CanvasEditorPage />} />
       <Route path={PATHS.DIARY} element={<DiaryPage />} />
       <Route path={PATHS.NOTES} element={<NotesPage />} />
       <Route path={PATHS.SEARCH} element={<SearchPage />} />

@@ -539,10 +539,16 @@ describe('Web migrations', () => {
         checksumSha256: await sha256Hex(WEB_MIGRATIONS[4]?.sql ?? ''),
         appliedAtMs: 123,
       },
+      {
+        version: 6,
+        id: '0006_add_canvas_core',
+        checksumSha256: await sha256Hex(WEB_MIGRATIONS[5]?.sql ?? ''),
+        appliedAtMs: 123,
+      },
     ])
   })
 
-  test('upgrades an exact v1 prefix and is idempotent after v5', async () => {
+  test('upgrades an exact v1 prefix and is idempotent after v6', async () => {
     const store = new FakeMigrationStore()
     await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 1), () => 123)
     expect(store.history.map((row) => row.version)).toEqual([1])
@@ -552,15 +558,15 @@ describe('Web migrations', () => {
     expect(store.executedSql).toEqual(
       WEB_MIGRATIONS.map((migration) => migration.sql),
     )
-    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5])
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6])
   })
 
-  test('upgrades an exact v2 prefix through soft-delete migration 5', async () => {
+  test('upgrades an exact v2 prefix through Canvas migration 6', async () => {
     const store = new FakeMigrationStore()
     await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 2), () => 123)
     expect(store.history.map((row) => row.version)).toEqual([1, 2])
     await runWebMigrations(store, WEB_MIGRATIONS, () => 456)
-    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5])
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6])
     expect(store.history[2]).toMatchObject({
       id: '0003_add_task_projects',
       appliedAtMs: 456,
@@ -573,13 +579,17 @@ describe('Web migrations', () => {
       id: '0005_add_task_soft_delete',
       appliedAtMs: 456,
     })
+    expect(store.history[5]).toMatchObject({
+      id: '0006_add_canvas_core',
+      appliedAtMs: 456,
+    })
   })
 
-  test('upgrades an exact v3 prefix through soft-delete migration 5', async () => {
+  test('upgrades an exact v3 prefix through Canvas migration 6', async () => {
     const store = new FakeMigrationStore()
     await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 3), () => 123)
     await runWebMigrations(store, WEB_MIGRATIONS, () => 456)
-    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5])
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6])
     expect(store.history[3]).toMatchObject({
       id: '0004_add_task_tags',
       appliedAtMs: 456,
@@ -590,17 +600,29 @@ describe('Web migrations', () => {
     })
   })
 
-  test('upgrades an exact v4 prefix to soft-delete migration 5', async () => {
+  test('upgrades an exact v4 prefix through Canvas migration 6', async () => {
     const store = new FakeMigrationStore()
     await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 4), () => 123)
     await runWebMigrations(store, WEB_MIGRATIONS, () => 456)
 
-    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5])
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6])
     expect(store.history[4]).toMatchObject({
       id: '0005_add_task_soft_delete',
       appliedAtMs: 456,
     })
     expect(store.executedSql[4]).toBe(WEB_MIGRATIONS[4]?.sql)
+  })
+
+  test('upgrades an exact v5 prefix with only Canvas migration 6', async () => {
+    const store = new FakeMigrationStore()
+    await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 5), () => 123)
+    await runWebMigrations(store, WEB_MIGRATIONS, () => 456)
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6])
+    expect(store.history[5]).toMatchObject({
+      id: '0006_add_canvas_core',
+      appliedAtMs: 456,
+    })
+    expect(store.executedSql[5]).toBe(WEB_MIGRATIONS[5]?.sql)
   })
 
   test('fails closed on id and checksum mismatch', async () => {

@@ -15,6 +15,14 @@ import type {
   RenameProjectInput,
 } from '@/project/repository'
 import type { CreateTagInput, RenameTagInput } from '@/tag/repository'
+import type {
+  CreateCanvasInput,
+  CreateTextNodeInput,
+  MoveCanvasNodeInput,
+  RenameCanvasInput,
+  UpdateCanvasViewportInput,
+  UpdateTextNodeInput,
+} from '@/canvas/repository'
 import {
   parseTaskWorkerResponse,
   parseWebPersistenceCapability,
@@ -238,6 +246,70 @@ export class TaskWorkerClient {
     return this.send((requestId) => ({
       requestId,
       type: 'tag.rename',
+      input,
+    }))
+  }
+
+  createCanvas(input: CreateCanvasInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.create',
+      input,
+    }))
+  }
+
+  listCanvases(): Promise<unknown> {
+    return this.send((requestId) => ({ requestId, type: 'canvas.list' }))
+  }
+
+  getCanvas(id: string): Promise<unknown> {
+    return this.send((requestId) => ({ requestId, type: 'canvas.get', id }))
+  }
+
+  renameCanvas(input: RenameCanvasInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.rename',
+      input,
+    }))
+  }
+
+  updateCanvasViewport(input: UpdateCanvasViewportInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.updateViewport',
+      input,
+    }))
+  }
+
+  createTextNode(input: CreateTextNodeInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.node.createText',
+      input,
+    }))
+  }
+
+  listCanvasNodes(canvasId: string): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.node.list',
+      canvasId,
+    }))
+  }
+
+  updateTextNode(input: UpdateTextNodeInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.node.updateText',
+      input,
+    }))
+  }
+
+  moveCanvasNode(input: MoveCanvasNodeInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.node.move',
       input,
     }))
   }

@@ -30,6 +30,24 @@ import type {
 import { isNonEmptyTagName, type Tag } from '@/tag/model'
 import type { CreateTagInput, RenameTagInput } from '@/tag/repository'
 import {
+  isCanonicalCanvasId,
+  isCanvasCoordinate,
+  isCanvasViewport,
+  isNonEmptyCanvasTitle,
+  parseCanvasViewportJson,
+  parseTextNodeContentJson,
+  type Canvas,
+  type CanvasNode,
+} from '@/canvas/model'
+import type {
+  CreateCanvasInput,
+  CreateTextNodeInput,
+  MoveCanvasNodeInput,
+  RenameCanvasInput,
+  UpdateCanvasViewportInput,
+  UpdateTextNodeInput,
+} from '@/canvas/repository'
+import {
   runWebMigrations,
   SqliteWebMigrationStore,
 } from '@/adapters/web/webMigrations'
@@ -49,6 +67,63 @@ const TASK_COLUMNS = `id, title, status, created_at_ms, updated_at_ms,
                       deleted_at_ms`
 const PROJECT_COLUMNS = 'id, name, created_at_ms, updated_at_ms'
 const TAG_COLUMNS = 'id, name, created_at_ms, updated_at_ms'
+const CANVAS_COLUMNS = 'id, title, viewport_json, created_at_ms, updated_at_ms'
+const CANVAS_NODE_COLUMNS = `id, canvas_id, type, content_json, x, y,
+                             created_at_ms, updated_at_ms`
+
+function parseCanvasRow(row: Record<string, unknown> | undefined): Canvas | null {
+  if (row === undefined) return null
+  const {
+    id,
+    title,
+    viewport_json: viewportJson,
+    created_at_ms: createdAtMs,
+    updated_at_ms: updatedAtMs,
+  } = row
+  const viewport = parseCanvasViewportJson(viewportJson)
+  if (
+    !isCanonicalCanvasId(id) ||
+    !isNonEmptyCanvasTitle(title) ||
+    viewport === null ||
+    !isNonNegativeSafeIntegerMilliseconds(createdAtMs) ||
+    !isNonNegativeSafeIntegerMilliseconds(updatedAtMs) ||
+    updatedAtMs < createdAtMs
+  ) {
+    throw new TaskDatabaseError('PERSISTENCE_FAILED')
+  }
+  return { id, title, viewport, createdAtMs, updatedAtMs }
+}
+
+function parseCanvasNodeRow(
+  row: Record<string, unknown> | undefined,
+): CanvasNode | null {
+  if (row === undefined) return null
+  const {
+    id,
+    canvas_id: canvasId,
+    type,
+    content_json: contentJson,
+    x,
+    y,
+    created_at_ms: createdAtMs,
+    updated_at_ms: updatedAtMs,
+  } = row
+  const content = parseTextNodeContentJson(contentJson)
+  if (
+    !isCanonicalCanvasId(id) ||
+    !isCanonicalCanvasId(canvasId) ||
+    type !== 'text' ||
+    content === null ||
+    !isCanvasCoordinate(x) ||
+    !isCanvasCoordinate(y) ||
+    !isNonNegativeSafeIntegerMilliseconds(createdAtMs) ||
+    !isNonNegativeSafeIntegerMilliseconds(updatedAtMs) ||
+    updatedAtMs < createdAtMs
+  ) {
+    throw new TaskDatabaseError('PERSISTENCE_FAILED')
+  }
+  return { id, canvasId, type, content, x, y, createdAtMs, updatedAtMs }
+}
 
 function parseTaskRow(row: Record<string, unknown> | undefined): Task | null {
   if (row === undefined) {
@@ -540,6 +615,202 @@ export class WebTaskDatabase {
     }
   }
 
+  createCanvas(input: CreateCanvasInput): Canvas {
+    this.validateCanvasInput(
+      input.id,
+      input.title,
+      input.viewport,
+      input.createdAtMs,
+    )
+    try {
+      this.#database.exec({
+        sql: `INSERT INTO canvases
+              (id, title, viewport_json, created_at_ms, updated_at_ms)
+              VALUES (?, ?, ?, ?, ?)`,
+        bind: [
+          input.id,
+          input.title,
+          JSON.stringify(input.viewport),
+          input.createdAtMs,
+          input.createdAtMs,
+        ],
+      })
+      return this.requireCanvas(input.id)
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  listCanvases(): readonly Canvas[] {
+    try {
+      return this.#database
+        .selectObjects(
+          `SELECT ${CANVAS_COLUMNS} FROM canvases
+           ORDER BY updated_at_ms DESC, id ASC`,
+        )
+        .map((row) => {
+          const canvas = parseCanvasRow(row)
+          if (canvas === null) throw new TaskDatabaseError('PERSISTENCE_FAILED')
+          return canvas
+        })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  getCanvas(id: string): Canvas {
+    if (!isCanonicalCanvasId(id)) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    return this.requireCanvas(id)
+  }
+
+  renameCanvas(input: RenameCanvasInput): Canvas {
+    this.validateCanvasUpdate(input.id, input.updatedAtMs)
+    if (!isNonEmptyCanvasTitle(input.title)) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    try {
+      this.#database.exec({
+        sql: 'UPDATE canvases SET title = ?, updated_at_ms = ? WHERE id = ?',
+        bind: [input.title, input.updatedAtMs, input.id],
+      })
+      if (this.#database.changes() !== 1) {
+        throw new TaskDatabaseError('NOT_FOUND')
+      }
+      return this.requireCanvas(input.id)
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  updateCanvasViewport(input: UpdateCanvasViewportInput): Canvas {
+    this.validateCanvasUpdate(input.id, input.updatedAtMs)
+    if (!isCanvasViewport(input.viewport)) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    try {
+      this.#database.exec({
+        sql: `UPDATE canvases SET viewport_json = ?, updated_at_ms = ?
+              WHERE id = ?`,
+        bind: [JSON.stringify(input.viewport), input.updatedAtMs, input.id],
+      })
+      if (this.#database.changes() !== 1) {
+        throw new TaskDatabaseError('NOT_FOUND')
+      }
+      return this.requireCanvas(input.id)
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  createTextNode(input: CreateTextNodeInput): CanvasNode {
+    this.validateNodeInput(
+      input.id,
+      input.canvasId,
+      input.x,
+      input.y,
+      input.createdAtMs,
+    )
+    if (
+      input.content.type !== 'text' ||
+      typeof input.content.text !== 'string'
+    ) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    try {
+      return this.#database.transaction(() => {
+        this.requireCanvas(input.canvasId)
+        this.#database.exec({
+          sql: `INSERT INTO canvas_nodes
+                (id, canvas_id, type, content_json, x, y,
+                 created_at_ms, updated_at_ms)
+                VALUES (?, ?, 'text', ?, ?, ?, ?, ?)`,
+          bind: [
+            input.id,
+            input.canvasId,
+            JSON.stringify(input.content),
+            input.x,
+            input.y,
+            input.createdAtMs,
+            input.createdAtMs,
+          ],
+        })
+        return this.requireCanvasNode(input.id)
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  listCanvasNodes(canvasId: string): readonly CanvasNode[] {
+    if (!isCanonicalCanvasId(canvasId)) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    try {
+      this.requireCanvas(canvasId)
+      return this.#database
+        .selectObjects(
+          `SELECT ${CANVAS_NODE_COLUMNS} FROM canvas_nodes
+           WHERE canvas_id = ? ORDER BY created_at_ms ASC, id ASC`,
+          [canvasId],
+        )
+        .map((row) => {
+          const node = parseCanvasNodeRow(row)
+          if (node === null) throw new TaskDatabaseError('PERSISTENCE_FAILED')
+          return node
+        })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  updateTextNode(input: UpdateTextNodeInput): CanvasNode {
+    this.validateCanvasUpdate(input.id, input.updatedAtMs)
+    if (
+      input.content.type !== 'text' ||
+      typeof input.content.text !== 'string'
+    ) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    return this.updateCanvasNode(
+      input.id,
+      'content_json',
+      JSON.stringify(input.content),
+      input.updatedAtMs,
+    )
+  }
+
+  moveCanvasNode(input: MoveCanvasNodeInput): CanvasNode {
+    this.validateCanvasUpdate(input.id, input.updatedAtMs)
+    if (!isCanvasCoordinate(input.x) || !isCanvasCoordinate(input.y)) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    try {
+      return this.#database.transaction(() => {
+        this.requireCanvasNode(input.id)
+        this.#database.exec({
+          sql: `UPDATE canvas_nodes SET x = ?, y = ?, updated_at_ms = ?
+                WHERE id = ?`,
+          bind: [input.x, input.y, input.updatedAtMs, input.id],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+        return this.requireCanvasNode(input.id)
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
   private updatePlanningField(
     id: string,
     column: 'is_important' | 'is_urgent' | 'due_date' | 'project_id',
@@ -696,6 +967,96 @@ export class WebTaskDatabase {
     )
   }
 
+  private requireCanvas(id: string): Canvas {
+    const canvas = parseCanvasRow(
+      this.#database.selectObject(
+        `SELECT ${CANVAS_COLUMNS} FROM canvases WHERE id = ?`,
+        [id],
+      ),
+    )
+    if (canvas === null) throw new TaskDatabaseError('NOT_FOUND')
+    return canvas
+  }
+
+  private requireCanvasNode(id: string): CanvasNode {
+    const node = parseCanvasNodeRow(
+      this.#database.selectObject(
+        `SELECT ${CANVAS_NODE_COLUMNS} FROM canvas_nodes WHERE id = ?`,
+        [id],
+      ),
+    )
+    if (node === null) throw new TaskDatabaseError('NOT_FOUND')
+    return node
+  }
+
+  private updateCanvasNode(
+    id: string,
+    column: 'content_json',
+    value: string,
+    updatedAtMs: number,
+  ): CanvasNode {
+    try {
+      return this.#database.transaction(() => {
+        this.requireCanvasNode(id)
+        this.#database.exec({
+          sql: `UPDATE canvas_nodes SET ${column} = ?, updated_at_ms = ?
+                WHERE id = ?`,
+          bind: [value, updatedAtMs, id],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+        return this.requireCanvasNode(id)
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  private validateCanvasInput(
+    id: string,
+    title: string,
+    viewport: unknown,
+    timestamp: number,
+  ): void {
+    if (
+      !isCanonicalCanvasId(id) ||
+      !isNonEmptyCanvasTitle(title) ||
+      !isCanvasViewport(viewport) ||
+      !isNonNegativeSafeIntegerMilliseconds(timestamp)
+    ) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  private validateCanvasUpdate(id: string, timestamp: number): void {
+    if (
+      !isCanonicalCanvasId(id) ||
+      !isNonNegativeSafeIntegerMilliseconds(timestamp)
+    ) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  private validateNodeInput(
+    id: string,
+    canvasId: string,
+    x: number,
+    y: number,
+    timestamp: number,
+  ): void {
+    if (
+      !isCanonicalCanvasId(id) ||
+      !isCanonicalCanvasId(canvasId) ||
+      !isCanvasCoordinate(x) ||
+      !isCanvasCoordinate(y) ||
+      !isNonNegativeSafeIntegerMilliseconds(timestamp)
+    ) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
   private validateProjectInput(
     id: string,
     name: string,
@@ -735,11 +1096,19 @@ export class WebTaskDatabase {
     const taskTagsTableCount = this.#database.selectValue(
       `SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'task_tags'`,
     )
+    const canvasesTableCount = this.#database.selectValue(
+      `SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'canvases'`,
+    )
+    const canvasNodesTableCount = this.#database.selectValue(
+      `SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'canvas_nodes'`,
+    )
     if (
       tasksTableCount !== 1 ||
       projectsTableCount !== 1 ||
       tagsTableCount !== 1 ||
       taskTagsTableCount !== 1 ||
+      canvasesTableCount !== 1 ||
+      canvasNodesTableCount !== 1 ||
       quickCheck !== 'ok' ||
       foreignKeys !== 1
     ) {

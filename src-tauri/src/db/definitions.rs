@@ -14,6 +14,7 @@ const ADD_TASK_PROJECTS_SQL: &str = include_str!("../../migrations/0003_add_task
 const ADD_TASK_TAGS_SQL: &str = include_str!("../../migrations/0004_add_task_tags.sql");
 const ADD_TASK_SOFT_DELETE_SQL: &str =
     include_str!("../../migrations/0005_add_task_soft_delete.sql");
+const ADD_CANVAS_CORE_SQL: &str = include_str!("../../migrations/0006_add_canvas_core.sql");
 
 pub const MIGRATIONS: &[MigrationDefinition] = &[
     MigrationDefinition {
@@ -44,6 +45,12 @@ pub const MIGRATIONS: &[MigrationDefinition] = &[
         version: 5,
         id: "0005_add_task_soft_delete",
         sql_up: ADD_TASK_SOFT_DELETE_SQL,
+        high_risk: false,
+    },
+    MigrationDefinition {
+        version: 6,
+        id: "0006_add_canvas_core",
+        sql_up: ADD_CANVAS_CORE_SQL,
         high_risk: false,
     },
 ];
