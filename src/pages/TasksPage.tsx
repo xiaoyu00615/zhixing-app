@@ -1,4 +1,4 @@
-import { ListTodo, Plus, RotateCcw, X } from 'lucide-react'
+import { LayoutGrid, ListTodo, Plus, RotateCcw, X } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import {
@@ -6,6 +6,7 @@ import {
   RenameTaskDialog,
 } from '@/components/tasks/TaskDialogs'
 import { TaskList, type TaskStatusAction } from '@/components/tasks/TaskList'
+import { TaskQuadrantView } from '@/components/tasks/TaskQuadrantView'
 import { Button } from '@/components/ui/button'
 import { localDateFromDate, type LocalDate, type Task } from '@/task/model'
 import { openTaskRuntime } from '@/task/runtime'
@@ -68,6 +69,7 @@ export function TasksPage({
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
   const [service, setService] = useState<TaskService | null>(null)
   const [tasks, setTasks] = useState<readonly Task[]>([])
+  const [view, setView] = useState<'list' | 'quadrant'>('list')
   const [feedback, setFeedback] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
   const [createTitle, setCreateTitle] = useState('')
@@ -402,6 +404,41 @@ export function TasksPage({
         </div>
       )}
 
+      {phase === 'ready' && (
+        <div
+          aria-label="任务视图"
+          className="inline-flex rounded-md border border-border bg-surface p-1 shadow-sm"
+          role="tablist"
+        >
+          <Button
+            aria-controls="task-list-panel"
+            aria-selected={view === 'list'}
+            id="task-list-tab"
+            onClick={() => setView('list')}
+            role="tab"
+            size="sm"
+            type="button"
+            variant={view === 'list' ? 'secondary' : 'ghost'}
+          >
+            <ListTodo data-icon="inline-start" />
+            列表
+          </Button>
+          <Button
+            aria-controls="task-quadrant-panel"
+            aria-selected={view === 'quadrant'}
+            id="task-quadrant-tab"
+            onClick={() => setView('quadrant')}
+            role="tab"
+            size="sm"
+            type="button"
+            variant={view === 'quadrant' ? 'secondary' : 'ghost'}
+          >
+            <LayoutGrid data-icon="inline-start" />
+            四象限
+          </Button>
+        </div>
+      )}
+
       {phase === 'loading' && <LoadingState />}
 
       {phase === 'error' && (
@@ -425,38 +462,80 @@ export function TasksPage({
         </div>
       )}
 
-      {phase === 'ready' && tasks.length === 0 && (
-        <EmptyState onCreate={openCreateDialog} />
+      {phase === 'ready' && view === 'list' && (
+        <div aria-labelledby="task-list-tab" id="task-list-panel" role="tabpanel">
+          {tasks.length === 0 ? (
+            <EmptyState onCreate={openCreateDialog} />
+          ) : (
+            <TaskList
+              onClearDeadline={(task) =>
+                void runPlanningAction(task, (currentService) =>
+                  currentService.clearTaskDeadline(task.id),
+                )
+              }
+              onRename={openRenameDialog}
+              onSetDeadline={(task, dueDate) =>
+                void runPlanningAction(task, (currentService) =>
+                  currentService.setTaskDeadline(task.id, dueDate),
+                )
+              }
+              onSetImportance={(task, isImportant) =>
+                void runPlanningAction(task, (currentService) =>
+                  currentService.setTaskImportance(task.id, isImportant),
+                )
+              }
+              onSetUrgency={(task, isUrgent) =>
+                void runPlanningAction(task, (currentService) =>
+                  currentService.setTaskUrgency(task.id, isUrgent),
+                )
+              }
+              onStatusAction={(task, action) =>
+                void runStatusAction(task, action)
+              }
+              pendingTaskIds={pendingTaskIds}
+              tasks={tasks}
+              today={today}
+            />
+          )}
+        </div>
       )}
 
-      {phase === 'ready' && tasks.length > 0 && (
-        <TaskList
-          onClearDeadline={(task) =>
-            void runPlanningAction(task, (currentService) =>
-              currentService.clearTaskDeadline(task.id),
-            )
-          }
-          onRename={openRenameDialog}
-          onSetDeadline={(task, dueDate) =>
-            void runPlanningAction(task, (currentService) =>
-              currentService.setTaskDeadline(task.id, dueDate),
-            )
-          }
-          onSetImportance={(task, isImportant) =>
-            void runPlanningAction(task, (currentService) =>
-              currentService.setTaskImportance(task.id, isImportant),
-            )
-          }
-          onSetUrgency={(task, isUrgent) =>
-            void runPlanningAction(task, (currentService) =>
-              currentService.setTaskUrgency(task.id, isUrgent),
-            )
-          }
-          onStatusAction={(task, action) => void runStatusAction(task, action)}
-          pendingTaskIds={pendingTaskIds}
-          tasks={tasks}
-          today={today}
-        />
+      {phase === 'ready' && view === 'quadrant' && (
+        <div
+          aria-labelledby="task-quadrant-tab"
+          id="task-quadrant-panel"
+          role="tabpanel"
+        >
+          <TaskQuadrantView
+            onClearDeadline={(task) =>
+              void runPlanningAction(task, (currentService) =>
+                currentService.clearTaskDeadline(task.id),
+              )
+            }
+            onCreate={openCreateDialog}
+            onSetDeadline={(task, dueDate) =>
+              void runPlanningAction(task, (currentService) =>
+                currentService.setTaskDeadline(task.id, dueDate),
+              )
+            }
+            onSetImportance={(task, isImportant) =>
+              void runPlanningAction(task, (currentService) =>
+                currentService.setTaskImportance(task.id, isImportant),
+              )
+            }
+            onSetUrgency={(task, isUrgent) =>
+              void runPlanningAction(task, (currentService) =>
+                currentService.setTaskUrgency(task.id, isUrgent),
+              )
+            }
+            onStatusAction={(task, action) =>
+              void runStatusAction(task, action)
+            }
+            pendingTaskIds={pendingTaskIds}
+            tasks={tasks}
+            today={today}
+          />
+        </div>
       )}
 
       <CreateTaskDialog

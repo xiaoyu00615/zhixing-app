@@ -29,6 +29,19 @@ export interface Task {
   readonly dueDate: LocalDate | null
 }
 
+export const TASK_QUADRANTS = [
+  'importantUrgent',
+  'importantNotUrgent',
+  'notImportantUrgent',
+  'notImportantNotUrgent',
+] as const
+
+export type TaskQuadrant = (typeof TASK_QUADRANTS)[number]
+
+export type TasksByQuadrant = Readonly<
+  Record<TaskQuadrant, readonly Task[]>
+>
+
 const CANONICAL_LOWERCASE_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
@@ -118,6 +131,42 @@ export function isTaskOverdue(task: Task, today: LocalDate): boolean {
 
 export function isTaskEffectivelyUrgent(task: Task, today: LocalDate): boolean {
   return task.isUrgent || isTaskOverdue(task, today)
+}
+
+export function getTaskQuadrant(
+  task: Task,
+  today: LocalDate,
+): TaskQuadrant | null {
+  if (task.status !== 'todo' && task.status !== 'doing') {
+    return null
+  }
+
+  const effectivelyUrgent = isTaskEffectivelyUrgent(task, today)
+  if (task.isImportant) {
+    return effectivelyUrgent ? 'importantUrgent' : 'importantNotUrgent'
+  }
+  return effectivelyUrgent ? 'notImportantUrgent' : 'notImportantNotUrgent'
+}
+
+export function groupTasksByQuadrant(
+  tasks: readonly Task[],
+  today: LocalDate,
+): TasksByQuadrant {
+  const groups: Record<TaskQuadrant, Task[]> = {
+    importantUrgent: [],
+    importantNotUrgent: [],
+    notImportantUrgent: [],
+    notImportantNotUrgent: [],
+  }
+
+  for (const task of tasks) {
+    const quadrant = getTaskQuadrant(task, today)
+    if (quadrant !== null) {
+      groups[quadrant].push(task)
+    }
+  }
+
+  return groups
 }
 
 /**

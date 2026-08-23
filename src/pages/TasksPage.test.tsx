@@ -27,6 +27,19 @@ const TASK: Task = {
   dueDate: null,
 }
 
+function taskFixture(
+  id: number,
+  title: string,
+  fields: Partial<Task> = {},
+): Task {
+  return {
+    ...TASK,
+    id: `00000000-0000-4000-8000-${id.toString().padStart(12, '0')}`,
+    title,
+    ...fields,
+  }
+}
+
 function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
   const createTask = vi.fn<TaskService['createTask']>()
   createTask.mockResolvedValue(TASK)
@@ -650,6 +663,262 @@ describe('TasksPage planning actions and derived presentation', () => {
 
     act(() => {
       changing.resolve({ ...TASK, isImportant: true })
+    })
+    await waitFor(() => expect(fake.listTasks).toHaveBeenCalledTimes(2))
+  })
+})
+
+describe('TasksPage quadrant view', () => {
+  test('defaults to list and switches to correctly grouped quadrants', async () => {
+    const user = userEvent.setup()
+    const q1Overdue = taskFixture(11, '逾期的重要任务', {
+      isImportant: true,
+      isUrgent: false,
+      dueDate: '2026-08-22',
+    })
+    const q2 = taskFixture(12, '重要的计划任务', { isImportant: true })
+    const q3 = taskFixture(13, '紧急的小任务', { isUrgent: true })
+    const q4 = taskFixture(14, '稍后处理的任务', { status: 'doing' })
+    const completed = taskFixture(15, '已经完成的任务', {
+      status: 'completed',
+      isImportant: true,
+      isUrgent: true,
+    })
+    const cancelled = taskFixture(16, '已经取消的任务', {
+      status: 'cancelled',
+    })
+    const fake = createServiceDouble([
+      q1Overdue,
+      q2,
+      q3,
+      q4,
+      completed,
+      cancelled,
+    ])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+
+    expect(
+      await screen.findByRole('list', { name: '任务列表' }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: '列表' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+    expect(
+      screen.queryByRole('region', { name: '任务四象限' }),
+    ).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('tab', { name: '四象限' }))
+
+    const board = screen.getByRole('region', { name: '任务四象限' })
+    expect(screen.getByRole('tab', { name: '四象限' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+    for (const [title, taskTitle] of [
+      ['重要且紧急', q1Overdue.title],
+      ['重要不紧急', q2.title],
+      ['不重要但紧急', q3.title],
+      ['不重要不紧急', q4.title],
+    ] as const) {
+      const quadrant = within(board).getByRole('region', { name: title })
+      expect(within(quadrant).getByText(taskTitle)).toBeInTheDocument()
+      expect(
+        within(quadrant).getByLabelText(`${title}任务数量 1`),
+      ).toBeInTheDocument()
+    }
+    const urgentQuadrant = within(board).getByRole('region', {
+      name: '重要且紧急',
+    })
+    expect(within(urgentQuadrant).getByText('已逾期')).toBeInTheDocument()
+    expect(
+      within(urgentQuadrant).getByText('紧急（逾期）'),
+    ).toBeInTheDocument()
+    expect(within(board).queryByText(completed.title)).not.toBeInTheDocument()
+    expect(within(board).queryByText(cancelled.title)).not.toBeInTheDocument()
+  })
+
+  test('keeps all quadrants visible when there are no active tasks', async () => {
+    const user = userEvent.setup()
+    const completed = taskFixture(21, '已完成', { status: 'completed' })
+    const cancelled = taskFixture(22, '已取消', { status: 'cancelled' })
+    const fake = createServiceDouble([completed, cancelled])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByRole('list', { name: '任务列表' })
+
+    await user.click(screen.getByRole('tab', { name: '四象限' }))
+
+    expect(
+      screen.getByText('当前没有待开始或进行中的任务'),
+    ).toBeInTheDocument()
+    expect(screen.getAllByText('暂无任务')).toHaveLength(4)
+    for (const title of [
+      '重要且紧急',
+      '重要不紧急',
+      '不重要但紧急',
+      '不重要不紧急',
+    ]) {
+      expect(screen.getByRole('region', { name: title })).toBeInTheDocument()
+      expect(
+        screen.getByLabelText(`${title}任务数量 0`),
+      ).toBeInTheDocument()
+    }
+  })
+
+  test.each([
+    {
+      label: 'importance',
+      buttonName: '设为重要',
+      method: 'setTaskImportance' as const,
+      value: true,
+      changed: { isImportant: true },
+      from: '不重要不紧急',
+      to: '重要不紧急',
+    },
+    {
+      label: 'base urgency',
+      buttonName: '设为基础紧急',
+      method: 'setTaskUrgency' as const,
+      value: true,
+      changed: { isUrgent: true },
+      from: '不重要不紧急',
+      to: '不重要但紧急',
+    },
+  ])(
+    'reloads and re-derives the quadrant after changing $label',
+    async ({ buttonName, method, value, changed, from, to }) => {
+      const user = userEvent.setup()
+      const task = taskFixture(31, '跨象限任务')
+      const changedTask = { ...task, ...changed, updatedAtMs: 200 }
+      const fake = createServiceDouble([task])
+      fake[method].mockResolvedValueOnce(changedTask)
+      fake.listTasks
+        .mockResolvedValueOnce([task])
+        .mockResolvedValueOnce([changedTask])
+      const { openRuntime } = resolvedRuntime(fake.service)
+      render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+      await screen.findByText(task.title)
+      await user.click(screen.getByRole('tab', { name: '四象限' }))
+
+      const source = screen.getByRole('region', { name: from })
+      expect(within(source).getByText(task.title)).toBeInTheDocument()
+      await user.click(
+        within(source).getByRole('button', {
+          name: `${buttonName}：${task.title}`,
+        }),
+      )
+
+      expect(fake[method]).toHaveBeenCalledWith(task.id, value)
+      await waitFor(() =>
+        expect(
+          within(screen.getByRole('region', { name: to })).getByText(
+            task.title,
+          ),
+        ).toBeInTheDocument(),
+      )
+      expect(
+        within(screen.getByRole('region', { name: from })).queryByText(
+          task.title,
+        ),
+      ).not.toBeInTheDocument()
+      expect(fake.listTasks).toHaveBeenCalledTimes(2)
+    },
+  )
+
+  test('reloads and moves a task when a deadline creates overdue urgency', async () => {
+    const task = taskFixture(41, '截止日期跨象限', { isImportant: true })
+    const overdue = {
+      ...task,
+      dueDate: '2026-08-22',
+      updatedAtMs: 200,
+    }
+    const fake = createServiceDouble([task])
+    fake.setTaskDeadline.mockResolvedValueOnce(overdue)
+    fake.listTasks
+      .mockResolvedValueOnce([task])
+      .mockResolvedValueOnce([overdue])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByText(task.title)
+    fireEvent.click(screen.getByRole('tab', { name: '四象限' }))
+
+    fireEvent.change(screen.getByLabelText(`任务截止日期：${task.title}`), {
+      target: { value: '2026-08-22' },
+    })
+
+    await waitFor(() =>
+      expect(
+        within(
+          screen.getByRole('region', { name: '重要且紧急' }),
+        ).getByText(task.title),
+      ).toBeInTheDocument(),
+    )
+    expect(fake.setTaskDeadline).toHaveBeenCalledWith(task.id, '2026-08-22')
+    expect(screen.getByText('紧急（逾期）')).toBeInTheDocument()
+    expect(fake.setTaskUrgency).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    { action: '完成', method: 'completeTask' as const, status: 'completed' },
+    { action: '取消', method: 'cancelTask' as const, status: 'cancelled' },
+  ] as const)(
+    '$action removes the refreshed task from all quadrants',
+    async ({ action, method, status }) => {
+      const user = userEvent.setup()
+      const task = taskFixture(51, `${action}后退出象限`)
+      const inactive = { ...task, status, updatedAtMs: 200 }
+      const fake = createServiceDouble([task])
+      fake[method].mockResolvedValueOnce(inactive)
+      fake.listTasks
+        .mockResolvedValueOnce([task])
+        .mockResolvedValueOnce([inactive])
+      const { openRuntime } = resolvedRuntime(fake.service)
+      render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+      await screen.findByText(task.title)
+      await user.click(screen.getByRole('tab', { name: '四象限' }))
+
+      await user.click(
+        screen.getByRole('button', { name: `${action}任务：${task.title}` }),
+      )
+
+      await waitFor(() =>
+        expect(screen.queryByText(task.title)).not.toBeInTheDocument(),
+      )
+      expect(fake[method]).toHaveBeenCalledWith(task.id)
+      expect(
+        screen.getByText('当前没有待开始或进行中的任务'),
+      ).toBeInTheDocument()
+      expect(fake.listTasks).toHaveBeenCalledTimes(2)
+    },
+  )
+
+  test('disables quadrant actions and prevents duplicate operations while pending', async () => {
+    const user = userEvent.setup()
+    const task = taskFixture(61, '防止重复操作')
+    const changed = { ...task, isImportant: true, updatedAtMs: 200 }
+    const changing = deferred<Task>()
+    const fake = createServiceDouble([task])
+    fake.setTaskImportance.mockReturnValueOnce(changing.promise)
+    fake.listTasks
+      .mockResolvedValueOnce([task])
+      .mockResolvedValueOnce([changed])
+    const { openRuntime } = resolvedRuntime(fake.service)
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByText(task.title)
+    await user.click(screen.getByRole('tab', { name: '四象限' }))
+
+    const button = screen.getByRole('button', {
+      name: `设为重要：${task.title}`,
+    })
+    await user.click(button)
+    expect(button).toBeDisabled()
+    await user.click(button)
+    expect(fake.setTaskImportance).toHaveBeenCalledOnce()
+
+    act(() => {
+      changing.resolve(changed)
     })
     await waitFor(() => expect(fake.listTasks).toHaveBeenCalledTimes(2))
   })
