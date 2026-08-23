@@ -316,6 +316,26 @@ export function filterTasks(
   return tasks.filter((task) => matchesTaskFilter(task, filter, today))
 }
 
+export function matchesTaskSearch(task: Task, query: string): boolean {
+  const normalizedQuery = query.trim().toLowerCase()
+  return (
+    normalizedQuery.length === 0 ||
+    task.title.toLowerCase().includes(normalizedQuery)
+  )
+}
+
+export function deriveVisibleTasks(
+  tasks: readonly Task[],
+  filter: TaskFilter,
+  query: string,
+  today: LocalDate,
+): readonly Task[] {
+  return tasks.filter(
+    (task) =>
+      matchesTaskSearch(task, query) && matchesTaskFilter(task, filter, today),
+  )
+}
+
 export function localMonthFromLocalDate(
   localDate: LocalDate,
 ): LocalMonth | null {

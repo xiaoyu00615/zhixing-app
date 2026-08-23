@@ -6,6 +6,7 @@ import {
   ListTodo,
   Plus,
   RotateCcw,
+  Search,
   X,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -23,9 +24,10 @@ import { TaskFilterBar } from '@/components/tasks/TaskFilterBar'
 import { ProjectDialog } from '@/components/tasks/ProjectDialogs'
 import { TagDialog } from '@/components/tasks/TagDialogs'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import {
   DEFAULT_TASK_FILTER,
-  filterTasks,
+  deriveVisibleTasks,
   localDateFromDate,
   type LocalDate,
   type Task,
@@ -102,6 +104,7 @@ export function TasksPage({
   const [projects, setProjects] = useState<readonly Project[]>([])
   const [tags, setTags] = useState<readonly Tag[]>([])
   const [filter, setFilter] = useState<TaskFilter>(DEFAULT_TASK_FILTER)
+  const [searchQuery, setSearchQuery] = useState('')
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null)
   const [view, setView] = useState<'list' | 'quadrant' | 'date' | 'calendar'>(
     'list',
@@ -206,7 +209,7 @@ export function TasksPage({
         setTasks(loadedTasks)
         setDetailTaskId((current) =>
           current === null ||
-          filterTasks(loadedTasks, filter, today).some(
+          deriveVisibleTasks(loadedTasks, filter, searchQuery, today).some(
             (task) => task.id === current,
           )
             ? current
@@ -214,7 +217,7 @@ export function TasksPage({
         )
       }
     },
-    [filter, today],
+    [filter, searchQuery, today],
   )
 
   const reloadProjects = useCallback(async (currentService: ProjectService) => {
@@ -527,16 +530,32 @@ export function TasksPage({
   }
 
   const visibleTasks = useMemo(
-    () => filterTasks(tasks, filter, today),
-    [filter, tasks, today],
+    () => deriveVisibleTasks(tasks, filter, searchQuery, today),
+    [filter, searchQuery, tasks, today],
   )
   const hasActiveFilter = Object.values(filter).some((value) => value !== 'all')
+  const hasActiveSearch = searchQuery.trim().length > 0
+  const hasActiveCriteria = hasActiveFilter || hasActiveSearch
+  const hasSearchEmptyState =
+    tasks.length > 0 && visibleTasks.length === 0 && hasActiveSearch
 
   function changeFilter(nextFilter: TaskFilter): void {
     setFilter(nextFilter)
     if (
       detailTaskId !== null &&
-      !filterTasks(tasks, nextFilter, today).some(
+      !deriveVisibleTasks(tasks, nextFilter, searchQuery, today).some(
+        (task) => task.id === detailTaskId,
+      )
+    ) {
+      setDetailTaskId(null)
+    }
+  }
+
+  function changeSearchQuery(nextQuery: string): void {
+    setSearchQuery(nextQuery)
+    if (
+      detailTaskId !== null &&
+      !deriveVisibleTasks(tasks, filter, nextQuery, today).some(
         (task) => task.id === detailTaskId,
       )
     ) {
@@ -634,7 +653,7 @@ export function TasksPage({
 
           <div className="flex items-center gap-3 pb-2.5">
             <span className="text-auxiliary text-foreground-secondary">
-              {!hasActiveFilter
+              {!hasActiveCriteria
                 ? `${tasks.length} 项任务`
                 : `${visibleTasks.length} / ${tasks.length} 项任务`}
             </span>
@@ -649,44 +668,99 @@ export function TasksPage({
       )}
 
       {phase === 'ready' && (
-        <TaskFilterBar
-          filter={filter}
-          onChange={changeFilter}
-          projects={projects}
-          tags={tags}
-          onCreateProject={() =>
-            setProjectDialog({
-              mode: 'create',
-              projectId: null,
-              name: '',
-              error: null,
-            })
-          }
-          onRenameProject={(project) =>
-            setProjectDialog({
-              mode: 'rename',
-              projectId: project.id,
-              name: project.name,
-              error: null,
-            })
-          }
-          onCreateTag={() =>
-            setTagDialog({
-              mode: 'create',
-              tagId: null,
-              name: '',
-              error: null,
-            })
-          }
-          onRenameTag={(tag) =>
-            setTagDialog({
-              mode: 'rename',
-              tagId: tag.id,
-              name: tag.name,
-              error: null,
-            })
-          }
-        />
+        <div className="flex flex-col gap-2.5 lg:flex-row lg:items-start">
+          <div className="relative w-full shrink-0 lg:w-72">
+            <Search
+              aria-hidden="true"
+              className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-foreground-tertiary"
+            />
+            <Input
+              aria-label="搜索任务"
+              className="bg-surface-secondary/35 pl-9 pr-9"
+              onChange={(event) => changeSearchQuery(event.target.value)}
+              placeholder="搜索任务"
+              role="searchbox"
+              type="text"
+              value={searchQuery}
+            />
+            {searchQuery.length > 0 && (
+              <Button
+                aria-label="清空任务搜索"
+                className="absolute right-1 top-1/2 size-7 -translate-y-1/2 text-foreground-secondary"
+                onClick={() => changeSearchQuery('')}
+                size="icon"
+                type="button"
+                variant="ghost"
+              >
+                <X aria-hidden="true" className="size-3.5" />
+              </Button>
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            <TaskFilterBar
+              filter={filter}
+              onChange={changeFilter}
+              projects={projects}
+              tags={tags}
+              onCreateProject={() =>
+                setProjectDialog({
+                  mode: 'create',
+                  projectId: null,
+                  name: '',
+                  error: null,
+                })
+              }
+              onRenameProject={(project) =>
+                setProjectDialog({
+                  mode: 'rename',
+                  projectId: project.id,
+                  name: project.name,
+                  error: null,
+                })
+              }
+              onCreateTag={() =>
+                setTagDialog({
+                  mode: 'create',
+                  tagId: null,
+                  name: '',
+                  error: null,
+                })
+              }
+              onRenameTag={(tag) =>
+                setTagDialog({
+                  mode: 'rename',
+                  tagId: tag.id,
+                  name: tag.name,
+                  error: null,
+                })
+              }
+            />
+          </div>
+        </div>
+      )}
+
+      {phase === 'ready' && hasSearchEmptyState && (
+        <div className="flex min-h-64 flex-col items-center justify-center rounded-lg border border-dashed border-border bg-surface-secondary/20 px-6 py-10 text-center">
+          <Search
+            aria-hidden="true"
+            className="mb-3 size-6 text-foreground-tertiary"
+          />
+          <h3 className="text-body font-semibold text-foreground">
+            没有找到匹配任务
+          </h3>
+          <p className="mt-1 text-sm text-foreground-secondary">
+            请尝试其他标题关键词，或清空当前搜索。
+          </p>
+          <Button
+            className="mt-4"
+            onClick={() => changeSearchQuery('')}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            清空搜索
+          </Button>
+        </div>
       )}
 
       {feedback !== null && (
@@ -721,7 +795,7 @@ export function TasksPage({
         </div>
       )}
 
-      {phase === 'ready' && view === 'list' && (
+      {phase === 'ready' && !hasSearchEmptyState && view === 'list' && (
         <div
           aria-labelledby="task-list-tab"
           id="task-list-panel"
@@ -790,7 +864,7 @@ export function TasksPage({
         </div>
       )}
 
-      {phase === 'ready' && view === 'quadrant' && (
+      {phase === 'ready' && !hasSearchEmptyState && view === 'quadrant' && (
         <div
           aria-labelledby="task-quadrant-tab"
           id="task-quadrant-panel"
@@ -831,7 +905,7 @@ export function TasksPage({
         </div>
       )}
 
-      {phase === 'ready' && view === 'date' && (
+      {phase === 'ready' && !hasSearchEmptyState && view === 'date' && (
         <div
           aria-labelledby="task-date-tab"
           id="task-date-panel"
@@ -873,7 +947,7 @@ export function TasksPage({
         </div>
       )}
 
-      {phase === 'ready' && view === 'calendar' && (
+      {phase === 'ready' && !hasSearchEmptyState && view === 'calendar' && (
         <div
           aria-labelledby="task-calendar-tab"
           id="task-calendar-panel"

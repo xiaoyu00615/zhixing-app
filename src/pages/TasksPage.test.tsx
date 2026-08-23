@@ -712,6 +712,151 @@ describe('TasksPage unified filters', () => {
   })
 })
 
+describe('TasksPage title search', () => {
+  test('searches titles, reports results, clears quickly, and shows a search empty state', async () => {
+    const user = userEvent.setup()
+    const release = taskFixture(321, 'Write Release Notes')
+    const chinese = taskFixture(322, '整理任务需求')
+    const unrelated = taskFixture(323, 'Review calendar')
+    const fake = createServiceDouble([release, chinese, unrelated])
+    const current = createRuntime(fake.service)
+    render(
+      <TasksPage
+        openRuntime={vi.fn(() => Promise.resolve(current.runtime))}
+        today="2026-08-23"
+      />,
+    )
+    await screen.findByText(release.title)
+
+    const search = screen.getByRole('searchbox', { name: '搜索任务' })
+    await user.type(search, '  RELEASE  ')
+    expect(screen.getByText(release.title)).toBeInTheDocument()
+    expect(screen.queryByText(chinese.title)).not.toBeInTheDocument()
+    expect(screen.getByText('1 / 3 项任务')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '清空任务搜索' }))
+    expect(screen.getByText(chinese.title)).toBeInTheDocument()
+    expect(screen.getByText('3 项任务')).toBeInTheDocument()
+
+    await user.type(search, '任务')
+    expect(screen.getByText(chinese.title)).toBeInTheDocument()
+    expect(screen.queryByText(release.title)).not.toBeInTheDocument()
+
+    await user.clear(search)
+    await user.type(search, '不存在的标题')
+    expect(screen.getByText('没有找到匹配任务')).toBeInTheDocument()
+    expect(
+      screen.getByText('请尝试其他标题关键词，或清空当前搜索。'),
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '清空搜索' }))
+    expect(screen.getByText(release.title)).toBeInTheDocument()
+    expect(screen.getByText(chinese.title)).toBeInTheDocument()
+    expect(screen.getByText(unrelated.title)).toBeInTheDocument()
+  })
+
+  test('combines search and filters once for list, quadrant, date, and calendar', async () => {
+    const user = userEvent.setup()
+    const matching = taskFixture(324, 'Launch Search Slice', {
+      status: 'doing',
+      isImportant: true,
+      dueDate: '2026-08-22',
+    })
+    const wrongStatus = taskFixture(325, 'Launch Search Draft', {
+      dueDate: '2026-08-22',
+    })
+    const wrongTitle = taskFixture(326, 'Prepare release', {
+      status: 'doing',
+      isImportant: true,
+      dueDate: '2026-08-22',
+    })
+    const fake = createServiceDouble([matching, wrongStatus, wrongTitle])
+    const current = createRuntime(fake.service)
+    render(
+      <TasksPage
+        openRuntime={vi.fn(() => Promise.resolve(current.runtime))}
+        today="2026-08-23"
+      />,
+    )
+    await screen.findByText(matching.title)
+
+    await user.type(
+      screen.getByRole('searchbox', { name: '搜索任务' }),
+      'launch',
+    )
+    await user.click(screen.getByRole('button', { name: '筛选' }))
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '筛选状态' }),
+      'doing',
+    )
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '筛选重要性' }),
+      'yes',
+    )
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: '筛选日期' }),
+      'overdue',
+    )
+
+    const list = screen.getByRole('list', { name: '任务列表' })
+    expect(within(list).getByText(matching.title)).toBeInTheDocument()
+    expect(within(list).queryByText(wrongStatus.title)).not.toBeInTheDocument()
+    expect(within(list).queryByText(wrongTitle.title)).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('tab', { name: '四象限' }))
+    expect(
+      within(screen.getByRole('region', { name: '任务四象限' })).getByText(
+        matching.title,
+      ),
+    ).toBeInTheDocument()
+
+    await user.click(screen.getByRole('tab', { name: '日期' }))
+    const dateView = screen.getByRole('region', { name: '任务日期视图' })
+    await user.click(
+      within(dateView).getByRole('button', { name: '已逾期，1 项任务' }),
+    )
+    expect(within(dateView).getByText(matching.title)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('tab', { name: '日历' }))
+    expect(
+      within(screen.getByRole('grid', { name: '2026年8月任务月历' })).getByRole(
+        'button',
+        { name: `查看任务详情：${matching.title}，截止日期 2026-08-22` },
+      ),
+    ).toBeInTheDocument()
+  })
+
+  test('closes an open detail panel when search excludes its task', async () => {
+    const user = userEvent.setup()
+    const selected = taskFixture(327, 'Selected task')
+    const remaining = taskFixture(328, 'Remaining task')
+    const fake = createServiceDouble([selected, remaining])
+    const current = createRuntime(fake.service)
+    render(
+      <TasksPage
+        openRuntime={vi.fn(() => Promise.resolve(current.runtime))}
+        today="2026-08-23"
+      />,
+    )
+    await screen.findByText(selected.title)
+    const search = screen.getByRole('searchbox', { name: '搜索任务' })
+
+    await user.click(
+      screen.getByRole('button', { name: `查看任务详情：${selected.title}` }),
+    )
+    expect(
+      screen.getByRole('dialog', { name: `任务详情：${selected.title}` }),
+    ).toBeInTheDocument()
+
+    fireEvent.change(search, { target: { value: 'remaining' } })
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('dialog', { name: `任务详情：${selected.title}` }),
+      ).not.toBeInTheDocument(),
+    )
+    expect(screen.getByText(remaining.title)).toBeInTheDocument()
+  })
+})
+
 describe('TasksPage create and rename', () => {
   test('creates through TaskService and reloads repository ordering', async () => {
     const user = userEvent.setup()

@@ -5,6 +5,7 @@ import {
   TASK_STATUSES,
   TASK_STATUS_OPERATIONS,
   buildTaskCalendarMonth,
+  deriveVisibleTasks,
   filterTasks,
   isCanonicalLowercaseUuid,
   getDaysInLocalMonth,
@@ -21,6 +22,7 @@ import {
   isValidLocalDate,
   localDateFromDate,
   localMonthFromLocalDate,
+  matchesTaskSearch,
   resolveTaskStatusTransition,
   shiftLocalMonth,
   type Task,
@@ -682,5 +684,53 @@ describe('Task filter derivation', () => {
         '2026-08-23',
       ),
     ).toEqual([tasks[4]])
+  })
+})
+
+describe('Task title search derivation', () => {
+  const englishTask: Task = { ...TASK, title: 'Write Release Notes' }
+  const chineseTask: Task = {
+    ...TASK,
+    id: '00000000-0000-4000-8000-000000000051',
+    title: '整理任务需求',
+    isImportant: true,
+  }
+  const metadataTask: Task = {
+    ...TASK,
+    id: '00000000-0000-4000-8000-000000000052',
+    title: 'Project metadata only',
+    projectId: '00000000-0000-4000-8000-000000000101',
+    tagIds: ['00000000-0000-4000-8000-000000000201'],
+  }
+  const tasks: readonly Task[] = [englishTask, chineseTask, metadataTask]
+
+  test.each([
+    ['exact title', 'Write Release Notes', true],
+    ['substring', 'Release', true],
+    ['case-insensitive English', 'write release', true],
+    ['trimmed query', '  release notes  ', true],
+    ['blank query', '   ', true],
+    ['non-match', 'calendar', false],
+  ] as const)('%s', (_name, query, expected) => {
+    expect(matchesTaskSearch(englishTask, query)).toBe(expected)
+  })
+
+  test('matches Chinese by literal substring and only reads Task.title', () => {
+    expect(matchesTaskSearch(chineseTask, '任务')).toBe(true)
+    expect(matchesTaskSearch(chineseTask, '任 务')).toBe(false)
+    expect(matchesTaskSearch(metadataTask, '知行')).toBe(false)
+    expect(matchesTaskSearch(metadataTask, 'AI')).toBe(false)
+  })
+
+  test('combines search and filters with AND without mutating tasks', () => {
+    const result = deriveVisibleTasks(
+      tasks,
+      { ...DEFAULT_TASK_FILTER, importance: 'yes' },
+      '整理',
+      '2026-08-23',
+    )
+
+    expect(result).toEqual([chineseTask])
+    expect(tasks).toHaveLength(3)
   })
 })
