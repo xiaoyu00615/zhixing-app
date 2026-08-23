@@ -444,6 +444,17 @@ mod tests {
         assert_eq!(task.created_at_ms, 123);
         assert_eq!(task.updated_at_ms, 123);
 
+        let duplicate = TaskDbService::create(
+            &connection,
+            CreateTaskInput {
+                id: ID_A.into(),
+                title: "Duplicate".into(),
+                created_at_ms: 456,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(duplicate, TaskError::PersistenceFailed);
+
         let unsafe_timestamp = TaskDbService::create(
             &connection,
             CreateTaskInput {
@@ -507,6 +518,7 @@ mod tests {
         assert_eq!(after.status, before.status);
         assert_eq!(after.created_at_ms, before.created_at_ms);
         assert_eq!(after.updated_at_ms, 20);
+        assert_eq!(TaskDbService::list(&connection).unwrap(), [after]);
 
         let error = TaskDbService::rename(
             &connection,
@@ -636,13 +648,21 @@ mod tests {
             let changed = TaskDbService::change_status(
                 &mut connection,
                 ChangeTaskStatusInput {
-                    id,
+                    id: id.clone(),
                     operation,
                     updated_at_ms: 2,
                 },
             )
             .unwrap();
             assert_eq!(changed.status, target);
+            assert_eq!(changed.created_at_ms, 1);
+            assert_eq!(changed.updated_at_ms, 2);
+            let persisted = TaskDbService::list(&connection)
+                .unwrap()
+                .into_iter()
+                .find(|task| task.id == id)
+                .unwrap();
+            assert_eq!(persisted, changed);
         }
     }
 
@@ -722,14 +742,40 @@ mod tests {
 
     #[test]
     fn task_persists_after_connection_close_and_reopen() {
-        let (_sandbox, database_path, connection) = migrated_database();
+        let (_sandbox, database_path, mut connection) = migrated_database();
         create_task(&connection, ID_A, "Persistent", 10);
+        TaskDbService::rename(
+            &connection,
+            RenameTaskInput {
+                id: ID_A.into(),
+                title: "Persistent renamed".into(),
+                updated_at_ms: 20,
+            },
+        )
+        .unwrap();
+        TaskDbService::change_status(
+            &mut connection,
+            ChangeTaskStatusInput {
+                id: ID_A.into(),
+                operation: TaskStatusOperation::Start,
+                updated_at_ms: 30,
+            },
+        )
+        .unwrap();
         drop(connection);
 
         let reopened = open_existing_configured_connection(&database_path).unwrap();
         let tasks = TaskDbService::list(&reopened).unwrap();
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].title, "Persistent");
+        assert_eq!(
+            tasks,
+            [TaskRecord {
+                id: ID_A.into(),
+                title: "Persistent renamed".into(),
+                status: TaskStatus::Doing,
+                created_at_ms: 10,
+                updated_at_ms: 30,
+            }]
+        );
     }
 
     #[test]

@@ -46,7 +46,11 @@ interface BrowserHarness {
 
 type HarnessWindow = Window & { __taskPersistenceHarness: BrowserHarness }
 
-const taskId = '12345678-1234-4321-8000-0123456789ab'
+const TASK_IDS = {
+  a: '00000000-0000-4000-8000-000000000001',
+  b: '00000000-0000-4000-8000-000000000002',
+  c: '00000000-0000-4000-8000-000000000003',
+} as const
 
 async function openHarnessPage(
   context: BrowserContext,
@@ -97,23 +101,110 @@ test('persists Task operations in OPFS across a browser restart', async ({
     expect(initialCapability).toEqual({ status: 'AVAILABLE' })
     await expect(page.locator('#capability')).toHaveText('AVAILABLE')
 
-    const created = await page.evaluate(
+    await page.evaluate(
+      ({ ids }) =>
+        Promise.all([
+          (
+            window as unknown as HarnessWindow
+          ).__taskPersistenceHarness.createTask({
+            id: ids.c,
+            title: 'Third',
+            createdAtMs: 50,
+          }),
+          (
+            window as unknown as HarnessWindow
+          ).__taskPersistenceHarness.createTask({
+            id: ids.b,
+            title: 'Second',
+            createdAtMs: 20,
+          }),
+          (
+            window as unknown as HarnessWindow
+          ).__taskPersistenceHarness.createTask({
+            id: ids.a,
+            title: 'First',
+            createdAtMs: 10,
+          }),
+        ]),
+      { ids: TASK_IDS },
+    )
+
+    const duplicateError = await page.evaluate(
+      async ({ id }) => {
+        try {
+          await (
+            window as unknown as HarnessWindow
+          ).__taskPersistenceHarness.createTask({
+            id,
+            title: 'Duplicate',
+            createdAtMs: 60,
+          })
+          return null
+        } catch (error: unknown) {
+          const safe = error as { code?: unknown; message?: unknown }
+          return { code: safe.code, message: safe.message }
+        }
+      },
+      { id: TASK_IDS.a },
+    )
+    expect(duplicateError).toMatchObject({ code: 'PERSISTENCE_FAILED' })
+    expect(duplicateError?.message).not.toMatch(
+      /SQL|constraint|private|opfs|WASM|stack|DOMException|token|secret/i,
+    )
+
+    await page.evaluate(
       ({ id }) =>
         (
           window as unknown as HarnessWindow
-        ).__taskPersistenceHarness.createTask({
+        ).__taskPersistenceHarness.renameTask({
           id,
-          title: 'Persist across restart',
-          createdAtMs: 100,
+          title: 'Second renamed',
+          updatedAtMs: 100,
         }),
-      { id: taskId },
+      { id: TASK_IDS.b },
     )
-    expect(created).toMatchObject({
-      id: taskId,
-      status: 'todo',
-      createdAtMs: 100,
-      updatedAtMs: 100,
-    })
+    await page.evaluate(
+      ({ id }) =>
+        (
+          window as unknown as HarnessWindow
+        ).__taskPersistenceHarness.changeTaskStatus({
+          id,
+          operation: 'start',
+          updatedAtMs: 100,
+        }),
+      { id: TASK_IDS.a },
+    )
+
+    const expectedTasks: readonly BrowserTask[] = [
+      {
+        id: TASK_IDS.a,
+        title: 'First',
+        status: 'doing',
+        createdAtMs: 10,
+        updatedAtMs: 100,
+      },
+      {
+        id: TASK_IDS.b,
+        title: 'Second renamed',
+        status: 'todo',
+        createdAtMs: 20,
+        updatedAtMs: 100,
+      },
+      {
+        id: TASK_IDS.c,
+        title: 'Third',
+        status: 'todo',
+        createdAtMs: 50,
+        updatedAtMs: 50,
+      },
+    ]
+    await expect(
+      page.evaluate(() =>
+        (
+          window as unknown as HarnessWindow
+        ).__taskPersistenceHarness.listTasks(),
+      ),
+    ).resolves.toEqual(expectedTasks)
 
     await context.close()
     context = null
@@ -123,41 +214,13 @@ test('persists Task operations in OPFS across a browser restart', async ({
       headless: true,
     })
     page = await openHarnessPage(context, configuredBaseURL)
+    expect(await page.evaluate(() => crossOriginIsolated)).toBe(true)
     await expect(page.locator('#capability')).toHaveText('AVAILABLE')
 
     const afterRestart = await page.evaluate(() =>
       (window as unknown as HarnessWindow).__taskPersistenceHarness.listTasks(),
     )
-    expect(afterRestart).toEqual([created])
-
-    const renamed = await page.evaluate(
-      ({ id }) =>
-        (
-          window as unknown as HarnessWindow
-        ).__taskPersistenceHarness.renameTask({
-          id,
-          title: 'Renamed after restart',
-          updatedAtMs: 200,
-        }),
-      { id: taskId },
-    )
-    expect(renamed).toMatchObject({
-      title: 'Renamed after restart',
-      updatedAtMs: 200,
-    })
-
-    const changed = await page.evaluate(
-      ({ id }) =>
-        (
-          window as unknown as HarnessWindow
-        ).__taskPersistenceHarness.changeTaskStatus({
-          id,
-          operation: 'start',
-          updatedAtMs: 300,
-        }),
-      { id: taskId },
-    )
-    expect(changed).toMatchObject({ status: 'doing', updatedAtMs: 300 })
+    expect(afterRestart).toEqual(expectedTasks)
 
     await page.evaluate(() =>
       (window as unknown as HarnessWindow).__taskPersistenceHarness.shutdown(),

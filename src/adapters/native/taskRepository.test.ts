@@ -1,7 +1,17 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { NativeTaskRepository } from '@/adapters/native/taskRepository'
-import { TaskRepositoryError } from '@/task/repository'
+import {
+  TaskRepositoryError,
+  type ChangeTaskStatusInput,
+  type CreateTaskInput,
+  type RenameTaskInput,
+} from '@/task/repository'
+import {
+  defineTaskRepositoryContract,
+  TaskRepositoryContractBackend,
+  type TaskRepositoryContractFixture,
+} from '@/test/taskRepositoryContract'
 
 const invokeMock = vi.hoisted(() => vi.fn())
 
@@ -17,6 +27,28 @@ const TASK = {
   createdAtMs: 100,
   updatedAtMs: 100,
 } as const
+
+function createNativeContractFixture(): TaskRepositoryContractFixture {
+  invokeMock.mockReset()
+  const backend = new TaskRepositoryContractBackend()
+  invokeMock.mockImplementation(
+    (command: string, args?: Record<string, unknown>) => {
+      switch (command) {
+        case 'task_create':
+          return backend.createTask(args?.input as CreateTaskInput)
+        case 'task_list':
+          return backend.listTasks()
+        case 'task_rename':
+          return backend.renameTask(args?.input as RenameTaskInput)
+        case 'task_change_status':
+          return backend.changeTaskStatus(args?.input as ChangeTaskStatusInput)
+        default:
+          throw new Error(`Unexpected native command: ${command}`)
+      }
+    },
+  )
+  return { repository: new NativeTaskRepository(), backend }
+}
 
 describe('NativeTaskRepository', () => {
   beforeEach(() => {
@@ -134,3 +166,8 @@ describe('NativeTaskRepository', () => {
     expect(invokeMock).not.toHaveBeenCalled()
   })
 })
+
+defineTaskRepositoryContract(
+  'NativeTaskRepository',
+  createNativeContractFixture,
+)

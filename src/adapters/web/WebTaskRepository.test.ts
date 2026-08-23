@@ -22,6 +22,12 @@ import {
   type WebMigrationHistoryRow,
   type WebMigrationStore,
 } from '@/adapters/web/webMigrations'
+import {
+  defineTaskRepositoryContract,
+  TaskContractBackendError,
+  TaskRepositoryContractBackend,
+  type TaskRepositoryContractFixture,
+} from '@/test/taskRepositoryContract'
 
 const ID = '12345678-1234-4321-8000-0123456789ab'
 const SECOND_ID = '00000000-0000-4000-8000-000000000002'
@@ -70,6 +76,72 @@ class FakeWorker implements TaskWorkerEndpoint {
 
   emitError(): void {
     this.onerror?.(new ErrorEvent('error'))
+  }
+}
+
+class ContractWorker implements TaskWorkerEndpoint {
+  onmessage: ((event: MessageEvent<unknown>) => void) | null = null
+  onerror: ((event: ErrorEvent) => void) | null = null
+  onmessageerror: ((event: MessageEvent<unknown>) => void) | null = null
+  readonly backend: TaskRepositoryContractBackend
+  terminated = false
+
+  constructor(backend: TaskRepositoryContractBackend) {
+    this.backend = backend
+  }
+
+  postMessage(request: TaskWorkerRequest): void {
+    try {
+      let result: unknown
+      switch (request.type) {
+        case 'initialize':
+          result = { status: 'AVAILABLE' }
+          break
+        case 'task.create':
+          result = this.backend.createTask(request.input)
+          break
+        case 'task.list':
+          result = this.backend.listTasks()
+          break
+        case 'task.rename':
+          result = this.backend.renameTask(request.input)
+          break
+        case 'task.changeStatus':
+          result = this.backend.changeTaskStatus(request.input)
+          break
+        case 'shutdown':
+          result = null
+          break
+      }
+      this.respond({ requestId: request.requestId, ok: true, result })
+    } catch (error: unknown) {
+      if (error instanceof TaskContractBackendError) {
+        this.respond({
+          requestId: request.requestId,
+          ok: false,
+          error: { code: error.code },
+        })
+        return
+      }
+      throw error
+    }
+  }
+
+  terminate(): void {
+    this.terminated = true
+  }
+
+  private respond(response: TaskWorkerResponse): void {
+    this.onmessage?.(new MessageEvent('message', { data: response }))
+  }
+}
+
+function createWebContractFixture(): TaskRepositoryContractFixture {
+  const backend = new TaskRepositoryContractBackend()
+  const worker = new ContractWorker(backend)
+  return {
+    repository: new WebTaskRepository(new TaskWorkerClient(worker)),
+    backend,
   }
 }
 
@@ -312,6 +384,8 @@ describe('WebTaskRepository', () => {
     expect(worker.terminated).toBe(true)
   })
 })
+
+defineTaskRepositoryContract('WebTaskRepository', createWebContractFixture)
 
 describe('Web migrations', () => {
   test('uses the shared LF-only migration bytes and bootstraps history', async () => {
