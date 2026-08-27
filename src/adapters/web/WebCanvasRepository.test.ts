@@ -1,6 +1,8 @@
+import { expect, test } from 'vitest'
+
 import { WebCanvasRepository } from './WebCanvasRepository'
 import { TaskWorkerClient, type TaskWorkerEndpoint } from './taskWorkerClient'
-import type { TaskWorkerRequest, TaskWorkerResponse } from './taskWorkerProtocol'
+import { parseTaskWorkerRequest, type TaskWorkerRequest, type TaskWorkerResponse } from './taskWorkerProtocol'
 import { CanvasRepositoryError } from '@/canvas/repository'
 import { CanvasContractBackend, defineCanvasRepositoryContract } from '@/test/canvasRepositoryContract'
 
@@ -10,11 +12,11 @@ class CanvasWorker implements TaskWorkerEndpoint {
   onmessageerror: ((event: MessageEvent<unknown>) => void) | null = null
   constructor(readonly backend: CanvasContractBackend) {}
   postMessage(request: TaskWorkerRequest): void {
-    void this.dispatch(request).then(
+    void Promise.resolve().then(() => this.dispatch(request)).then(
       (result) => this.respond({ requestId: request.requestId, ok: true, result }),
       (error: unknown) => {
         if (!(error instanceof CanvasRepositoryError)) throw error
-        this.respond({ requestId: request.requestId, ok: false, error: { code: error.code } })
+        this.respond({ requestId: request.requestId, ok: false, error: { code: error.code === 'DUPLICATE' ? 'STATUS_CONFLICT' : error.code } })
       },
     )
   }
@@ -30,6 +32,11 @@ class CanvasWorker implements TaskWorkerEndpoint {
       case 'canvas.node.list': return this.backend.listCanvasNodes(request.canvasId)
       case 'canvas.node.updateText': return this.backend.updateTextNode(request.input)
       case 'canvas.node.move': return this.backend.moveCanvasNode(request.input)
+      case 'canvas.edge.create': return this.backend.createCanvasEdge(request.input)
+      case 'canvas.edge.list': return this.backend.listCanvasEdges(request.canvasId)
+      case 'canvas.edge.setDirection': return this.backend.updateCanvasEdgeDirection(request.input)
+      case 'canvas.edge.setLineStyle': return this.backend.updateCanvasEdgeLineStyle(request.input)
+      case 'canvas.edge.delete': return this.backend.deleteCanvasEdge(request.input)
       default: throw new Error(`Unexpected request ${request.type}`)
     }
   }
@@ -41,4 +48,24 @@ class CanvasWorker implements TaskWorkerEndpoint {
 defineCanvasRepositoryContract('WebCanvasRepository', () => {
   const backend = new CanvasContractBackend()
   return { repository: new WebCanvasRepository(new TaskWorkerClient(new CanvasWorker(backend))), backend }
+})
+
+test('Canvas Edge Worker messages remain capability-specific and strictly parsed', () => {
+  const validCreate = {
+    requestId: 1,
+    type: 'canvas.edge.create',
+    input: {
+      id: '00000000-0000-4000-8000-000000000604',
+      canvasId: '00000000-0000-4000-8000-000000000601',
+      sourceNodeId: '00000000-0000-4000-8000-000000000602',
+      targetNodeId: '00000000-0000-4000-8000-000000000603',
+      relationType: 'default',
+      direction: 'forward',
+      lineStyle: 'solid',
+      createdAtMs: 10,
+    },
+  }
+  expect(parseTaskWorkerRequest(validCreate)).toEqual(validCreate)
+  expect(parseTaskWorkerRequest({ ...validCreate, input: { ...validCreate.input, direction: 'reverse' } })).toBeNull()
+  expect(parseTaskWorkerRequest({ requestId: 2, type: 'canvas.edge.execute', sql: 'DELETE' })).toBeNull()
 })

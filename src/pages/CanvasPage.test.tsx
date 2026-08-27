@@ -42,6 +42,11 @@ function createFixture(initial: readonly Canvas[] = []) {
     listCanvasNodes: vi.fn(),
     editTextNode: vi.fn(),
     moveCanvasNode: vi.fn(),
+    createCanvasEdge: vi.fn(),
+    listCanvasEdges: vi.fn(),
+    updateCanvasEdgeDirection: vi.fn(),
+    updateCanvasEdgeLineStyle: vi.fn(),
+    deleteCanvasEdge: vi.fn(),
   }
   const dispose = vi.fn()
   const openRuntime: OpenCanvasRuntime = vi.fn(() =>

@@ -19,13 +19,17 @@ import type {
   RenameTaskInput,
   TaskRepository,
 } from '@/task/repository'
-import type { Canvas, CanvasNode } from '@/canvas/model'
+import type { Canvas, CanvasEdge, CanvasNode } from '@/canvas/model'
 import type {
   CanvasRepository,
   CreateCanvasInput,
+  CreateCanvasEdgeInput,
   CreateTextNodeInput,
+  DeleteCanvasEdgeInput,
   MoveCanvasNodeInput,
   RenameCanvasInput,
+  UpdateCanvasEdgeDirectionInput,
+  UpdateCanvasEdgeLineStyleInput,
   UpdateCanvasViewportInput,
   UpdateTextNodeInput,
 } from '@/canvas/repository'
@@ -66,6 +70,11 @@ interface PersistenceHarness {
   listCanvasNodes(canvasId: string): Promise<readonly CanvasNode[]>
   updateTextNode(input: UpdateTextNodeInput): Promise<CanvasNode>
   moveCanvasNode(input: MoveCanvasNodeInput): Promise<CanvasNode>
+  createCanvasEdge(input: CreateCanvasEdgeInput): Promise<CanvasEdge>
+  listCanvasEdges(canvasId: string): Promise<readonly CanvasEdge[]>
+  updateCanvasEdgeDirection(input: UpdateCanvasEdgeDirectionInput): Promise<CanvasEdge>
+  updateCanvasEdgeLineStyle(input: UpdateCanvasEdgeLineStyleInput): Promise<CanvasEdge>
+  deleteCanvasEdge(input: DeleteCanvasEdgeInput): Promise<CanvasEdge>
   shutdown(): Promise<void>
 }
 
@@ -188,6 +197,21 @@ window.__taskPersistenceHarness = {
   },
   async moveCanvasNode(input) {
     return (await requireCanvasRepository()).moveCanvasNode(input)
+  },
+  async createCanvasEdge(input) {
+    return (await requireCanvasRepository()).createCanvasEdge(input)
+  },
+  async listCanvasEdges(canvasId) {
+    return (await requireCanvasRepository()).listCanvasEdges(canvasId)
+  },
+  async updateCanvasEdgeDirection(input) {
+    return (await requireCanvasRepository()).updateCanvasEdgeDirection(input)
+  },
+  async updateCanvasEdgeLineStyle(input) {
+    return (await requireCanvasRepository()).updateCanvasEdgeLineStyle(input)
+  },
+  async deleteCanvasEdge(input) {
+    return (await requireCanvasRepository()).deleteCanvasEdge(input)
   },
   async shutdown() {
     const result = await opened

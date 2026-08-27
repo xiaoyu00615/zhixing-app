@@ -1,23 +1,36 @@
 import { describe, expect, test } from 'vitest'
 
-import type { Canvas, CanvasNode } from '@/canvas/model'
+import type {
+  Canvas,
+  CanvasEdge,
+  CanvasEdgeDirection,
+  CanvasNode,
+} from '@/canvas/model'
 import {
   CanvasRepositoryError,
   type CanvasRepository,
   type CreateCanvasInput,
+  type CreateCanvasEdgeInput,
   type CreateTextNodeInput,
+  type DeleteCanvasEdgeInput,
   type MoveCanvasNodeInput,
   type RenameCanvasInput,
   type UpdateCanvasViewportInput,
+  type UpdateCanvasEdgeDirectionInput,
+  type UpdateCanvasEdgeLineStyleInput,
   type UpdateTextNodeInput,
 } from '@/canvas/repository'
 
 export const CONTRACT_CANVAS_ID = '00000000-0000-4000-8000-000000000611'
 export const CONTRACT_NODE_ID = '00000000-0000-4000-8000-000000000612'
+export const CONTRACT_TARGET_NODE_ID = '00000000-0000-4000-8000-000000000613'
+export const CONTRACT_EDGE_ID = '00000000-0000-4000-8000-000000000614'
+export const CONTRACT_REVERSE_EDGE_ID = '00000000-0000-4000-8000-000000000615'
 
 export class CanvasContractBackend implements CanvasRepository {
   readonly canvases = new Map<string, Canvas>()
   readonly nodes = new Map<string, CanvasNode>()
+  readonly edges = new Map<string, CanvasEdge>()
 
   createCanvas(input: CreateCanvasInput): Promise<Canvas> {
     const canvas: Canvas = { ...input, updatedAtMs: input.createdAtMs }
@@ -77,6 +90,120 @@ export class CanvasContractBackend implements CanvasRepository {
     this.nodes.set(input.id, updated)
     return Promise.resolve(updated)
   }
+
+  async createCanvasEdge(input: CreateCanvasEdgeInput): Promise<CanvasEdge> {
+    await this.getCanvas(input.canvasId)
+    const source = this.nodes.get(input.sourceNodeId)
+    const target = this.nodes.get(input.targetNodeId)
+    if (
+      source?.canvasId !== input.canvasId ||
+      target?.canvasId !== input.canvasId
+    ) {
+      throw new CanvasRepositoryError('NOT_FOUND', 'createCanvasEdge')
+    }
+    if (input.sourceNodeId === input.targetNodeId) {
+      throw new CanvasRepositoryError('PERSISTENCE_FAILED', 'createCanvasEdge')
+    }
+    this.assertNoDuplicate(
+      input.canvasId,
+      input.sourceNodeId,
+      input.targetNodeId,
+      input.relationType,
+      input.direction,
+    )
+    const edge: CanvasEdge = {
+      ...input,
+      updatedAtMs: input.createdAtMs,
+      deletedAtMs: null,
+    }
+    this.edges.set(edge.id, edge)
+    return edge
+  }
+
+  async listCanvasEdges(canvasId: string): Promise<readonly CanvasEdge[]> {
+    await this.getCanvas(canvasId)
+    return [...this.edges.values()].filter(
+      (edge) => edge.canvasId === canvasId && edge.deletedAtMs === null,
+    )
+  }
+
+  updateCanvasEdgeDirection(
+    input: UpdateCanvasEdgeDirectionInput,
+  ): Promise<CanvasEdge> {
+    const edge = this.requireActiveEdge(input.id, 'updateCanvasEdgeDirection')
+    this.assertNoDuplicate(
+      edge.canvasId,
+      edge.sourceNodeId,
+      edge.targetNodeId,
+      edge.relationType,
+      input.direction,
+      edge.id,
+    )
+    const updated = { ...edge, ...input }
+    this.edges.set(edge.id, updated)
+    return Promise.resolve(updated)
+  }
+
+  updateCanvasEdgeLineStyle(
+    input: UpdateCanvasEdgeLineStyleInput,
+  ): Promise<CanvasEdge> {
+    const edge = this.requireActiveEdge(input.id, 'updateCanvasEdgeLineStyle')
+    const updated = { ...edge, ...input }
+    this.edges.set(edge.id, updated)
+    return Promise.resolve(updated)
+  }
+
+  deleteCanvasEdge(input: DeleteCanvasEdgeInput): Promise<CanvasEdge> {
+    const edge = this.requireActiveEdge(input.id, 'deleteCanvasEdge')
+    const updated = { ...edge, ...input }
+    this.edges.set(edge.id, updated)
+    return Promise.resolve(updated)
+  }
+
+  private requireActiveEdge(
+    id: string,
+    operation:
+      | 'updateCanvasEdgeDirection'
+      | 'updateCanvasEdgeLineStyle'
+      | 'deleteCanvasEdge',
+  ): CanvasEdge {
+    const edge = this.edges.get(id)
+    if (edge === undefined || edge.deletedAtMs !== null) {
+      throw new CanvasRepositoryError('NOT_FOUND', operation)
+    }
+    return edge
+  }
+
+  private assertNoDuplicate(
+    canvasId: string,
+    sourceNodeId: string,
+    targetNodeId: string,
+    relationType: string,
+    direction: CanvasEdgeDirection,
+    excludedId?: string,
+  ): void {
+    const duplicate = [...this.edges.values()].some((edge) => {
+      if (
+        edge.id === excludedId ||
+        edge.deletedAtMs !== null ||
+        edge.canvasId !== canvasId ||
+        edge.relationType !== relationType ||
+        edge.direction !== direction
+      ) {
+        return false
+      }
+      return direction === 'forward'
+        ? edge.sourceNodeId === sourceNodeId &&
+            edge.targetNodeId === targetNodeId
+        : (edge.sourceNodeId === sourceNodeId &&
+            edge.targetNodeId === targetNodeId) ||
+            (edge.sourceNodeId === targetNodeId &&
+              edge.targetNodeId === sourceNodeId)
+    })
+    if (duplicate) {
+      throw new CanvasRepositoryError('DUPLICATE', 'createCanvasEdge')
+    }
+  }
 }
 
 export function defineCanvasRepositoryContract(
@@ -106,6 +233,37 @@ export function defineCanvasRepositoryContract(
       const { repository } = createFixture()
       await expect(repository.getCanvas(CONTRACT_CANVAS_ID)).rejects.toMatchObject({ code: 'NOT_FOUND', operation: 'getCanvas' })
       await expect(repository.moveCanvasNode({ id: CONTRACT_NODE_ID, x: 0, y: 0, updatedAtMs: 10 })).rejects.toMatchObject({ code: 'NOT_FOUND', operation: 'moveCanvasNode' })
+    })
+
+    test('creates, configures, lists, and soft-deletes Canvas Edges', async () => {
+      const { repository } = createFixture()
+      await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+      await repository.createTextNode({ id: CONTRACT_NODE_ID, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: 'Source' }, x: 1, y: 2, createdAtMs: 20 })
+      await repository.createTextNode({ id: CONTRACT_TARGET_NODE_ID, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: 'Target' }, x: 3, y: 4, createdAtMs: 21 })
+      const created = await repository.createCanvasEdge({ id: CONTRACT_EDGE_ID, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_TARGET_NODE_ID, relationType: 'default', direction: 'forward', lineStyle: 'solid', createdAtMs: 30 })
+      expect(created).toMatchObject({ direction: 'forward', lineStyle: 'solid', deletedAtMs: null })
+      await expect(repository.updateCanvasEdgeDirection({ id: CONTRACT_EDGE_ID, direction: 'bidirectional', updatedAtMs: 40 })).resolves.toMatchObject({ direction: 'bidirectional' })
+      await expect(repository.updateCanvasEdgeLineStyle({ id: CONTRACT_EDGE_ID, lineStyle: 'dashed', updatedAtMs: 50 })).resolves.toMatchObject({ lineStyle: 'dashed' })
+      await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toHaveLength(1)
+      await expect(repository.deleteCanvasEdge({ id: CONTRACT_EDGE_ID, deletedAtMs: 60, updatedAtMs: 60 })).resolves.toMatchObject({ deletedAtMs: 60 })
+      await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toEqual([])
+      await expect(repository.deleteCanvasEdge({ id: CONTRACT_EDGE_ID, deletedAtMs: 70, updatedAtMs: 70 })).rejects.toMatchObject({ code: 'NOT_FOUND' })
+      await expect(repository.createCanvasEdge({ id: '00000000-0000-4000-8000-000000000615', canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_TARGET_NODE_ID, relationType: 'default', direction: 'forward', lineStyle: 'dotted', createdAtMs: 80 })).resolves.toMatchObject({ lineStyle: 'dotted' })
+    })
+
+    test('enforces directed and symmetric duplicate semantics', async () => {
+      const { repository } = createFixture()
+      await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+      await repository.createTextNode({ id: CONTRACT_NODE_ID, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: 'A' }, x: 1, y: 2, createdAtMs: 20 })
+      await repository.createTextNode({ id: CONTRACT_TARGET_NODE_ID, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: 'B' }, x: 3, y: 4, createdAtMs: 21 })
+      const base = { canvasId: CONTRACT_CANVAS_ID, relationType: 'default' as const, lineStyle: 'solid' as const, createdAtMs: 30 }
+      await repository.createCanvasEdge({ ...base, id: CONTRACT_EDGE_ID, sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_TARGET_NODE_ID, direction: 'forward' })
+      await expect(repository.createCanvasEdge({ ...base, id: CONTRACT_REVERSE_EDGE_ID, sourceNodeId: CONTRACT_TARGET_NODE_ID, targetNodeId: CONTRACT_NODE_ID, direction: 'forward' })).resolves.toMatchObject({ id: CONTRACT_REVERSE_EDGE_ID })
+      await expect(repository.createCanvasEdge({ ...base, id: '00000000-0000-4000-8000-000000000616', sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_TARGET_NODE_ID, direction: 'forward', lineStyle: 'dotted' })).rejects.toMatchObject({ code: 'DUPLICATE' })
+      await repository.createCanvasEdge({ ...base, id: '00000000-0000-4000-8000-000000000617', sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_TARGET_NODE_ID, direction: 'none' })
+      await expect(repository.createCanvasEdge({ ...base, id: '00000000-0000-4000-8000-000000000618', sourceNodeId: CONTRACT_TARGET_NODE_ID, targetNodeId: CONTRACT_NODE_ID, direction: 'none' })).rejects.toMatchObject({ code: 'DUPLICATE' })
+      await expect(repository.createCanvasEdge({ ...base, id: '00000000-0000-4000-8000-000000000619', sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_TARGET_NODE_ID, direction: 'bidirectional' })).resolves.toMatchObject({ direction: 'bidirectional' })
+      await expect(repository.createCanvasEdge({ ...base, id: '00000000-0000-4000-8000-000000000620', sourceNodeId: CONTRACT_TARGET_NODE_ID, targetNodeId: CONTRACT_NODE_ID, direction: 'bidirectional' })).rejects.toMatchObject({ code: 'DUPLICATE' })
     })
   })
 }

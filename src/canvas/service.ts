@@ -1,10 +1,16 @@
 import {
   isCanonicalCanvasId,
   isCanvasCoordinate,
+  isCanvasEdgeDirection,
+  isCanvasEdgeLineStyle,
+  isCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
   isTextNodeContent,
   type Canvas,
+  type CanvasEdge,
+  type CanvasEdgeDirection,
+  type CanvasEdgeLineStyle,
   type CanvasNode,
   type CanvasViewport,
 } from '@/canvas/model'
@@ -16,6 +22,7 @@ import {
 export type CanvasApplicationErrorCode =
   | 'VALIDATION'
   | 'NOT_FOUND'
+  | 'CONFLICT'
   | 'UNAVAILABLE'
 
 export type CanvasApplicationErrorField =
@@ -25,10 +32,16 @@ export type CanvasApplicationErrorField =
   | 'viewport'
   | 'content'
   | 'position'
+  | 'sourceNodeId'
+  | 'targetNodeId'
+  | 'relationType'
+  | 'direction'
+  | 'lineStyle'
 
 const SAFE_MESSAGES: Record<CanvasApplicationErrorCode, string> = {
   VALIDATION: 'Canvas input is invalid.',
   NOT_FOUND: 'Canvas resource not found.',
+  CONFLICT: 'Canvas relation conflicts with an existing relation.',
   UNAVAILABLE: 'Canvas service is unavailable.',
 }
 
@@ -50,6 +63,7 @@ export class CanvasApplicationError extends Error {
 export interface CanvasWorkspace {
   readonly canvas: Canvas
   readonly nodes: readonly CanvasNode[]
+  readonly edges: readonly CanvasEdge[]
 }
 
 export interface CanvasService {
@@ -66,6 +80,21 @@ export interface CanvasService {
   listCanvasNodes(canvasId: string): Promise<readonly CanvasNode[]>
   editTextNode(id: string, text: string): Promise<CanvasNode>
   moveCanvasNode(id: string, x: number, y: number): Promise<CanvasNode>
+  createCanvasEdge(
+    canvasId: string,
+    sourceNodeId: string,
+    targetNodeId: string,
+  ): Promise<CanvasEdge>
+  listCanvasEdges(canvasId: string): Promise<readonly CanvasEdge[]>
+  updateCanvasEdgeDirection(
+    id: string,
+    direction: CanvasEdgeDirection,
+  ): Promise<CanvasEdge>
+  updateCanvasEdgeLineStyle(
+    id: string,
+    lineStyle: CanvasEdgeLineStyle,
+  ): Promise<CanvasEdge>
+  deleteCanvasEdge(id: string): Promise<CanvasEdge>
 }
 
 interface CreateCanvasServiceOptions {
@@ -81,7 +110,10 @@ function normalizeTitle(title: unknown): string {
   return title.trim()
 }
 
-function validateId(id: unknown, field: 'id' | 'canvasId'): string {
+function validateId(
+  id: unknown,
+  field: 'id' | 'canvasId' | 'sourceNodeId' | 'targetNodeId',
+): string {
   if (!isCanonicalCanvasId(id)) {
     throw new CanvasApplicationError('VALIDATION', field)
   }
@@ -119,6 +151,9 @@ async function callRepository<T>(operation: () => Promise<T>): Promise<T> {
   } catch (error: unknown) {
     if (error instanceof CanvasRepositoryError && error.code === 'NOT_FOUND') {
       throw new CanvasApplicationError('NOT_FOUND')
+    }
+    if (error instanceof CanvasRepositoryError && error.code === 'DUPLICATE') {
+      throw new CanvasApplicationError('CONFLICT')
     }
     throw new CanvasApplicationError('UNAVAILABLE')
   }
@@ -159,11 +194,12 @@ export function createCanvasService({
     },
     async openCanvas(id) {
       validateId(id, 'id')
-      const [canvas, nodes] = await Promise.all([
+      const [canvas, nodes, edges] = await Promise.all([
         callRepository(() => repository.getCanvas(id)),
         callRepository(() => repository.listCanvasNodes(id)),
+        callRepository(() => repository.listCanvasEdges(id)),
       ])
-      return { canvas, nodes }
+      return { canvas, nodes, edges }
     },
     async updateViewport(id, viewport) {
       validateId(id, 'id')
@@ -223,6 +259,73 @@ export function createCanvasService({
           x,
           y,
           updatedAtMs: readNowMs(nowMs),
+        }),
+      )
+    },
+    async createCanvasEdge(canvasId, sourceNodeId, targetNodeId) {
+      validateId(canvasId, 'canvasId')
+      validateId(sourceNodeId, 'sourceNodeId')
+      validateId(targetNodeId, 'targetNodeId')
+      if (sourceNodeId === targetNodeId) {
+        throw new CanvasApplicationError('VALIDATION', 'targetNodeId')
+      }
+      const relationType = 'default' as const
+      const direction = 'forward' as const
+      const lineStyle = 'solid' as const
+      if (!isCanvasEdgeRelationType(relationType)) {
+        throw new CanvasApplicationError('VALIDATION', 'relationType')
+      }
+      return callRepository(() =>
+        repository.createCanvasEdge({
+          id: readGeneratedId(generateId),
+          canvasId,
+          sourceNodeId,
+          targetNodeId,
+          relationType,
+          direction,
+          lineStyle,
+          createdAtMs: readNowMs(nowMs),
+        }),
+      )
+    },
+    listCanvasEdges(canvasId) {
+      validateId(canvasId, 'canvasId')
+      return callRepository(() => repository.listCanvasEdges(canvasId))
+    },
+    updateCanvasEdgeDirection(id, direction) {
+      validateId(id, 'id')
+      if (!isCanvasEdgeDirection(direction)) {
+        throw new CanvasApplicationError('VALIDATION', 'direction')
+      }
+      return callRepository(() =>
+        repository.updateCanvasEdgeDirection({
+          id,
+          direction,
+          updatedAtMs: readNowMs(nowMs),
+        }),
+      )
+    },
+    updateCanvasEdgeLineStyle(id, lineStyle) {
+      validateId(id, 'id')
+      if (!isCanvasEdgeLineStyle(lineStyle)) {
+        throw new CanvasApplicationError('VALIDATION', 'lineStyle')
+      }
+      return callRepository(() =>
+        repository.updateCanvasEdgeLineStyle({
+          id,
+          lineStyle,
+          updatedAtMs: readNowMs(nowMs),
+        }),
+      )
+    },
+    deleteCanvasEdge(id) {
+      validateId(id, 'id')
+      const deletedAtMs = readNowMs(nowMs)
+      return callRepository(() =>
+        repository.deleteCanvasEdge({
+          id,
+          deletedAtMs,
+          updatedAtMs: deletedAtMs,
         }),
       )
     },

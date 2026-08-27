@@ -247,6 +247,36 @@ async function handleRequest(value: unknown): Promise<void> {
           state.database.moveCanvasNode(request.input),
         )
         return
+      case 'canvas.edge.create':
+        success(
+          request.requestId,
+          state.database.createCanvasEdge(request.input),
+        )
+        return
+      case 'canvas.edge.list':
+        success(
+          request.requestId,
+          state.database.listCanvasEdges(request.canvasId),
+        )
+        return
+      case 'canvas.edge.setDirection':
+        success(
+          request.requestId,
+          state.database.updateCanvasEdgeDirection(request.input),
+        )
+        return
+      case 'canvas.edge.setLineStyle':
+        success(
+          request.requestId,
+          state.database.updateCanvasEdgeLineStyle(request.input),
+        )
+        return
+      case 'canvas.edge.delete':
+        success(
+          request.requestId,
+          state.database.deleteCanvasEdge(request.input),
+        )
+        return
     }
   } catch (error: unknown) {
     failure(

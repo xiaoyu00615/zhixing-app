@@ -17,10 +17,14 @@ import type {
 import type { CreateTagInput, RenameTagInput } from '@/tag/repository'
 import type {
   CreateCanvasInput,
+  CreateCanvasEdgeInput,
   CreateTextNodeInput,
+  DeleteCanvasEdgeInput,
   MoveCanvasNodeInput,
   RenameCanvasInput,
   UpdateCanvasViewportInput,
+  UpdateCanvasEdgeDirectionInput,
+  UpdateCanvasEdgeLineStyleInput,
   UpdateTextNodeInput,
 } from '@/canvas/repository'
 import {
@@ -310,6 +314,50 @@ export class TaskWorkerClient {
     return this.send((requestId) => ({
       requestId,
       type: 'canvas.node.move',
+      input,
+    }))
+  }
+
+  createCanvasEdge(input: CreateCanvasEdgeInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.edge.create',
+      input,
+    }))
+  }
+
+  listCanvasEdges(canvasId: string): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.edge.list',
+      canvasId,
+    }))
+  }
+
+  updateCanvasEdgeDirection(
+    input: UpdateCanvasEdgeDirectionInput,
+  ): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.edge.setDirection',
+      input,
+    }))
+  }
+
+  updateCanvasEdgeLineStyle(
+    input: UpdateCanvasEdgeLineStyleInput,
+  ): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.edge.setLineStyle',
+      input,
+    }))
+  }
+
+  deleteCanvasEdge(input: DeleteCanvasEdgeInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.edge.delete',
       input,
     }))
   }

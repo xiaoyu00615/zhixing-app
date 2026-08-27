@@ -30,6 +30,33 @@ export interface CanvasTextNode {
 
 export type CanvasNode = CanvasTextNode
 
+export const CANVAS_EDGE_RELATION_TYPES = ['default'] as const
+export type CanvasEdgeRelationType =
+  (typeof CANVAS_EDGE_RELATION_TYPES)[number]
+
+export const CANVAS_EDGE_DIRECTIONS = [
+  'forward',
+  'bidirectional',
+  'none',
+] as const
+export type CanvasEdgeDirection = (typeof CANVAS_EDGE_DIRECTIONS)[number]
+
+export const CANVAS_EDGE_LINE_STYLES = ['solid', 'dashed', 'dotted'] as const
+export type CanvasEdgeLineStyle = (typeof CANVAS_EDGE_LINE_STYLES)[number]
+
+export interface CanvasEdge {
+  readonly id: string
+  readonly canvasId: string
+  readonly sourceNodeId: string
+  readonly targetNodeId: string
+  readonly relationType: CanvasEdgeRelationType
+  readonly direction: CanvasEdgeDirection
+  readonly lineStyle: CanvasEdgeLineStyle
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
+  readonly deletedAtMs: number | null
+}
+
 const CANONICAL_LOWERCASE_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
@@ -43,6 +70,30 @@ export function isNonEmptyCanvasTitle(value: unknown): value is string {
 
 export function isCanvasCoordinate(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
+}
+
+export function isCanvasEdgeRelationType(
+  value: unknown,
+): value is CanvasEdgeRelationType {
+  return value === 'default'
+}
+
+export function isCanvasEdgeDirection(
+  value: unknown,
+): value is CanvasEdgeDirection {
+  return (
+    typeof value === 'string' &&
+    CANVAS_EDGE_DIRECTIONS.includes(value as CanvasEdgeDirection)
+  )
+}
+
+export function isCanvasEdgeLineStyle(
+  value: unknown,
+): value is CanvasEdgeLineStyle {
+  return (
+    typeof value === 'string' &&
+    CANVAS_EDGE_LINE_STYLES.includes(value as CanvasEdgeLineStyle)
+  )
 }
 
 export function isCanvasViewport(value: unknown): value is CanvasViewport {

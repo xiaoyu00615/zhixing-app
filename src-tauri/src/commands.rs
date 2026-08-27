@@ -4,8 +4,10 @@ use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 use crate::canvas::{
-    CanvasDbService, CanvasError, CanvasNodeContent, CanvasNodeRecord, CanvasRecord,
-    CanvasViewport, CreateCanvasInput, CreateTextNodeInput, MoveCanvasNodeInput, RenameCanvasInput,
+    CanvasDbService, CanvasEdgeDirection, CanvasEdgeLineStyle, CanvasEdgeRecord, CanvasError,
+    CanvasNodeContent, CanvasNodeRecord, CanvasRecord, CanvasViewport, CreateCanvasEdgeInput,
+    CreateCanvasInput, CreateTextNodeInput, DeleteCanvasEdgeInput, MoveCanvasNodeInput,
+    RenameCanvasInput, UpdateCanvasEdgeDirectionInput, UpdateCanvasEdgeLineStyleInput,
     UpdateCanvasViewportInput, UpdateTextNodeInput,
 };
 use crate::project::{
@@ -778,6 +780,75 @@ impl From<CanvasNodeRecord> for CanvasNodeDto {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreateCanvasEdgeDto {
+    id: String,
+    canvas_id: String,
+    source_node_id: String,
+    target_node_id: String,
+    relation_type: String,
+    direction: CanvasEdgeDirection,
+    line_style: CanvasEdgeLineStyle,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateCanvasEdgeDirectionDto {
+    id: String,
+    direction: CanvasEdgeDirection,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateCanvasEdgeLineStyleDto {
+    id: String,
+    line_style: CanvasEdgeLineStyle,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DeleteCanvasEdgeDto {
+    id: String,
+    deleted_at_ms: i64,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CanvasEdgeDto {
+    id: String,
+    canvas_id: String,
+    source_node_id: String,
+    target_node_id: String,
+    relation_type: String,
+    direction: CanvasEdgeDirection,
+    line_style: CanvasEdgeLineStyle,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    deleted_at_ms: Option<i64>,
+}
+
+impl From<CanvasEdgeRecord> for CanvasEdgeDto {
+    fn from(edge: CanvasEdgeRecord) -> Self {
+        Self {
+            id: edge.id,
+            canvas_id: edge.canvas_id,
+            source_node_id: edge.source_node_id,
+            target_node_id: edge.target_node_id,
+            relation_type: edge.relation_type,
+            direction: edge.direction,
+            line_style: edge.line_style,
+            created_at_ms: edge.created_at_ms,
+            updated_at_ms: edge.updated_at_ms,
+            deleted_at_ms: edge.deleted_at_ms,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CanvasCommandErrorDto {
     code: &'static str,
@@ -961,6 +1032,99 @@ pub(crate) fn canvas_node_move(
     .map_err(Into::into)
 }
 
+#[tauri::command]
+pub(crate) fn canvas_edge_create(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: CreateCanvasEdgeDto,
+) -> Result<CanvasEdgeDto, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::create_edge(
+        &connection,
+        CreateCanvasEdgeInput {
+            id: input.id,
+            canvas_id: input.canvas_id,
+            source_node_id: input.source_node_id,
+            target_node_id: input.target_node_id,
+            relation_type: input.relation_type,
+            direction: input.direction,
+            line_style: input.line_style,
+            created_at_ms: input.created_at_ms,
+        },
+    )
+    .map(CanvasEdgeDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_edge_list(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: CanvasIdDto,
+) -> Result<Vec<CanvasEdgeDto>, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::list_edges(&connection, &input.id)
+        .map(|edges| edges.into_iter().map(CanvasEdgeDto::from).collect())
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_edge_set_direction(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: UpdateCanvasEdgeDirectionDto,
+) -> Result<CanvasEdgeDto, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::update_edge_direction(
+        &connection,
+        UpdateCanvasEdgeDirectionInput {
+            id: input.id,
+            direction: input.direction,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(CanvasEdgeDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_edge_set_line_style(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: UpdateCanvasEdgeLineStyleDto,
+) -> Result<CanvasEdgeDto, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::update_edge_line_style(
+        &connection,
+        UpdateCanvasEdgeLineStyleInput {
+            id: input.id,
+            line_style: input.line_style,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(CanvasEdgeDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_edge_delete(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: DeleteCanvasEdgeDto,
+) -> Result<CanvasEdgeDto, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::delete_edge(
+        &connection,
+        DeleteCanvasEdgeInput {
+            id: input.id,
+            deleted_at_ms: input.deleted_at_ms,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(CanvasEdgeDto::from)
+    .map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1077,6 +1241,34 @@ mod tests {
                 "y": 80.0,
                 "createdAtMs": 30,
                 "updatedAtMs": 40
+            })
+        );
+
+        let edge = CanvasEdgeDto::from(CanvasEdgeRecord {
+            id: "00000000-0000-4000-8000-000000000604".into(),
+            canvas_id: "00000000-0000-4000-8000-000000000601".into(),
+            source_node_id: "00000000-0000-4000-8000-000000000602".into(),
+            target_node_id: "00000000-0000-4000-8000-000000000603".into(),
+            relation_type: "default".into(),
+            direction: CanvasEdgeDirection::Bidirectional,
+            line_style: CanvasEdgeLineStyle::Dashed,
+            created_at_ms: 50,
+            updated_at_ms: 60,
+            deleted_at_ms: None,
+        });
+        assert_eq!(
+            serde_json::to_value(edge).unwrap(),
+            serde_json::json!({
+                "id": "00000000-0000-4000-8000-000000000604",
+                "canvasId": "00000000-0000-4000-8000-000000000601",
+                "sourceNodeId": "00000000-0000-4000-8000-000000000602",
+                "targetNodeId": "00000000-0000-4000-8000-000000000603",
+                "relationType": "default",
+                "direction": "bidirectional",
+                "lineStyle": "dashed",
+                "createdAtMs": 50,
+                "updatedAtMs": 60,
+                "deletedAtMs": null
             })
         );
     }

@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from 'vitest'
 
-import type { Canvas, CanvasNode } from '@/canvas/model'
+import type { Canvas, CanvasEdge, CanvasNode } from '@/canvas/model'
 import {
   CanvasRepositoryError,
   type CanvasRepository,
@@ -12,6 +12,8 @@ import {
 
 const CANVAS_ID = '00000000-0000-4000-8000-000000000601'
 const NODE_ID = '00000000-0000-4000-8000-000000000602'
+const TARGET_NODE_ID = '00000000-0000-4000-8000-000000000603'
+const EDGE_ID = '00000000-0000-4000-8000-000000000604'
 
 function fixture(): {
   repository: CanvasRepository
@@ -19,6 +21,10 @@ function fixture(): {
   node: CanvasNode
   createCanvasMock: ReturnType<typeof vi.fn>
   createTextNodeMock: ReturnType<typeof vi.fn>
+  createCanvasEdgeMock: ReturnType<typeof vi.fn>
+  updateCanvasEdgeDirectionMock: ReturnType<typeof vi.fn>
+  updateCanvasEdgeLineStyleMock: ReturnType<typeof vi.fn>
+  deleteCanvasEdgeMock: ReturnType<typeof vi.fn>
 } {
   const canvas: Canvas = {
     id: CANVAS_ID,
@@ -39,6 +45,28 @@ function fixture(): {
   }
   const createCanvasMock = vi.fn(() => Promise.resolve(canvas))
   const createTextNodeMock = vi.fn(() => Promise.resolve(node))
+  const edge: CanvasEdge = {
+    id: EDGE_ID,
+    canvasId: CANVAS_ID,
+    sourceNodeId: NODE_ID,
+    targetNodeId: TARGET_NODE_ID,
+    relationType: 'default',
+    direction: 'forward',
+    lineStyle: 'solid',
+    createdAtMs: 50,
+    updatedAtMs: 50,
+    deletedAtMs: null,
+  }
+  const createCanvasEdgeMock = vi.fn(() => Promise.resolve(edge))
+  const updateCanvasEdgeDirectionMock = vi.fn((input) =>
+    Promise.resolve({ ...edge, ...input }),
+  )
+  const updateCanvasEdgeLineStyleMock = vi.fn((input) =>
+    Promise.resolve({ ...edge, ...input }),
+  )
+  const deleteCanvasEdgeMock = vi.fn((input) =>
+    Promise.resolve({ ...edge, ...input }),
+  )
   return {
     canvas,
     node,
@@ -52,16 +80,30 @@ function fixture(): {
       listCanvasNodes: vi.fn(() => Promise.resolve([node])),
       updateTextNode: vi.fn(() => Promise.resolve(node)),
       moveCanvasNode: vi.fn(() => Promise.resolve(node)),
+      createCanvasEdge: createCanvasEdgeMock,
+      listCanvasEdges: vi.fn(() => Promise.resolve([edge])),
+      updateCanvasEdgeDirection: updateCanvasEdgeDirectionMock,
+      updateCanvasEdgeLineStyle: updateCanvasEdgeLineStyleMock,
+      deleteCanvasEdge: deleteCanvasEdgeMock,
     },
     createCanvasMock,
     createTextNodeMock,
+    createCanvasEdgeMock,
+    updateCanvasEdgeDirectionMock,
+    updateCanvasEdgeLineStyleMock,
+    deleteCanvasEdgeMock,
   }
 }
 
 describe('CanvasService', () => {
   test('owns IDs, timestamps, title trim, viewport, text, and movement inputs', async () => {
-    const { repository, createCanvasMock, createTextNodeMock } = fixture()
-    const ids = [CANVAS_ID, NODE_ID]
+    const {
+      repository,
+      createCanvasMock,
+      createTextNodeMock,
+      createCanvasEdgeMock,
+    } = fixture()
+    const ids = [CANVAS_ID, NODE_ID, EDGE_ID]
     const service = createCanvasService({
       repository,
       generateId: () => ids.shift()!,
@@ -87,6 +129,17 @@ describe('CanvasService', () => {
     await service.updateViewport(CANVAS_ID, { x: 4, y: -8, zoom: 1.2 })
     await service.moveCanvasNode(NODE_ID, 80, 90)
     await service.editTextNode(NODE_ID, 'Updated')
+    await service.createCanvasEdge(CANVAS_ID, NODE_ID, TARGET_NODE_ID)
+    expect(createCanvasEdgeMock).toHaveBeenCalledWith({
+      id: EDGE_ID,
+      canvasId: CANVAS_ID,
+      sourceNodeId: NODE_ID,
+      targetNodeId: TARGET_NODE_ID,
+      relationType: 'default',
+      direction: 'forward',
+      lineStyle: 'solid',
+      createdAtMs: 50,
+    })
   })
 
   test('loads a workspace from explicit get/list capabilities', async () => {
@@ -95,6 +148,7 @@ describe('CanvasService', () => {
     await expect(service.openCanvas(CANVAS_ID)).resolves.toEqual({
       canvas,
       nodes: [node],
+      edges: [expect.objectContaining({ id: EDGE_ID })],
     })
   })
 
@@ -132,6 +186,57 @@ describe('CanvasService', () => {
     await expect(service.listCanvases()).rejects.toMatchObject({
       code: 'UNAVAILABLE',
       message: 'Canvas service is unavailable.',
+    })
+  })
+
+  test('validates Edge inputs and maps duplicate conflicts safely', async () => {
+    const { repository } = fixture()
+    const service = createCanvasService({ repository })
+    await expect(
+      service.createCanvasEdge(CANVAS_ID, NODE_ID, NODE_ID),
+    ).rejects.toMatchObject({ code: 'VALIDATION', field: 'targetNodeId' })
+    expect(() =>
+      service.updateCanvasEdgeDirection(EDGE_ID, 'reverse' as never),
+    ).toThrowError(expect.objectContaining({ code: 'VALIDATION', field: 'direction' }))
+    expect(() =>
+      service.updateCanvasEdgeLineStyle(EDGE_ID, 'animated' as never),
+    ).toThrowError(expect.objectContaining({ code: 'VALIDATION', field: 'lineStyle' }))
+
+    repository.createCanvasEdge = vi.fn(() =>
+      Promise.reject(
+        new CanvasRepositoryError('DUPLICATE', 'createCanvasEdge'),
+      ),
+    )
+    await expect(
+      service.createCanvasEdge(CANVAS_ID, NODE_ID, TARGET_NODE_ID),
+    ).rejects.toMatchObject({ code: 'CONFLICT' })
+  })
+
+  test('owns Edge direction, style, and soft-delete timestamps', async () => {
+    const {
+      repository,
+      updateCanvasEdgeDirectionMock,
+      updateCanvasEdgeLineStyleMock,
+      deleteCanvasEdgeMock,
+    } = fixture()
+    const service = createCanvasService({ repository, nowMs: () => 75 })
+    await service.updateCanvasEdgeDirection(EDGE_ID, 'bidirectional')
+    expect(updateCanvasEdgeDirectionMock).toHaveBeenCalledWith({
+      id: EDGE_ID,
+      direction: 'bidirectional',
+      updatedAtMs: 75,
+    })
+    await service.updateCanvasEdgeLineStyle(EDGE_ID, 'dashed')
+    expect(updateCanvasEdgeLineStyleMock).toHaveBeenCalledWith({
+      id: EDGE_ID,
+      lineStyle: 'dashed',
+      updatedAtMs: 75,
+    })
+    await service.deleteCanvasEdge(EDGE_ID)
+    expect(deleteCanvasEdgeMock).toHaveBeenCalledWith({
+      id: EDGE_ID,
+      deletedAtMs: 75,
+      updatedAtMs: 75,
     })
   })
 })

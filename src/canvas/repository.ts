@@ -1,5 +1,9 @@
 import type {
   Canvas,
+  CanvasEdge,
+  CanvasEdgeDirection,
+  CanvasEdgeLineStyle,
+  CanvasEdgeRelationType,
   CanvasNode,
   CanvasViewport,
   TextNodeContent,
@@ -46,6 +50,35 @@ export interface MoveCanvasNodeInput {
   readonly updatedAtMs: number
 }
 
+export interface CreateCanvasEdgeInput {
+  readonly id: string
+  readonly canvasId: string
+  readonly sourceNodeId: string
+  readonly targetNodeId: string
+  readonly relationType: CanvasEdgeRelationType
+  readonly direction: CanvasEdgeDirection
+  readonly lineStyle: CanvasEdgeLineStyle
+  readonly createdAtMs: number
+}
+
+export interface UpdateCanvasEdgeDirectionInput {
+  readonly id: string
+  readonly direction: CanvasEdgeDirection
+  readonly updatedAtMs: number
+}
+
+export interface UpdateCanvasEdgeLineStyleInput {
+  readonly id: string
+  readonly lineStyle: CanvasEdgeLineStyle
+  readonly updatedAtMs: number
+}
+
+export interface DeleteCanvasEdgeInput {
+  readonly id: string
+  readonly deletedAtMs: number
+  readonly updatedAtMs: number
+}
+
 export interface CanvasRepository {
   createCanvas(input: CreateCanvasInput): Promise<Canvas>
   listCanvases(): Promise<readonly Canvas[]>
@@ -56,10 +89,20 @@ export interface CanvasRepository {
   listCanvasNodes(canvasId: string): Promise<readonly CanvasNode[]>
   updateTextNode(input: UpdateTextNodeInput): Promise<CanvasNode>
   moveCanvasNode(input: MoveCanvasNodeInput): Promise<CanvasNode>
+  createCanvasEdge(input: CreateCanvasEdgeInput): Promise<CanvasEdge>
+  listCanvasEdges(canvasId: string): Promise<readonly CanvasEdge[]>
+  updateCanvasEdgeDirection(
+    input: UpdateCanvasEdgeDirectionInput,
+  ): Promise<CanvasEdge>
+  updateCanvasEdgeLineStyle(
+    input: UpdateCanvasEdgeLineStyleInput,
+  ): Promise<CanvasEdge>
+  deleteCanvasEdge(input: DeleteCanvasEdgeInput): Promise<CanvasEdge>
 }
 
 export type CanvasRepositoryErrorCode =
   | 'NOT_FOUND'
+  | 'DUPLICATE'
   | 'PERSISTENCE_UNAVAILABLE'
   | 'PERSISTENCE_FAILED'
 
@@ -67,6 +110,7 @@ export type CanvasRepositoryOperation = keyof CanvasRepository
 
 const SAFE_MESSAGES: Record<CanvasRepositoryErrorCode, string> = {
   NOT_FOUND: 'Canvas resource not found.',
+  DUPLICATE: 'Canvas relation already exists.',
   PERSISTENCE_UNAVAILABLE: 'Canvas persistence is unavailable.',
   PERSISTENCE_FAILED: 'Canvas persistence operation failed.',
 }

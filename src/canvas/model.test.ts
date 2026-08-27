@@ -2,6 +2,9 @@ import { describe, expect, test } from 'vitest'
 
 import {
   isCanvasCoordinate,
+  isCanvasEdgeDirection,
+  isCanvasEdgeLineStyle,
+  isCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
   isTextNodeContent,
@@ -42,5 +45,18 @@ describe('Canvas domain validation', () => {
     expect(isCanvasCoordinate(-123.5)).toBe(true)
     expect(isCanvasCoordinate(Number.NaN)).toBe(false)
     expect(isCanvasCoordinate(Number.POSITIVE_INFINITY)).toBe(false)
+  })
+
+  test('accepts only the frozen Canvas Edge V1 enums', () => {
+    expect(isCanvasEdgeRelationType('default')).toBe(true)
+    expect(isCanvasEdgeRelationType('dependency')).toBe(false)
+    expect(isCanvasEdgeDirection('forward')).toBe(true)
+    expect(isCanvasEdgeDirection('bidirectional')).toBe(true)
+    expect(isCanvasEdgeDirection('none')).toBe(true)
+    expect(isCanvasEdgeDirection('reverse')).toBe(false)
+    expect(isCanvasEdgeLineStyle('solid')).toBe(true)
+    expect(isCanvasEdgeLineStyle('dashed')).toBe(true)
+    expect(isCanvasEdgeLineStyle('dotted')).toBe(true)
+    expect(isCanvasEdgeLineStyle('animated')).toBe(false)
   })
 })

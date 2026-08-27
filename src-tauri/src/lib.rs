@@ -214,7 +214,12 @@ pub fn run() {
             commands::canvas_node_create_text,
             commands::canvas_node_list,
             commands::canvas_node_update_text,
-            commands::canvas_node_move
+            commands::canvas_node_move,
+            commands::canvas_edge_create,
+            commands::canvas_edge_list,
+            commands::canvas_edge_set_direction,
+            commands::canvas_edge_set_line_style,
+            commands::canvas_edge_delete
         ])
         .setup(|app| {
             // 🔒 冻结 §3：路径统一通过 PathResolver。
@@ -739,7 +744,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(rows, 6, "Production Migrations 1-6 必须写入 history");
+        assert_eq!(rows, 7, "Production Migrations 1-7 必须写入 history");
         let task_table: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
@@ -776,7 +781,7 @@ mod tests {
         let others: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master \
-                 WHERE type='table' AND name NOT IN ('schema_migrations', 'tasks', 'projects', 'tags', 'task_tags', 'canvases', 'canvas_nodes')",
+                 WHERE type='table' AND name NOT IN ('schema_migrations', 'tasks', 'projects', 'tags', 'task_tags', 'canvases', 'canvas_nodes', 'canvas_edges')",
                 [],
                 |r| r.get(0),
             )
@@ -803,12 +808,12 @@ mod tests {
         let manifest_bytes_before =
             fs::read(data_root.join(MANIFEST_FILENAME)).unwrap();
 
-        // (2) Production already applied v1-v6; insert an unknown v7.
+        // (2) Production already applied v1-v7; insert an unknown v8.
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
             conn.execute_batch(
                 "INSERT INTO schema_migrations(version,id,checksum_sha256,applied_at_ms) \
-                 VALUES(7,'m7','sha7',101);",
+                 VALUES(8,'m8','sha8',101);",
             )
             .unwrap();
         }
@@ -841,10 +846,10 @@ mod tests {
         assert_eq!(device_id_1.as_str(), loaded2.device_id.as_str());
         assert!(db_path.exists(), "失败不得删 zhixing.db");
 
-        // (4) Remove only the injected v7 row; approved v1-v6 remain intact.
+        // (4) Remove only the injected v8 row; approved v1-v7 remain intact.
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
-            conn.execute_batch("DELETE FROM schema_migrations WHERE version = 7;")
+            conn.execute_batch("DELETE FROM schema_migrations WHERE version = 8;")
                 .unwrap();
         }
         let status = run_bootstrap_pipeline(&cfg, &local);

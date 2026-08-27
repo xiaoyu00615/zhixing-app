@@ -3,10 +3,14 @@ import { invoke } from '@tauri-apps/api/core'
 import {
   isCanonicalCanvasId,
   isCanvasCoordinate,
+  isCanvasEdgeDirection,
+  isCanvasEdgeLineStyle,
+  isCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
   isTextNodeContent,
   type Canvas,
+  type CanvasEdge,
   type CanvasNode,
 } from '@/canvas/model'
 import {
@@ -14,10 +18,14 @@ import {
   type CanvasRepository,
   type CanvasRepositoryOperation,
   type CreateCanvasInput,
+  type CreateCanvasEdgeInput,
   type CreateTextNodeInput,
+  type DeleteCanvasEdgeInput,
   type MoveCanvasNodeInput,
   type RenameCanvasInput,
   type UpdateCanvasViewportInput,
+  type UpdateCanvasEdgeDirectionInput,
+  type UpdateCanvasEdgeLineStyleInput,
   type UpdateTextNodeInput,
 } from '@/canvas/repository'
 
@@ -72,6 +80,55 @@ function parseNode(
   return { id, canvasId, type, content, x, y, createdAtMs, updatedAtMs }
 }
 
+function parseEdge(
+  value: unknown,
+  operation: CanvasRepositoryOperation,
+): CanvasEdge {
+  if (!isRecord(value)) {
+    throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+  }
+  const {
+    id,
+    canvasId,
+    sourceNodeId,
+    targetNodeId,
+    relationType,
+    direction,
+    lineStyle,
+    createdAtMs,
+    updatedAtMs,
+    deletedAtMs,
+  } = value
+  if (
+    !isCanonicalCanvasId(id) ||
+    !isCanonicalCanvasId(canvasId) ||
+    !isCanonicalCanvasId(sourceNodeId) ||
+    !isCanonicalCanvasId(targetNodeId) ||
+    sourceNodeId === targetNodeId ||
+    !isCanvasEdgeRelationType(relationType) ||
+    !isCanvasEdgeDirection(direction) ||
+    !isCanvasEdgeLineStyle(lineStyle) ||
+    !isTimestamp(createdAtMs) ||
+    !isTimestamp(updatedAtMs) ||
+    updatedAtMs < createdAtMs ||
+    (deletedAtMs !== null && !isTimestamp(deletedAtMs))
+  ) {
+    throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+  }
+  return {
+    id,
+    canvasId,
+    sourceNodeId,
+    targetNodeId,
+    relationType,
+    direction,
+    lineStyle,
+    createdAtMs,
+    updatedAtMs,
+    deletedAtMs,
+  }
+}
+
 function mapError(
   value: unknown,
   operation: CanvasRepositoryOperation,
@@ -79,6 +136,7 @@ function mapError(
   if (
     isRecord(value) &&
     (value.code === 'NOT_FOUND' ||
+      value.code === 'DUPLICATE' ||
       value.code === 'PERSISTENCE_UNAVAILABLE' ||
       value.code === 'PERSISTENCE_FAILED')
   ) {
@@ -167,6 +225,56 @@ export class NativeCanvasRepository implements CanvasRepository {
     return parseNode(
       await invokeCanvas('canvas_node_move', 'moveCanvasNode', { input }),
       'moveCanvasNode',
+    )
+  }
+
+  async createCanvasEdge(input: CreateCanvasEdgeInput): Promise<CanvasEdge> {
+    return parseEdge(
+      await invokeCanvas('canvas_edge_create', 'createCanvasEdge', { input }),
+      'createCanvasEdge',
+    )
+  }
+
+  async listCanvasEdges(canvasId: string): Promise<readonly CanvasEdge[]> {
+    const value = await invokeCanvas('canvas_edge_list', 'listCanvasEdges', {
+      input: { id: canvasId },
+    })
+    if (!Array.isArray(value)) {
+      throw new CanvasRepositoryError('PERSISTENCE_FAILED', 'listCanvasEdges')
+    }
+    return value.map((edge) => parseEdge(edge, 'listCanvasEdges'))
+  }
+
+  async updateCanvasEdgeDirection(
+    input: UpdateCanvasEdgeDirectionInput,
+  ): Promise<CanvasEdge> {
+    return parseEdge(
+      await invokeCanvas(
+        'canvas_edge_set_direction',
+        'updateCanvasEdgeDirection',
+        { input },
+      ),
+      'updateCanvasEdgeDirection',
+    )
+  }
+
+  async updateCanvasEdgeLineStyle(
+    input: UpdateCanvasEdgeLineStyleInput,
+  ): Promise<CanvasEdge> {
+    return parseEdge(
+      await invokeCanvas(
+        'canvas_edge_set_line_style',
+        'updateCanvasEdgeLineStyle',
+        { input },
+      ),
+      'updateCanvasEdgeLineStyle',
+    )
+  }
+
+  async deleteCanvasEdge(input: DeleteCanvasEdgeInput): Promise<CanvasEdge> {
+    return parseEdge(
+      await invokeCanvas('canvas_edge_delete', 'deleteCanvasEdge', { input }),
+      'deleteCanvasEdge',
     )
   }
 }

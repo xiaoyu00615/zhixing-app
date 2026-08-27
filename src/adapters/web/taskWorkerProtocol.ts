@@ -27,16 +27,23 @@ import type { CreateTagInput, RenameTagInput } from '@/tag/repository'
 import {
   isCanonicalCanvasId,
   isCanvasCoordinate,
+  isCanvasEdgeDirection,
+  isCanvasEdgeLineStyle,
+  isCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
   isTextNodeContent,
 } from '@/canvas/model'
 import type {
   CreateCanvasInput,
+  CreateCanvasEdgeInput,
   CreateTextNodeInput,
+  DeleteCanvasEdgeInput,
   MoveCanvasNodeInput,
   RenameCanvasInput,
   UpdateCanvasViewportInput,
+  UpdateCanvasEdgeDirectionInput,
+  UpdateCanvasEdgeLineStyleInput,
   UpdateTextNodeInput,
 } from '@/canvas/repository'
 
@@ -183,6 +190,31 @@ export type TaskWorkerRequest =
       readonly requestId: number
       readonly type: 'canvas.node.move'
       readonly input: MoveCanvasNodeInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.edge.create'
+      readonly input: CreateCanvasEdgeInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.edge.list'
+      readonly canvasId: string
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.edge.setDirection'
+      readonly input: UpdateCanvasEdgeDirectionInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.edge.setLineStyle'
+      readonly input: UpdateCanvasEdgeLineStyleInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.edge.delete'
+      readonly input: DeleteCanvasEdgeInput
     }
   | { readonly requestId: number; readonly type: 'shutdown' }
 
@@ -332,6 +364,23 @@ function isCreateTextNodeInput(value: unknown): value is CreateTextNodeInput {
     isTextNodeContent(value.content) &&
     isCanvasCoordinate(value.x) &&
     isCanvasCoordinate(value.y) &&
+    isCanvasTimestamp(value.createdAtMs)
+  )
+}
+
+function isCreateCanvasEdgeInput(
+  value: unknown,
+): value is CreateCanvasEdgeInput {
+  return (
+    isRecord(value) &&
+    isCanonicalCanvasId(value.id) &&
+    isCanonicalCanvasId(value.canvasId) &&
+    isCanonicalCanvasId(value.sourceNodeId) &&
+    isCanonicalCanvasId(value.targetNodeId) &&
+    value.sourceNodeId !== value.targetNodeId &&
+    isCanvasEdgeRelationType(value.relationType) &&
+    isCanvasEdgeDirection(value.direction) &&
+    isCanvasEdgeLineStyle(value.lineStyle) &&
     isCanvasTimestamp(value.createdAtMs)
   )
 }
@@ -538,6 +587,45 @@ export function parseTaskWorkerRequest(
             requestId: value.requestId,
             type: value.type,
             input: value.input as unknown as MoveCanvasNodeInput,
+          }
+        : null
+    case 'canvas.edge.create':
+      return isCreateCanvasEdgeInput(value.input)
+        ? { requestId: value.requestId, type: value.type, input: value.input }
+        : null
+    case 'canvas.edge.list':
+      return isCanonicalCanvasId(value.canvasId)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            canvasId: value.canvasId,
+          }
+        : null
+    case 'canvas.edge.setDirection':
+      return isCanvasUpdateBase(value.input) &&
+        isCanvasEdgeDirection(value.input.direction)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input as unknown as UpdateCanvasEdgeDirectionInput,
+          }
+        : null
+    case 'canvas.edge.setLineStyle':
+      return isCanvasUpdateBase(value.input) &&
+        isCanvasEdgeLineStyle(value.input.lineStyle)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input as unknown as UpdateCanvasEdgeLineStyleInput,
+          }
+        : null
+    case 'canvas.edge.delete':
+      return isCanvasUpdateBase(value.input) &&
+        isCanvasTimestamp(value.input.deletedAtMs)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input as unknown as DeleteCanvasEdgeInput,
           }
         : null
     default:
