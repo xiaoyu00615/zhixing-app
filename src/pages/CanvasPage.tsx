@@ -1,5 +1,6 @@
-import { ArrowRight, LayoutGrid, PenLine, Plus, RotateCcw } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { ArrowRight, LayoutGrid, PenLine, Plus, RotateCcw, Search, X } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router'
 
 import { Button } from '@/components/ui/button'
@@ -42,6 +43,17 @@ export function CanvasPage({ openRuntime = openCanvasRuntime }: CanvasPageProps)
   const [title, setTitle] = useState('')
   const [dialogError, setDialogError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+
+  const normalizedSearchQuery = searchQuery.trim().toLocaleLowerCase()
+  const visibleCanvases = useMemo(
+    () => normalizedSearchQuery.length === 0
+      ? canvases
+      : canvases.filter((canvas) =>
+          canvas.title.toLocaleLowerCase().includes(normalizedSearchQuery),
+        ),
+    [canvases, normalizedSearchQuery],
+  )
 
   useEffect(() => {
     let active = true
@@ -100,17 +112,46 @@ export function CanvasPage({ openRuntime = openCanvasRuntime }: CanvasPageProps)
     return <div className="flex min-h-80 flex-col items-center justify-center text-center"><LayoutGrid className="mb-4 size-9 text-foreground-tertiary" /><h2 className="text-module font-semibold">画布暂时无法加载</h2><p className="mt-2 text-body text-foreground-secondary">请确认本地存储可用后重试。</p><Button className="mt-5" variant="outline" onClick={() => setAttempt((value) => value + 1)}><RotateCcw />重试</Button></div>
   }
 
+  const toolbar = (
+    <div className="grid w-full grid-cols-[auto_minmax(12rem,30rem)_auto] items-center gap-5">
+      <h1 className="text-subtitle font-semibold text-foreground">所有画布</h1>
+      <div className="relative w-full justify-self-center">
+        <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-foreground-tertiary" />
+        <Input
+          aria-label="搜索画布"
+          className="h-9 rounded-lg bg-background pl-9 pr-9 [&::-webkit-search-cancel-button]:appearance-none"
+          onChange={(event) => setSearchQuery(event.target.value)}
+          placeholder="搜索画布"
+          type="search"
+          value={searchQuery}
+        />
+        {searchQuery.length > 0 && (
+          <button
+            aria-label="清空画布搜索"
+            className="absolute right-2 top-1/2 flex size-7 -translate-y-1/2 items-center justify-center rounded-md text-foreground-tertiary transition hover:bg-surface-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+            onClick={() => setSearchQuery('')}
+            type="button"
+          >
+            <X className="size-3.5" />
+          </button>
+        )}
+      </div>
+      <Button className="w-fit justify-self-end" onClick={openCreate}><Plus />新建画布</Button>
+    </div>
+  )
+  const toolbarTarget = document.getElementById('page-toolbar-root')
+
   return (
-    <div className="mx-auto w-full max-w-[1320px] space-y-7 pb-10">
-      <header className="flex items-end justify-between gap-5 border-b border-border/70 pb-5">
-        <div><p className="mb-2 text-xs font-semibold tracking-[0.18em] text-primary">CANVAS SPACE</p><h2 className="text-hero font-semibold tracking-tight text-foreground">画布</h2><p className="mt-2 text-body text-foreground-secondary">把想法摊开，在自由空间里连接思考。</p></div>
-        <Button onClick={openCreate}><Plus />新建画布</Button>
-      </header>
+    <>
+      {toolbarTarget === null ? toolbar : createPortal(toolbar, toolbarTarget)}
+      <div className="mx-auto w-full max-w-[1320px] pb-10 pt-1">
       {canvases.length === 0 ? (
-        <section className="flex min-h-[440px] flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-surface-secondary/20 text-center"><div className="mb-5 flex size-16 items-center justify-center rounded-2xl bg-primary-softest text-primary"><LayoutGrid className="size-8" /></div><h3 className="text-xl font-semibold">从第一张画布开始</h3><p className="mt-2 max-w-sm text-body text-foreground-secondary">创建画布并添加文字节点；位置与视口会保存在本地。</p><Button className="mt-6" onClick={openCreate}><Plus />新建画布</Button></section>
+        <section className="flex min-h-[360px] flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-surface-secondary/20 text-center"><div className="mb-5 flex size-14 items-center justify-center rounded-2xl bg-primary-softest text-primary"><LayoutGrid className="size-7" /></div><h3 className="text-lg font-semibold">还没有画布</h3><p className="mt-2 max-w-sm text-body text-foreground-secondary">使用右上角的新建画布，开始整理你的想法。</p></section>
+      ) : visibleCanvases.length === 0 ? (
+        <section className="flex min-h-[300px] flex-col items-center justify-center text-center" aria-label="画布搜索无结果"><Search className="mb-4 size-7 text-foreground-tertiary" /><h3 className="text-base font-semibold">没有找到匹配的画布</h3><p className="mt-2 text-sm text-foreground-secondary">尝试其他标题关键词，或清空当前搜索。</p><Button className="mt-4" variant="ghost" onClick={() => setSearchQuery('')}>清空搜索</Button></section>
       ) : (
         <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3" aria-label="画布列表">
-          {canvases.map((canvas, index) => (
+          {visibleCanvases.map((canvas, index) => (
             <article key={canvas.id} className="group relative min-h-52 overflow-hidden rounded-2xl border border-border bg-surface p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-primary/25 hover:shadow-md">
               <div className={`absolute inset-x-0 top-0 h-1 ${['bg-primary', 'bg-amber-500', 'bg-sky-500'][index % 3]}`} />
               <div className="flex items-start justify-between gap-3"><div className="flex size-10 items-center justify-center rounded-xl bg-surface-secondary text-primary"><LayoutGrid className="size-5" /></div><Button size="icon-sm" variant="ghost" aria-label={`重命名 ${canvas.title}`} onClick={() => openRename(canvas)}><PenLine /></Button></div>
@@ -122,6 +163,7 @@ export function CanvasPage({ openRuntime = openCanvasRuntime }: CanvasPageProps)
       <Dialog open={dialog !== null} onOpenChange={(open) => !open && setDialog(null)}>
         <DialogContent><DialogHeader><DialogTitle>{dialog?.mode === 'rename' ? '重命名画布' : '新建画布'}</DialogTitle><DialogDescription>名称会显示在画布列表和编辑器顶部。</DialogDescription></DialogHeader><form onSubmit={(event) => { event.preventDefault(); void submit() }}><Input autoFocus aria-label="画布名称" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：产品构思" />{dialogError !== null && <p className="mt-2 text-sm text-destructive" role="alert">{dialogError}</p>}<DialogFooter className="mt-5"><Button type="button" variant="ghost" onClick={() => setDialog(null)}>取消</Button><Button type="submit" disabled={submitting}>{submitting ? '保存中…' : '保存'}</Button></DialogFooter></form></DialogContent>
       </Dialog>
-    </div>
+      </div>
+    </>
   )
 }
