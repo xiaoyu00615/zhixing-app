@@ -50,6 +50,18 @@ export interface MoveCanvasNodeInput {
   readonly updatedAtMs: number
 }
 
+export interface CanvasNodePositionMove {
+  readonly nodeId: string
+  readonly x: number
+  readonly y: number
+}
+
+export interface MoveCanvasNodesInput {
+  readonly canvasId: string
+  readonly moves: readonly CanvasNodePositionMove[]
+  readonly updatedAtMs: number
+}
+
 export interface CreateCanvasEdgeInput {
   readonly id: string
   readonly canvasId: string
@@ -89,6 +101,7 @@ export interface CanvasRepository {
   listCanvasNodes(canvasId: string): Promise<readonly CanvasNode[]>
   updateTextNode(input: UpdateTextNodeInput): Promise<CanvasNode>
   moveCanvasNode(input: MoveCanvasNodeInput): Promise<CanvasNode>
+  moveCanvasNodes(input: MoveCanvasNodesInput): Promise<readonly CanvasNode[]>
   createCanvasEdge(input: CreateCanvasEdgeInput): Promise<CanvasEdge>
   listCanvasEdges(canvasId: string): Promise<readonly CanvasEdge[]>
   updateCanvasEdgeDirection(

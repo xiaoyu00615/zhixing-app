@@ -22,6 +22,7 @@ import {
   type CreateTextNodeInput,
   type DeleteCanvasEdgeInput,
   type MoveCanvasNodeInput,
+  type MoveCanvasNodesInput,
   type RenameCanvasInput,
   type UpdateCanvasViewportInput,
   type UpdateCanvasEdgeDirectionInput,
@@ -226,6 +227,17 @@ export class NativeCanvasRepository implements CanvasRepository {
       await invokeCanvas('canvas_node_move', 'moveCanvasNode', { input }),
       'moveCanvasNode',
     )
+  }
+
+  async moveCanvasNodes(
+    input: MoveCanvasNodesInput,
+  ): Promise<readonly CanvasNode[]> {
+    const operation = 'moveCanvasNodes'
+    const value = await invokeCanvas('canvas_nodes_move', operation, { input })
+    if (!Array.isArray(value)) {
+      throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+    }
+    return value.map((node) => parseNode(node, operation))
   }
 
   async createCanvasEdge(input: CreateCanvasEdgeInput): Promise<CanvasEdge> {

@@ -5,10 +5,10 @@ use tauri::Manager;
 
 use crate::canvas::{
     CanvasDbService, CanvasEdgeDirection, CanvasEdgeLineStyle, CanvasEdgeRecord, CanvasError,
-    CanvasNodeContent, CanvasNodeRecord, CanvasRecord, CanvasViewport, CreateCanvasEdgeInput,
-    CreateCanvasInput, CreateTextNodeInput, DeleteCanvasEdgeInput, MoveCanvasNodeInput,
-    RenameCanvasInput, UpdateCanvasEdgeDirectionInput, UpdateCanvasEdgeLineStyleInput,
-    UpdateCanvasViewportInput, UpdateTextNodeInput,
+    CanvasNodeContent, CanvasNodePositionMove, CanvasNodeRecord, CanvasRecord, CanvasViewport,
+    CreateCanvasEdgeInput, CreateCanvasInput, CreateTextNodeInput, DeleteCanvasEdgeInput,
+    MoveCanvasNodeInput, MoveCanvasNodesInput, RenameCanvasInput, UpdateCanvasEdgeDirectionInput,
+    UpdateCanvasEdgeLineStyleInput, UpdateCanvasViewportInput, UpdateTextNodeInput,
 };
 use crate::project::{
     CreateProjectInput, ProjectDbService, ProjectError, ProjectRecord, RenameProjectInput,
@@ -751,6 +751,22 @@ pub(crate) struct MoveCanvasNodeDto {
     updated_at_ms: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CanvasNodePositionMoveDto {
+    node_id: String,
+    x: f64,
+    y: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MoveCanvasNodesDto {
+    canvas_id: String,
+    moves: Vec<CanvasNodePositionMoveDto>,
+    updated_at_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CanvasNodeDto {
@@ -1029,6 +1045,33 @@ pub(crate) fn canvas_node_move(
         },
     )
     .map(CanvasNodeDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_nodes_move(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: MoveCanvasNodesDto,
+) -> Result<Vec<CanvasNodeDto>, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::move_nodes(
+        &connection,
+        MoveCanvasNodesInput {
+            canvas_id: input.canvas_id,
+            moves: input
+                .moves
+                .into_iter()
+                .map(|node_move| CanvasNodePositionMove {
+                    node_id: node_move.node_id,
+                    x: node_move.x,
+                    y: node_move.y,
+                })
+                .collect(),
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(|nodes| nodes.into_iter().map(CanvasNodeDto::from).collect())
     .map_err(Into::into)
 }
 

@@ -14,6 +14,7 @@ import {
   type CreateTextNodeInput,
   type DeleteCanvasEdgeInput,
   type MoveCanvasNodeInput,
+  type MoveCanvasNodesInput,
   type RenameCanvasInput,
   type UpdateCanvasViewportInput,
   type UpdateCanvasEdgeDirectionInput,
@@ -89,6 +90,32 @@ export class CanvasContractBackend implements CanvasRepository {
     const updated = { ...node, x: input.x, y: input.y, updatedAtMs: input.updatedAtMs }
     this.nodes.set(input.id, updated)
     return Promise.resolve(updated)
+  }
+
+  async moveCanvasNodes(
+    input: MoveCanvasNodesInput,
+  ): Promise<readonly CanvasNode[]> {
+    await this.getCanvas(input.canvasId)
+    const nodeIds = new Set<string>()
+    const current = input.moves.map((move) => {
+      if (nodeIds.has(move.nodeId)) {
+        throw new CanvasRepositoryError('PERSISTENCE_FAILED', 'moveCanvasNodes')
+      }
+      nodeIds.add(move.nodeId)
+      const node = this.nodes.get(move.nodeId)
+      if (node?.canvasId !== input.canvasId) {
+        throw new CanvasRepositoryError('NOT_FOUND', 'moveCanvasNodes')
+      }
+      return node
+    })
+    const updated = current.map((node, index) => ({
+      ...node,
+      x: input.moves[index]!.x,
+      y: input.moves[index]!.y,
+      updatedAtMs: input.updatedAtMs,
+    }))
+    for (const node of updated) this.nodes.set(node.id, node)
+    return updated
   }
 
   async createCanvasEdge(input: CreateCanvasEdgeInput): Promise<CanvasEdge> {
@@ -227,6 +254,41 @@ export function defineCanvasRepositoryContract(
       await expect(repository.updateTextNode({ id: CONTRACT_NODE_ID, content: { type: 'text', text: 'Two' }, updatedAtMs: 30 })).resolves.toMatchObject({ content: { type: 'text', text: 'Two' } })
       await expect(repository.moveCanvasNode({ id: CONTRACT_NODE_ID, x: -10, y: 45, updatedAtMs: 40 })).resolves.toMatchObject({ x: -10, y: 45 })
       await expect(repository.listCanvasNodes(CONTRACT_CANVAS_ID)).resolves.toEqual([expect.objectContaining({ id: CONTRACT_NODE_ID })])
+    })
+
+    test('moves multiple nodes atomically within one Canvas', async () => {
+      const { repository } = createFixture()
+      await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+      await repository.createTextNode({ id: CONTRACT_NODE_ID, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: 'One' }, x: 1, y: 2, createdAtMs: 20 })
+      await repository.createTextNode({ id: CONTRACT_TARGET_NODE_ID, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: 'Two' }, x: 3, y: 4, createdAtMs: 21 })
+      await expect(repository.moveCanvasNodes({
+        canvasId: CONTRACT_CANVAS_ID,
+        moves: [
+          { nodeId: CONTRACT_NODE_ID, x: 10, y: 20 },
+          { nodeId: CONTRACT_TARGET_NODE_ID, x: 30, y: 40 },
+        ],
+        updatedAtMs: 50,
+      })).resolves.toEqual([
+        expect.objectContaining({ id: CONTRACT_NODE_ID, x: 10, y: 20, updatedAtMs: 50 }),
+        expect.objectContaining({ id: CONTRACT_TARGET_NODE_ID, x: 30, y: 40, updatedAtMs: 50 }),
+      ])
+    })
+
+    test('does not partially move nodes when a batch member is missing or cross-Canvas', async () => {
+      const { repository } = createFixture()
+      await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+      await repository.createTextNode({ id: CONTRACT_NODE_ID, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: 'One' }, x: 1, y: 2, createdAtMs: 20 })
+      await expect(repository.moveCanvasNodes({
+        canvasId: CONTRACT_CANVAS_ID,
+        moves: [
+          { nodeId: CONTRACT_NODE_ID, x: 10, y: 20 },
+          { nodeId: CONTRACT_TARGET_NODE_ID, x: 30, y: 40 },
+        ],
+        updatedAtMs: 50,
+      })).rejects.toMatchObject({ code: 'NOT_FOUND' })
+      await expect(repository.listCanvasNodes(CONTRACT_CANVAS_ID)).resolves.toEqual([
+        expect.objectContaining({ id: CONTRACT_NODE_ID, x: 1, y: 2, updatedAtMs: 20 }),
+      ])
     })
 
     test('reports missing Canvas and node through the safe contract', async () => {

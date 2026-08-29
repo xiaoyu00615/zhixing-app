@@ -25,6 +25,7 @@ function fixture(): {
   updateCanvasEdgeDirectionMock: ReturnType<typeof vi.fn>
   updateCanvasEdgeLineStyleMock: ReturnType<typeof vi.fn>
   deleteCanvasEdgeMock: ReturnType<typeof vi.fn>
+  moveCanvasNodesMock: ReturnType<typeof vi.fn>
 } {
   const canvas: Canvas = {
     id: CANVAS_ID,
@@ -67,6 +68,7 @@ function fixture(): {
   const deleteCanvasEdgeMock = vi.fn((input) =>
     Promise.resolve({ ...edge, ...input }),
   )
+  const moveCanvasNodesMock = vi.fn(() => Promise.resolve([node]))
   return {
     canvas,
     node,
@@ -80,6 +82,7 @@ function fixture(): {
       listCanvasNodes: vi.fn(() => Promise.resolve([node])),
       updateTextNode: vi.fn(() => Promise.resolve(node)),
       moveCanvasNode: vi.fn(() => Promise.resolve(node)),
+      moveCanvasNodes: moveCanvasNodesMock,
       createCanvasEdge: createCanvasEdgeMock,
       listCanvasEdges: vi.fn(() => Promise.resolve([edge])),
       updateCanvasEdgeDirection: updateCanvasEdgeDirectionMock,
@@ -92,6 +95,7 @@ function fixture(): {
     updateCanvasEdgeDirectionMock,
     updateCanvasEdgeLineStyleMock,
     deleteCanvasEdgeMock,
+    moveCanvasNodesMock,
   }
 }
 
@@ -150,6 +154,51 @@ describe('CanvasService', () => {
       nodes: [node],
       edges: [expect.objectContaining({ id: EDGE_ID })],
     })
+  })
+
+  test('validates and timestamps one atomic multi-node move operation', async () => {
+    const { repository, moveCanvasNodesMock } = fixture()
+    const service = createCanvasService({ repository, nowMs: () => 75 })
+    await service.moveCanvasNodes(CANVAS_ID, [
+      { nodeId: NODE_ID, x: 10, y: 20 },
+      { nodeId: TARGET_NODE_ID, x: 30, y: 40 },
+    ])
+    expect(moveCanvasNodesMock).toHaveBeenCalledWith({
+      canvasId: CANVAS_ID,
+      moves: [
+        { nodeId: NODE_ID, x: 10, y: 20 },
+        { nodeId: TARGET_NODE_ID, x: 30, y: 40 },
+      ],
+      updatedAtMs: 75,
+    })
+  })
+
+  test('rejects empty, duplicate, invalid, and unavailable multi-node moves', async () => {
+    const { repository } = fixture()
+    const service = createCanvasService({ repository })
+    await expect(service.moveCanvasNodes(CANVAS_ID, [])).rejects.toMatchObject({
+      code: 'VALIDATION',
+      field: 'position',
+    })
+    await expect(
+      service.moveCanvasNodes(CANVAS_ID, [
+        { nodeId: NODE_ID, x: 1, y: 2 },
+        { nodeId: NODE_ID, x: 3, y: 4 },
+      ]),
+    ).rejects.toMatchObject({ code: 'VALIDATION', field: 'id' })
+    await expect(
+      service.moveCanvasNodes(CANVAS_ID, [
+        { nodeId: NODE_ID, x: Number.POSITIVE_INFINITY, y: 2 },
+      ]),
+    ).rejects.toMatchObject({ code: 'VALIDATION', field: 'position' })
+    repository.moveCanvasNodes = vi.fn(() =>
+      Promise.reject(
+        new CanvasRepositoryError('PERSISTENCE_FAILED', 'moveCanvasNodes'),
+      ),
+    )
+    await expect(
+      service.moveCanvasNodes(CANVAS_ID, [{ nodeId: NODE_ID, x: 1, y: 2 }]),
+    ).rejects.toMatchObject({ code: 'UNAVAILABLE' })
   })
 
   test('rejects invalid title, viewport, content position, and IDs', async () => {

@@ -32,6 +32,7 @@ class CanvasWorker implements TaskWorkerEndpoint {
       case 'canvas.node.list': return this.backend.listCanvasNodes(request.canvasId)
       case 'canvas.node.updateText': return this.backend.updateTextNode(request.input)
       case 'canvas.node.move': return this.backend.moveCanvasNode(request.input)
+      case 'canvas.nodes.move': return this.backend.moveCanvasNodes(request.input)
       case 'canvas.edge.create': return this.backend.createCanvasEdge(request.input)
       case 'canvas.edge.list': return this.backend.listCanvasEdges(request.canvasId)
       case 'canvas.edge.setDirection': return this.backend.updateCanvasEdgeDirection(request.input)
@@ -68,4 +69,38 @@ test('Canvas Edge Worker messages remain capability-specific and strictly parsed
   expect(parseTaskWorkerRequest(validCreate)).toEqual(validCreate)
   expect(parseTaskWorkerRequest({ ...validCreate, input: { ...validCreate.input, direction: 'reverse' } })).toBeNull()
   expect(parseTaskWorkerRequest({ requestId: 2, type: 'canvas.edge.execute', sql: 'DELETE' })).toBeNull()
+})
+
+test('Canvas batch move Worker messages are explicit and reject invalid batches', () => {
+  const validMove = {
+    requestId: 3,
+    type: 'canvas.nodes.move',
+    input: {
+      canvasId: '00000000-0000-4000-8000-000000000601',
+      moves: [
+        { nodeId: '00000000-0000-4000-8000-000000000602', x: 10, y: 20 },
+        { nodeId: '00000000-0000-4000-8000-000000000603', x: 30, y: 40 },
+      ],
+      updatedAtMs: 50,
+    },
+  }
+  expect(parseTaskWorkerRequest(validMove)).toEqual(validMove)
+  expect(parseTaskWorkerRequest({
+    ...validMove,
+    input: { ...validMove.input, moves: [] },
+  })).toBeNull()
+  expect(parseTaskWorkerRequest({
+    ...validMove,
+    input: {
+      ...validMove.input,
+      moves: [validMove.input.moves[0], validMove.input.moves[0]],
+    },
+  })).toBeNull()
+  expect(parseTaskWorkerRequest({
+    ...validMove,
+    input: {
+      ...validMove.input,
+      moves: [{ ...validMove.input.moves[0], x: Number.POSITIVE_INFINITY }],
+    },
+  })).toBeNull()
 })

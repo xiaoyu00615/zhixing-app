@@ -4,11 +4,13 @@ import {
   MarkerType,
   ReactFlow,
   ReactFlowProvider,
+  SelectionMode,
   applyNodeChanges,
   useReactFlow,
   type Connection,
   type Edge,
   type NodeChange,
+  type OnNodeDrag,
   type NodeTypes,
   type Viewport,
 } from '@xyflow/react'
@@ -27,6 +29,14 @@ import type { CanvasService } from '@/canvas/service'
 import { PATHS } from '@/routes/paths'
 
 const NODE_TYPES: NodeTypes = { textCanvas: TextCanvasNode }
+const CAMERA_PAN_SPEED_PX_PER_SECOND = 600
+const CAMERA_PAN_KEYS = new Set(['w', 'a', 's', 'd'])
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  return target.isContentEditable ||
+    target.closest('input, textarea, select, [contenteditable="true"]') !== null
+}
 
 function edgeStrokeDasharray(edge: CanvasEdge): string | undefined {
   if (edge.lineStyle === 'dashed') return '8 6'
@@ -58,7 +68,11 @@ interface CanvasEditorPageProps {
 function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
   const { canvasId = '' } = useParams()
   const navigate = useNavigate()
-  const { screenToFlowPosition } = useReactFlow<TextFlowNode>()
+  const {
+    getViewport,
+    screenToFlowPosition,
+    setViewport,
+  } = useReactFlow<TextFlowNode>()
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
   const [attempt, setAttempt] = useState(0)
   const [canvas, setCanvas] = useState<Canvas | null>(null)
@@ -71,6 +85,10 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
   const [feedback, setFeedback] = useState<string | null>(null)
   const latestViewport = useRef<Viewport | null>(null)
   const persistedViewport = useRef<Viewport | null>(null)
+  const dragStartPositions = useRef<
+    ReadonlyMap<string, { readonly x: number; readonly y: number }> | null
+  >(null)
+  const keyboardPanActive = useRef(false)
 
   const commitText = useCallback(async (id: string, text: string) => {
     const currentService = serviceRef.current
@@ -120,17 +138,152 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
 
   const persistViewport = useCallback(async (viewport: Viewport) => {
     latestViewport.current = viewport
-    if (service === null || canvas === null) return
+    const currentService = serviceRef.current
+    if (currentService === null || canvasId === '') return
     const previous = persistedViewport.current
     if (previous?.x === viewport.x && previous.y === viewport.y && previous.zoom === viewport.zoom) return
     try {
-      const updated = await service.updateViewport(canvas.id, viewport)
+      const updated = await currentService.updateViewport(canvasId, viewport)
       persistedViewport.current = updated.viewport
       setCanvas(updated)
     } catch {
       setFeedback('视图位置暂时无法保存。')
     }
-  }, [canvas, service])
+  }, [canvasId])
+
+  useEffect(() => {
+    const heldKeys = new Set<string>()
+    let animationFrame: number | null = null
+    let previousFrameTime: number | null = null
+    let lastPressedHorizontal: 'a' | 'd' | null = null
+    let lastPressedVertical: 'w' | 's' | null = null
+
+    const finishKeyboardPan = () => {
+      if (animationFrame !== null) {
+        window.cancelAnimationFrame(animationFrame)
+        animationFrame = null
+      }
+      previousFrameTime = null
+      if (!keyboardPanActive.current) return
+      keyboardPanActive.current = false
+      if (latestViewport.current !== null) {
+        void persistViewport(latestViewport.current)
+      }
+    }
+
+    const clearKeyboardPan = () => {
+      heldKeys.clear()
+      lastPressedHorizontal = null
+      lastPressedVertical = null
+      finishKeyboardPan()
+    }
+
+    const axisDirection = (
+      negativeKey: string,
+      positiveKey: string,
+      lastPressed: string | null,
+    ) => {
+      const negativeHeld = heldKeys.has(negativeKey)
+      const positiveHeld = heldKeys.has(positiveKey)
+      if (negativeHeld && positiveHeld) {
+        return lastPressed === positiveKey ? 1 : -1
+      }
+      return Number(positiveHeld) - Number(negativeHeld)
+    }
+
+    const moveCamera = (frameTime: number) => {
+      if (heldKeys.size === 0) {
+        finishKeyboardPan()
+        return
+      }
+      const rawElapsedSeconds = (frameTime - previousFrameTime!) / 1000
+      const elapsedSeconds = Math.min(
+        rawElapsedSeconds > 0 ? rawElapsedSeconds : 1 / 60,
+        0.05,
+      )
+      previousFrameTime = frameTime
+      const horizontal = axisDirection('a', 'd', lastPressedHorizontal)
+      const vertical = axisDirection('w', 's', lastPressedVertical)
+      const length = Math.hypot(horizontal, vertical)
+      if (length > 0) {
+        const distance = CAMERA_PAN_SPEED_PX_PER_SECOND * elapsedSeconds
+        const current = getViewport()
+        const next = {
+          x: current.x - (horizontal / length) * distance,
+          y: current.y - (vertical / length) * distance,
+          zoom: current.zoom,
+        }
+        latestViewport.current = next
+        void setViewport(next, { duration: 0 })
+      }
+      animationFrame = window.requestAnimationFrame(moveCamera)
+    }
+
+    const startKeyboardPan = () => {
+      if (animationFrame !== null) return
+      keyboardPanActive.current = true
+      previousFrameTime = performance.now()
+      animationFrame = window.requestAnimationFrame(moveCamera)
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase()
+      if (!CAMERA_PAN_KEYS.has(key)) return
+      if (event.ctrlKey || event.metaKey || event.altKey || isEditableTarget(event.target)) {
+        clearKeyboardPan()
+        return
+      }
+      event.preventDefault()
+      const wasHeld = heldKeys.has(key)
+      heldKeys.add(key)
+      if (!wasHeld) {
+        if (key === 'a' || key === 'd') lastPressedHorizontal = key
+        if (key === 'w' || key === 's') lastPressedVertical = key
+      }
+      startKeyboardPan()
+    }
+
+    const onKeyUp = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase()
+      if (!CAMERA_PAN_KEYS.has(key)) return
+      heldKeys.delete(key)
+      if (key === 'a' || key === 'd') {
+        const fallback = key === 'a' ? 'd' : 'a'
+        if (lastPressedHorizontal === key) {
+          lastPressedHorizontal = heldKeys.has(fallback) ? fallback : null
+        } else if (!heldKeys.has('a') && !heldKeys.has('d')) {
+          lastPressedHorizontal = null
+        }
+      }
+      if (key === 'w' || key === 's') {
+        const fallback = key === 'w' ? 's' : 'w'
+        if (lastPressedVertical === key) {
+          lastPressedVertical = heldKeys.has(fallback) ? fallback : null
+        } else if (!heldKeys.has('w') && !heldKeys.has('s')) {
+          lastPressedVertical = null
+        }
+      }
+      if (heldKeys.size === 0) finishKeyboardPan()
+    }
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') clearKeyboardPan()
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', clearKeyboardPan)
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', clearKeyboardPan)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      heldKeys.clear()
+      if (animationFrame !== null) window.cancelAnimationFrame(animationFrame)
+      keyboardPanActive.current = false
+    }
+  }, [getViewport, persistViewport, setViewport])
 
   async function leaveCanvas(): Promise<void> {
     if (latestViewport.current !== null) await persistViewport(latestViewport.current)
@@ -157,14 +310,71 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
     }
   }
 
-  async function moveNode(node: TextFlowNode): Promise<void> {
-    if (service === null) return
-    try {
-      await service.moveCanvasNode(node.id, node.position.x, node.position.y)
-    } catch {
-      setFeedback('节点位置保存失败，请重试。')
-    }
-  }
+  const beginNodeDrag: OnNodeDrag<TextFlowNode> = useCallback(
+    (_event, node, draggedNodes) => {
+      const gestureNodes = draggedNodes.length > 0 ? draggedNodes : [node]
+      dragStartPositions.current = new Map(
+        gestureNodes.map((item) => [item.id, { ...item.position }]),
+      )
+    },
+    [],
+  )
+
+  const finishNodeDrag: OnNodeDrag<TextFlowNode> = useCallback((
+    _event,
+    node,
+    draggedNodes,
+  ) => {
+    if (service === null || canvas === null) return
+    const gestureNodes = draggedNodes.length > 0 ? draggedNodes : [node]
+    const snapshot = dragStartPositions.current
+    dragStartPositions.current = null
+    const movedNodes = gestureNodes.filter((item) => {
+      const previous = snapshot?.get(item.id)
+      return previous === undefined ||
+        previous.x !== item.position.x ||
+        previous.y !== item.position.y
+    })
+    if (movedNodes.length === 0) return
+    void (async () => {
+      try {
+        if (movedNodes.length === 1) {
+          const moved = movedNodes[0]!
+          await service.moveCanvasNode(
+            moved.id,
+            moved.position.x,
+            moved.position.y,
+          )
+        } else {
+          await service.moveCanvasNodes(
+            canvas.id,
+            movedNodes.map((item) => ({
+              nodeId: item.id,
+              x: item.position.x,
+              y: item.position.y,
+            })),
+          )
+        }
+        setFeedback(
+          movedNodes.length === 1
+            ? '节点位置已保存'
+            : `已移动 ${movedNodes.length} 个节点`,
+        )
+      } catch {
+        if (snapshot !== null) {
+          setFlowNodes((nodes) =>
+            nodes.map((item) => {
+              const previous = snapshot.get(item.id)
+              return previous === undefined
+                ? item
+                : { ...item, position: previous }
+            }),
+          )
+        }
+        setFeedback('节点位置保存失败，已恢复移动前位置。')
+      }
+    })()
+  }, [canvas, service])
 
   async function connectNodes(connection: Connection): Promise<void> {
     if (
@@ -269,17 +479,26 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
         )}
         nodeTypes={NODE_TYPES}
         onNodesChange={(changes: NodeChange<TextFlowNode>[]) => setFlowNodes((nodes) => applyNodeChanges(changes, nodes))}
-        onNodeDragStop={(_, node) => void moveNode(node)}
+        onNodeDragStart={beginNodeDrag}
+        onNodeDragStop={finishNodeDrag}
         onConnect={(connection) => void connectNodes(connection)}
         onEdgeClick={(_, edge) => setSelectedEdgeId(edge.id)}
         onPaneClick={() => setSelectedEdgeId(null)}
         onMove={(_, viewport) => { latestViewport.current = viewport }}
-        onMoveEnd={(_, viewport) => void persistViewport(viewport)}
+        onMoveEnd={(_, viewport) => {
+          if (!keyboardPanActive.current) void persistViewport(viewport)
+        }}
         defaultViewport={canvas.viewport}
         minZoom={0.35}
         maxZoom={2.2}
-        panOnScroll
-        selectionOnDrag={false}
+        panOnDrag={[1]}
+        panOnScroll={false}
+        zoomOnScroll
+        deleteKeyCode={null}
+        multiSelectionKeyCode={['Control', 'Meta']}
+        selectionKeyCode={null}
+        selectionMode={SelectionMode.Partial}
+        selectionOnDrag
         nodesConnectable
         edgesReconnectable={false}
         fitView={false}

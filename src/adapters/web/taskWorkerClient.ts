@@ -21,6 +21,7 @@ import type {
   CreateTextNodeInput,
   DeleteCanvasEdgeInput,
   MoveCanvasNodeInput,
+  MoveCanvasNodesInput,
   RenameCanvasInput,
   UpdateCanvasViewportInput,
   UpdateCanvasEdgeDirectionInput,
@@ -314,6 +315,14 @@ export class TaskWorkerClient {
     return this.send((requestId) => ({
       requestId,
       type: 'canvas.node.move',
+      input,
+    }))
+  }
+
+  moveCanvasNodes(input: MoveCanvasNodesInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.nodes.move',
       input,
     }))
   }

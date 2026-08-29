@@ -40,6 +40,7 @@ import type {
   CreateTextNodeInput,
   DeleteCanvasEdgeInput,
   MoveCanvasNodeInput,
+  MoveCanvasNodesInput,
   RenameCanvasInput,
   UpdateCanvasViewportInput,
   UpdateCanvasEdgeDirectionInput,
@@ -190,6 +191,11 @@ export type TaskWorkerRequest =
       readonly requestId: number
       readonly type: 'canvas.node.move'
       readonly input: MoveCanvasNodeInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.nodes.move'
+      readonly input: MoveCanvasNodesInput
     }
   | {
       readonly requestId: number
@@ -383,6 +389,32 @@ function isCreateCanvasEdgeInput(
     isCanvasEdgeLineStyle(value.lineStyle) &&
     isCanvasTimestamp(value.createdAtMs)
   )
+}
+
+function isMoveCanvasNodesInput(value: unknown): value is MoveCanvasNodesInput {
+  if (
+    !isRecord(value) ||
+    !isCanonicalCanvasId(value.canvasId) ||
+    !isCanvasTimestamp(value.updatedAtMs) ||
+    !Array.isArray(value.moves) ||
+    value.moves.length === 0
+  ) {
+    return false
+  }
+  const nodeIds = new Set<string>()
+  return value.moves.every((move) => {
+    if (
+      !isRecord(move) ||
+      !isCanonicalCanvasId(move.nodeId) ||
+      !isCanvasCoordinate(move.x) ||
+      !isCanvasCoordinate(move.y) ||
+      nodeIds.has(move.nodeId)
+    ) {
+      return false
+    }
+    nodeIds.add(move.nodeId)
+    return true
+  })
 }
 
 export function parseTaskWorkerRequest(
@@ -588,6 +620,10 @@ export function parseTaskWorkerRequest(
             type: value.type,
             input: value.input as unknown as MoveCanvasNodeInput,
           }
+        : null
+    case 'canvas.nodes.move':
+      return isMoveCanvasNodesInput(value.input)
+        ? { requestId: value.requestId, type: value.type, input: value.input }
         : null
     case 'canvas.edge.create':
       return isCreateCanvasEdgeInput(value.input)

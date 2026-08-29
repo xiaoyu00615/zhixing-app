@@ -247,6 +247,12 @@ async function handleRequest(value: unknown): Promise<void> {
           state.database.moveCanvasNode(request.input),
         )
         return
+      case 'canvas.nodes.move':
+        success(
+          request.requestId,
+          state.database.moveCanvasNodes(request.input),
+        )
+        return
       case 'canvas.edge.create':
         success(
           request.requestId,

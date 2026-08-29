@@ -1,6 +1,6 @@
 //! Canvas native persistence.
 
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
@@ -158,6 +158,18 @@ pub(crate) struct MoveCanvasNodeInput {
     pub(crate) id: String,
     pub(crate) x: f64,
     pub(crate) y: f64,
+    pub(crate) updated_at_ms: i64,
+}
+
+pub(crate) struct CanvasNodePositionMove {
+    pub(crate) node_id: String,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+}
+
+pub(crate) struct MoveCanvasNodesInput {
+    pub(crate) canvas_id: String,
+    pub(crate) moves: Vec<CanvasNodePositionMove>,
     pub(crate) updated_at_ms: i64,
 }
 
@@ -653,6 +665,60 @@ impl CanvasDbService {
         Self::get_node(connection, &input.id)
     }
 
+    pub(crate) fn move_nodes(
+        connection: &Connection,
+        input: MoveCanvasNodesInput,
+    ) -> Result<Vec<CanvasNodeRecord>, CanvasError> {
+        validate_id(&input.canvas_id)?;
+        validate_timestamp(input.updated_at_ms)?;
+        if input.moves.is_empty() {
+            return Err(CanvasError::PersistenceFailed);
+        }
+        let mut node_ids = HashSet::with_capacity(input.moves.len());
+        for node_move in &input.moves {
+            validate_id(&node_move.node_id)?;
+            validate_position(node_move.x, node_move.y)?;
+            if !node_ids.insert(node_move.node_id.as_str()) {
+                return Err(CanvasError::PersistenceFailed);
+            }
+        }
+
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|_| CanvasError::PersistenceFailed)?;
+        Self::get_canvas(&transaction, &input.canvas_id)?;
+        for node_move in &input.moves {
+            Self::require_node_in_canvas(&transaction, &input.canvas_id, &node_move.node_id)?;
+        }
+        for node_move in &input.moves {
+            let changed = transaction
+                .execute(
+                    "UPDATE canvas_nodes SET x = ?1, y = ?2, updated_at_ms = ?3 \
+                     WHERE canvas_id = ?4 AND id = ?5",
+                    params![
+                        node_move.x,
+                        node_move.y,
+                        input.updated_at_ms,
+                        input.canvas_id,
+                        node_move.node_id
+                    ],
+                )
+                .map_err(|_| CanvasError::PersistenceFailed)?;
+            if changed != 1 {
+                return Err(CanvasError::NotFound);
+            }
+        }
+        let moved_nodes = input
+            .moves
+            .iter()
+            .map(|node_move| Self::get_node(&transaction, &node_move.node_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction
+            .commit()
+            .map_err(|_| CanvasError::PersistenceFailed)?;
+        Ok(moved_nodes)
+    }
+
     pub(crate) fn create_edge(
         connection: &Connection,
         input: CreateCanvasEdgeInput,
@@ -1117,6 +1183,147 @@ mod tests {
                 }
             ),
             Err(CanvasError::NotFound)
+        );
+    }
+
+    #[test]
+    fn batch_move_is_atomic_across_missing_and_cross_canvas_nodes_and_restarts() {
+        let (_sandbox, database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        create_node(&connection, NODE_ID, CANVAS_ID, "A");
+        create_node(&connection, TARGET_NODE_ID, CANVAS_ID, "B");
+
+        assert_eq!(
+            CanvasDbService::move_nodes(
+                &connection,
+                MoveCanvasNodesInput {
+                    canvas_id: CANVAS_ID.into(),
+                    moves: vec![
+                        CanvasNodePositionMove {
+                            node_id: NODE_ID.into(),
+                            x: 30.0,
+                            y: 40.0,
+                        },
+                        CanvasNodePositionMove {
+                            node_id: NODE_ID.into(),
+                            x: 50.0,
+                            y: 60.0,
+                        },
+                    ],
+                    updated_at_ms: 30,
+                },
+            ),
+            Err(CanvasError::PersistenceFailed)
+        );
+
+        let moved = CanvasDbService::move_nodes(
+            &connection,
+            MoveCanvasNodesInput {
+                canvas_id: CANVAS_ID.into(),
+                moves: vec![
+                    CanvasNodePositionMove {
+                        node_id: NODE_ID.into(),
+                        x: 110.0,
+                        y: 120.0,
+                    },
+                    CanvasNodePositionMove {
+                        node_id: TARGET_NODE_ID.into(),
+                        x: 210.0,
+                        y: 220.0,
+                    },
+                ],
+                updated_at_ms: 50,
+            },
+        )
+        .unwrap();
+        assert_eq!(moved.len(), 2);
+        assert!(moved.iter().all(|node| node.updated_at_ms == 50));
+
+        assert_eq!(
+            CanvasDbService::move_nodes(
+                &connection,
+                MoveCanvasNodesInput {
+                    canvas_id: CANVAS_ID.into(),
+                    moves: vec![
+                        CanvasNodePositionMove {
+                            node_id: NODE_ID.into(),
+                            x: 310.0,
+                            y: 320.0,
+                        },
+                        CanvasNodePositionMove {
+                            node_id: "00000000-0000-4000-8000-000000000699".into(),
+                            x: 410.0,
+                            y: 420.0,
+                        },
+                    ],
+                    updated_at_ms: 60,
+                },
+            ),
+            Err(CanvasError::NotFound)
+        );
+        assert_eq!(
+            CanvasDbService::get_node(&connection, NODE_ID).unwrap().x,
+            110.0
+        );
+
+        let other_canvas_id = "00000000-0000-4000-8000-000000000610";
+        let other_node_id = "00000000-0000-4000-8000-000000000611";
+        CanvasDbService::create_canvas(
+            &connection,
+            CreateCanvasInput {
+                id: other_canvas_id.into(),
+                title: "Other".into(),
+                viewport: CanvasViewport {
+                    x: 0.0,
+                    y: 0.0,
+                    zoom: 1.0,
+                },
+                created_at_ms: 10,
+            },
+        )
+        .unwrap();
+        create_node(&connection, other_node_id, other_canvas_id, "Other");
+        assert_eq!(
+            CanvasDbService::move_nodes(
+                &connection,
+                MoveCanvasNodesInput {
+                    canvas_id: CANVAS_ID.into(),
+                    moves: vec![
+                        CanvasNodePositionMove {
+                            node_id: NODE_ID.into(),
+                            x: 510.0,
+                            y: 520.0,
+                        },
+                        CanvasNodePositionMove {
+                            node_id: other_node_id.into(),
+                            x: 610.0,
+                            y: 620.0,
+                        },
+                    ],
+                    updated_at_ms: 70,
+                },
+            ),
+            Err(CanvasError::NotFound)
+        );
+        assert_eq!(
+            CanvasDbService::get_node(&connection, NODE_ID).unwrap().x,
+            110.0
+        );
+
+        drop(connection);
+        let reopened = open_existing_configured_connection(&database_path).unwrap();
+        let restored = CanvasDbService::list_nodes(&reopened, CANVAS_ID).unwrap();
+        assert_eq!(
+            restored.iter().find(|node| node.id == NODE_ID).unwrap().x,
+            110.0
+        );
+        assert_eq!(
+            restored
+                .iter()
+                .find(|node| node.id == TARGET_NODE_ID)
+                .unwrap()
+                .y,
+            220.0
         );
     }
 

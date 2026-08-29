@@ -14,6 +14,7 @@ interface CanvasHarness {
   listCanvasNodes(canvasId: string): Promise<readonly Record<string, unknown>[]>
   updateTextNode(input: object): Promise<unknown>
   moveCanvasNode(input: object): Promise<unknown>
+  moveCanvasNodes(input: object): Promise<readonly Record<string, unknown>[]>
   createCanvasEdge(input: object): Promise<Record<string, unknown>>
   listCanvasEdges(canvasId: string): Promise<readonly Record<string, unknown>[]>
   updateCanvasEdgeDirection(input: object): Promise<Record<string, unknown>>
@@ -29,6 +30,11 @@ const TARGET_NODE_ID = '00000000-0000-4000-8000-000000000603'
 const EDGE_ID = '00000000-0000-4000-8000-000000000604'
 const OTHER_CANVAS_ID = '00000000-0000-4000-8000-000000000612'
 const OTHER_NODE_ID = '00000000-0000-4000-8000-000000000613'
+const UI_CANVAS_ID = '00000000-0000-4000-8000-000000000701'
+const UI_NODE_A_ID = '00000000-0000-4000-8000-000000000702'
+const UI_NODE_B_ID = '00000000-0000-4000-8000-000000000703'
+const UI_NODE_C_ID = '00000000-0000-4000-8000-000000000704'
+const UI_EDGE_ID = '00000000-0000-4000-8000-000000000705'
 
 async function openHarnessPage(context: BrowserContext, baseURL: string): Promise<Page> {
   const page = context.pages()[0] ?? await context.newPage()
@@ -86,7 +92,18 @@ test('persists Canvas nodes, viewport, and configured Edge in OPFS across restar
       await harness.updateCanvasEdgeDirection({ id: edgeId, direction: 'bidirectional', updatedAtMs: 35 })
       await harness.updateCanvasEdgeLineStyle({ id: edgeId, lineStyle: 'dashed', updatedAtMs: 36 })
       await harness.updateTextNode({ id: nodeId, content: { type: 'text', text: 'persisted text' }, updatedAtMs: 30 })
-      await harness.moveCanvasNode({ id: nodeId, x: 240, y: -60, updatedAtMs: 40 })
+      await harness.moveCanvasNodes({ canvasId, moves: [
+        { nodeId, x: 240, y: -60 },
+        { nodeId: targetNodeId, x: 560, y: 240 },
+      ], updatedAtMs: 40 })
+      await expectFailure(harness.moveCanvasNodes({ canvasId, moves: [
+        { nodeId, x: 999, y: 999 },
+        { nodeId: otherNodeId, x: 888, y: 888 },
+      ], updatedAtMs: 41 }), 'NOT_FOUND')
+      await expectFailure(harness.moveCanvasNodes({ canvasId, moves: [
+        { nodeId, x: 777, y: 777 },
+        { nodeId: '00000000-0000-4000-8000-000000000699', x: 666, y: 666 },
+      ], updatedAtMs: 42 }), 'NOT_FOUND')
       await harness.updateCanvasViewport({ id: canvasId, viewport: { x: 120, y: 48, zoom: 1.35 }, updatedAtMs: 50 })
       await harness.renameCanvas({ id: canvasId, title: 'Canvas Restored', updatedAtMs: 60 })
       await harness.shutdown()
@@ -100,7 +117,10 @@ test('persists Canvas nodes, viewport, and configured Edge in OPFS across restar
     }, { canvasId: CANVAS_ID })
     expect(restored.canvases).toEqual(expect.arrayContaining([expect.objectContaining({ id: CANVAS_ID }), expect.objectContaining({ id: OTHER_CANVAS_ID })]))
     expect(restored.canvas).toMatchObject({ title: 'Canvas Restored', viewport: { x: 120, y: 48, zoom: 1.35 } })
-    expect(restored.nodes).toEqual(expect.arrayContaining([expect.objectContaining({ id: NODE_ID, content: { type: 'text', text: 'persisted text' }, x: 240, y: -60 })]))
+    expect(restored.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: NODE_ID, content: { type: 'text', text: 'persisted text' }, x: 240, y: -60, updatedAtMs: 40 }),
+      expect.objectContaining({ id: TARGET_NODE_ID, x: 560, y: 240, updatedAtMs: 40 }),
+    ]))
     expect(restored.edges).toEqual([expect.objectContaining({ id: EDGE_ID, canvasId: CANVAS_ID, sourceNodeId: NODE_ID, targetNodeId: TARGET_NODE_ID, relationType: 'default', direction: 'bidirectional', lineStyle: 'dashed', deletedAtMs: null })])
 
     await page.evaluate(async ({ canvasId, edgeId }) => {
@@ -113,6 +133,349 @@ test('persists Canvas nodes, viewport, and configured Edge in OPFS across restar
     context = await chromium.launchPersistentContext(profilePath, { channel: 'chromium', headless: true })
     page = await openHarnessPage(context, baseURL)
     await expect(page.evaluate((canvasId) => (window as unknown as HarnessWindow).__taskPersistenceHarness.listCanvasEdges(canvasId), CANVAS_ID)).resolves.toEqual([])
+  } finally {
+    await context?.close()
+    await rm(profilePath, { recursive: true, force: true })
+  }
+})
+
+test('selects, collectively moves, and pans the real Canvas editor', async ({ browserName }, testInfo) => {
+  test.setTimeout(150_000)
+  expect(browserName).toBe('chromium')
+  const baseURL = testInfo.project.use.baseURL
+  if (typeof baseURL !== 'string') throw new Error('Playwright baseURL is required.')
+  const profilePath = testInfo.outputPath('canvas-selection-browser-profile')
+  const outputRoot = resolve(testInfo.outputDir)
+  const resolvedProfile = resolve(profilePath)
+  if (!resolvedProfile.startsWith(`${outputRoot}${sep}`)) throw new Error('Unsafe test profile path.')
+
+  let context: BrowserContext | null = null
+  try {
+    context = await chromium.launchPersistentContext(profilePath, {
+      channel: 'chromium',
+      headless: true,
+      viewport: { width: 1440, height: 900 },
+    })
+    const page = await openHarnessPage(context, baseURL)
+    await page.evaluate(async ({ canvasId, nodeAId, nodeBId, nodeCId, edgeId }) => {
+      const harness = (window as unknown as HarnessWindow).__taskPersistenceHarness
+      await harness.createCanvas({ id: canvasId, title: 'Selection Slice 3', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 100 })
+      await harness.createTextNode({ id: nodeAId, canvasId, content: { type: 'text', text: 'Node A' }, x: 220, y: 150, createdAtMs: 110 })
+      await harness.createTextNode({ id: nodeBId, canvasId, content: { type: 'text', text: 'Node B' }, x: 600, y: 190, createdAtMs: 120 })
+      await harness.createTextNode({ id: nodeCId, canvasId, content: { type: 'text', text: 'Node C' }, x: 460, y: 480, createdAtMs: 130 })
+      await harness.createCanvasEdge({ id: edgeId, canvasId, sourceNodeId: nodeAId, targetNodeId: nodeBId, relationType: 'default', direction: 'forward', lineStyle: 'solid', createdAtMs: 140 })
+      await harness.shutdown()
+    }, {
+      canvasId: UI_CANVAS_ID,
+      nodeAId: UI_NODE_A_ID,
+      nodeBId: UI_NODE_B_ID,
+      nodeCId: UI_NODE_C_ID,
+      edgeId: UI_EDGE_ID,
+    })
+
+    await page.goto(`${baseURL}/canvas/${UI_CANVAS_ID}`)
+    await expect(page.getByRole('heading', { name: 'Selection Slice 3' })).toBeVisible()
+    const nodeA = page.locator(`.react-flow__node[data-id="${UI_NODE_A_ID}"]`)
+    const nodeB = page.locator(`.react-flow__node[data-id="${UI_NODE_B_ID}"]`)
+    const nodeC = page.locator(`.react-flow__node[data-id="${UI_NODE_C_ID}"]`)
+    const viewport = page.locator('.react-flow__viewport')
+    const edgePath = page.locator(`.react-flow__edge[data-id="${UI_EDGE_ID}"] path`).first()
+
+    await nodeA.click({ position: { x: 110, y: 146 } })
+    await expect(nodeA).toHaveClass(/selected/)
+    await expect(nodeB).not.toHaveClass(/selected/)
+    await page.screenshot({ path: testInfo.outputPath('01-single-selection.png') })
+
+    await nodeB.click({ modifiers: ['Control'], position: { x: 110, y: 146 } })
+    await expect(nodeA).toHaveClass(/selected/)
+    await expect(nodeB).toHaveClass(/selected/)
+    await expect(nodeC).not.toHaveClass(/selected/)
+
+    const boxA = await nodeA.boundingBox()
+    const boxB = await nodeB.boundingBox()
+    if (boxA === null || boxB === null) throw new Error('Selection nodes are not visible.')
+    const viewportBeforeSelection = await viewport.getAttribute('style')
+    const selectionStart = {
+      x: Math.min(boxA.x, boxB.x) - 20,
+      y: Math.min(boxA.y, boxB.y) - 20,
+    }
+    const selectionEnd = {
+      x: Math.max(boxA.x + boxA.width, boxB.x + boxB.width) + 20,
+      y: Math.max(boxA.y + boxA.height, boxB.y + boxB.height) + 20,
+    }
+    await page.mouse.move(selectionStart.x, selectionStart.y)
+    await page.mouse.down()
+    await page.mouse.move(selectionEnd.x, selectionEnd.y, { steps: 12 })
+    await expect(page.locator('.react-flow__selection')).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('02-box-selection.png') })
+    await page.mouse.up()
+    await expect(nodeA).toHaveClass(/selected/)
+    await expect(nodeB).toHaveClass(/selected/)
+    await expect(nodeC).not.toHaveClass(/selected/)
+    expect(await viewport.getAttribute('style')).toBe(viewportBeforeSelection)
+
+    const nodeABefore = await nodeA.boundingBox()
+    const nodeBBefore = await nodeB.boundingBox()
+    const nodeCBefore = await nodeC.boundingBox()
+    const edgeBefore = await edgePath.getAttribute('d')
+    if (nodeABefore === null || nodeBBefore === null || nodeCBefore === null) {
+      throw new Error('Collective move nodes are not visible.')
+    }
+    await page.mouse.move(nodeABefore.x + 110, nodeABefore.y + 146)
+    await page.mouse.down()
+    await page.mouse.move(nodeABefore.x + 230, nodeABefore.y + 226, { steps: 12 })
+    await page.mouse.up()
+    await expect(page.getByRole('status')).toContainText('已移动 2 个节点')
+    const nodeAAfter = await nodeA.boundingBox()
+    const nodeBAfter = await nodeB.boundingBox()
+    const nodeCAfter = await nodeC.boundingBox()
+    if (nodeAAfter === null || nodeBAfter === null || nodeCAfter === null) {
+      throw new Error('Moved nodes are not visible.')
+    }
+    const movedX = nodeAAfter.x - nodeABefore.x
+    const movedY = nodeAAfter.y - nodeABefore.y
+    expect(movedX).toBeGreaterThan(80)
+    expect(movedY).toBeGreaterThan(50)
+    expect(nodeBAfter.x - nodeBBefore.x).toBeCloseTo(movedX, 0)
+    expect(nodeBAfter.y - nodeBBefore.y).toBeCloseTo(movedY, 0)
+    expect(nodeCAfter.x).toBeCloseTo(nodeCBefore.x, 0)
+    expect(nodeCAfter.y).toBeCloseTo(nodeCBefore.y, 0)
+    expect(await edgePath.getAttribute('d')).not.toBe(edgeBefore)
+    await page.screenshot({ path: testInfo.outputPath('03-collective-move-edge-follow.png') })
+
+    const viewportBeforeRightDrag = await viewport.getAttribute('style')
+    await page.mouse.move(nodeCAfter.x + 80, nodeCAfter.y + 60)
+    await page.mouse.down({ button: 'right' })
+    await page.mouse.move(nodeCAfter.x + 150, nodeCAfter.y + 110, { steps: 6 })
+    await page.mouse.up({ button: 'right' })
+    await page.keyboard.press('Escape')
+    expect(await viewport.getAttribute('style')).toBe(viewportBeforeRightDrag)
+
+    const viewportBeforeMiddlePan = await viewport.getAttribute('style')
+    await page.mouse.move(nodeCAfter.x + 100, nodeCAfter.y + 70)
+    await page.mouse.down({ button: 'middle' })
+    await page.mouse.move(nodeCAfter.x + 180, nodeCAfter.y + 120, { steps: 8 })
+    await page.mouse.up({ button: 'middle' })
+    await expect.poll(() => viewport.getAttribute('style')).not.toBe(viewportBeforeMiddlePan)
+
+    const viewportBeforeTyping = await viewport.getAttribute('style')
+    const editorA = nodeA.getByRole('textbox', { name: '文字节点内容' })
+    await editorA.fill('')
+    await page.keyboard.type('WASD test')
+    await editorA.press('Tab')
+    await expect(editorA).toHaveValue('WASD test')
+    expect(await viewport.getAttribute('style')).toBe(viewportBeforeTyping)
+
+    await page.locator('.react-flow__pane').click({ position: { x: 40, y: 80 } })
+    const verifyImmediateKeyboardPan = async (key: 'w' | 'a' | 's' | 'd') => {
+      const before = await viewport.getAttribute('style')
+      await viewport.evaluate((element, previousStyle) => {
+        const target = element as HTMLElement
+        target.dataset.wasdLatency = ''
+        const startedAt = performance.now()
+        const observer = new MutationObserver(() => {
+          if (target.getAttribute('style') === previousStyle) return
+          target.dataset.wasdLatency = String(performance.now() - startedAt)
+          observer.disconnect()
+        })
+        observer.observe(target, { attributes: true, attributeFilter: ['style'] })
+      }, before)
+      await page.keyboard.down(key)
+      await expect.poll(
+        () => viewport.getAttribute('data-wasd-latency'),
+        { intervals: [10, 10, 20], timeout: 250 },
+      ).not.toBe('')
+      await page.keyboard.up(key)
+      const latency = Number(await viewport.getAttribute('data-wasd-latency'))
+      expect(latency).toBeLessThan(150)
+    }
+    for (const key of ['w', 'a', 's', 'd'] as const) {
+      await verifyImmediateKeyboardPan(key)
+    }
+
+    const readViewportPosition = () => viewport.evaluate((element) => {
+      const matrix = new DOMMatrixReadOnly(getComputedStyle(element).transform)
+      return { x: matrix.m41, y: matrix.m42 }
+    })
+    const verifyReleaseFirstReversal = async (
+      first: 'w' | 'a' | 's' | 'd',
+      opposite: 'w' | 'a' | 's' | 'd',
+      axis: 'x' | 'y',
+      oppositeSign: -1 | 1,
+    ) => {
+      await page.keyboard.down(first)
+      await page.waitForTimeout(220)
+      await page.keyboard.up(first)
+      await page.waitForTimeout(4)
+      const before = await readViewportPosition()
+      await viewport.evaluate((element) => {
+        const probeWindow = window as typeof window & {
+          __wasdFrameProbe?: {
+            readonly startedAt: number
+            readonly times: number[]
+            readonly observer: MutationObserver
+          }
+        }
+        probeWindow.__wasdFrameProbe?.observer.disconnect()
+        const times: number[] = []
+        const observer = new MutationObserver(() => { times.push(performance.now()) })
+        observer.observe(element, { attributes: true, attributeFilter: ['style'] })
+        probeWindow.__wasdFrameProbe = { startedAt: performance.now(), times, observer }
+      })
+      await page.keyboard.down(opposite)
+      await page.waitForTimeout(450)
+      const after = await readViewportPosition()
+      const frameProbe = await page.evaluate(() => {
+        const probeWindow = window as typeof window & {
+          __wasdFrameProbe?: {
+            readonly startedAt: number
+            readonly times: number[]
+            readonly observer: MutationObserver
+          }
+        }
+        const probe = probeWindow.__wasdFrameProbe
+        if (probe === undefined) throw new Error('WASD frame probe is missing')
+        probe.observer.disconnect()
+        delete probeWindow.__wasdFrameProbe
+        return { startedAt: probe.startedAt, endedAt: performance.now(), times: probe.times }
+      })
+      expect(Math.sign(after[axis] - before[axis])).toBe(oppositeSign)
+      expect(frameProbe.times.length).toBeGreaterThan(3)
+      const frameIntervals = frameProbe.times.map((time, index) =>
+        time - (frameProbe.times[index - 1] ?? frameProbe.startedAt))
+      frameIntervals.push(frameProbe.endedAt - frameProbe.times.at(-1)!)
+      expect(Math.max(...frameIntervals)).toBeLessThan(150)
+      await page.keyboard.up(opposite)
+      await page.waitForTimeout(500)
+    }
+    await verifyReleaseFirstReversal('d', 'a', 'x', 1)
+    await verifyReleaseFirstReversal('a', 'd', 'x', -1)
+    await verifyReleaseFirstReversal('w', 's', 'y', -1)
+    await verifyReleaseFirstReversal('s', 'w', 'y', 1)
+
+    const verifyReversal = async (
+      first: 'w' | 'a' | 's' | 'd',
+      opposite: 'w' | 'a' | 's' | 'd',
+      axis: 'x' | 'y',
+      oppositeSign: -1 | 1,
+    ) => {
+      await page.keyboard.down(first)
+      await page.waitForTimeout(180)
+      const before = await readViewportPosition()
+      await page.keyboard.down(opposite)
+      await page.waitForTimeout(60)
+      const after = await readViewportPosition()
+      expect(Math.sign(after[axis] - before[axis])).toBe(oppositeSign)
+      await page.keyboard.up(opposite)
+      await page.keyboard.up(first)
+      await page.waitForTimeout(500)
+    }
+    await verifyReversal('d', 'a', 'x', 1)
+    await verifyReversal('a', 'd', 'x', -1)
+    await verifyReversal('w', 's', 'y', -1)
+    await verifyReversal('s', 'w', 'y', 1)
+
+    await page.keyboard.down('d')
+    await page.waitForTimeout(120)
+    await page.keyboard.down('a')
+    await page.waitForTimeout(60)
+    const beforeHorizontalFallback = await readViewportPosition()
+    await page.keyboard.up('a')
+    await page.waitForTimeout(60)
+    const afterHorizontalFallback = await readViewportPosition()
+    expect(afterHorizontalFallback.x).toBeLessThan(beforeHorizontalFallback.x)
+    await page.keyboard.up('d')
+    await page.waitForTimeout(500)
+
+    await page.keyboard.down('w')
+    await page.keyboard.down('d')
+    await page.waitForTimeout(120)
+    const beforeDiagonalHorizontalReversal = await readViewportPosition()
+    await page.keyboard.down('a')
+    await page.waitForTimeout(60)
+    const afterDiagonalHorizontalReversal = await readViewportPosition()
+    expect(afterDiagonalHorizontalReversal.x).toBeGreaterThan(beforeDiagonalHorizontalReversal.x)
+    expect(afterDiagonalHorizontalReversal.y).toBeGreaterThan(beforeDiagonalHorizontalReversal.y)
+    await page.keyboard.up('a')
+    await page.keyboard.down('s')
+    await page.waitForTimeout(60)
+    const afterDiagonalVerticalReversal = await readViewportPosition()
+    expect(afterDiagonalVerticalReversal.x).toBeLessThan(afterDiagonalHorizontalReversal.x)
+    expect(afterDiagonalVerticalReversal.y).toBeLessThan(afterDiagonalHorizontalReversal.y)
+    await page.keyboard.up('s')
+    await page.keyboard.up('d')
+    await page.keyboard.up('w')
+    await page.waitForTimeout(500)
+
+    const alternateDirections = async (
+      first: 'w' | 'a',
+      second: 's' | 'd',
+      axis: 'x' | 'y',
+      firstSign: -1 | 1,
+      secondSign: -1 | 1,
+    ) => {
+      let held: 'w' | 'a' | 's' | 'd' = first
+      await page.keyboard.down(held)
+      for (let index = 0; index < 20; index += 1) {
+        const next: 'w' | 'a' | 's' | 'd' = held === first ? second : first
+        const before = await readViewportPosition()
+        await page.keyboard.down(next)
+        await page.waitForTimeout(250)
+        const after = await readViewportPosition()
+        expect(Math.sign(after[axis] - before[axis])).toBe(next === first ? firstSign : secondSign)
+        await page.keyboard.up(held)
+        held = next
+      }
+      await page.keyboard.up(held)
+      await page.waitForTimeout(500)
+    }
+    await alternateDirections('a', 'd', 'x', 1, -1)
+    await alternateDirections('w', 's', 'y', 1, -1)
+
+    const viewportBeforeQuickTap = await viewport.getAttribute('style')
+    await page.keyboard.down('w')
+    await page.waitForTimeout(35)
+    await page.keyboard.up('w')
+    expect(await viewport.getAttribute('style')).not.toBe(viewportBeforeQuickTap)
+
+    const viewportBeforeWasd = await viewport.getAttribute('style')
+    await page.keyboard.down('w')
+    await page.keyboard.down('d')
+    await page.waitForTimeout(180)
+    await page.keyboard.up('d')
+    await page.keyboard.up('w')
+    await expect.poll(() => viewport.getAttribute('style')).not.toBe(viewportBeforeWasd)
+
+    const viewportBeforeLongHold = await viewport.getAttribute('style')
+    await page.keyboard.down('w')
+    await page.waitForTimeout(3000)
+    await page.keyboard.up('w')
+    const viewportAfterLongHold = await viewport.getAttribute('style')
+    expect(viewportAfterLongHold).not.toBe(viewportBeforeLongHold)
+    await page.waitForTimeout(100)
+    expect(await viewport.getAttribute('style')).toBe(viewportAfterLongHold)
+    await page.waitForTimeout(500)
+    await page.screenshot({ path: testInfo.outputPath('04-middle-wasd-pan.png') })
+
+    const viewportBeforeZoom = await viewport.getAttribute('style')
+    const pane = page.locator('.react-flow__pane')
+    const paneBox = await pane.boundingBox()
+    if (paneBox === null) throw new Error('Canvas pane is not visible.')
+    await page.mouse.move(paneBox.x + paneBox.width / 2, paneBox.y + paneBox.height / 2)
+    await page.mouse.wheel(0, -320)
+    await expect.poll(() => viewport.getAttribute('style')).not.toBe(viewportBeforeZoom)
+
+    const persistedA = await nodeA.evaluate((element) => (element as HTMLElement).style.transform)
+    const persistedB = await nodeB.evaluate((element) => (element as HTMLElement).style.transform)
+    const persistedC = await nodeC.evaluate((element) => (element as HTMLElement).style.transform)
+    await page.reload()
+    await expect(page.getByRole('heading', { name: 'Selection Slice 3' })).toBeVisible()
+    await expect.poll(() => page.locator(`.react-flow__node[data-id="${UI_NODE_A_ID}"]`).evaluate((element) => (element as HTMLElement).style.transform)).toBe(persistedA)
+    await expect.poll(() => page.locator(`.react-flow__node[data-id="${UI_NODE_B_ID}"]`).evaluate((element) => (element as HTMLElement).style.transform)).toBe(persistedB)
+    await expect.poll(() => page.locator(`.react-flow__node[data-id="${UI_NODE_C_ID}"]`).evaluate((element) => (element as HTMLElement).style.transform)).toBe(persistedC)
+    await expect(page.locator('.react-flow__edge')).toHaveCount(1)
+    await page.screenshot({ path: testInfo.outputPath('05-restart-restored.png') })
+    await page.goto('about:blank')
   } finally {
     await context?.close()
     await rm(profilePath, { recursive: true, force: true })

@@ -19,6 +19,7 @@ import {
   type CreateCanvasInput,
   type CreateTextNodeInput,
   type MoveCanvasNodeInput,
+  type MoveCanvasNodesInput,
   type DeleteCanvasEdgeInput,
   type RenameCanvasInput,
   type UpdateCanvasViewportInput,
@@ -156,6 +157,29 @@ function validateTimestamp(
   }
 }
 
+function validateMoveCanvasNodesInput(
+  input: MoveCanvasNodesInput,
+  operation: CanvasRepositoryOperation,
+): void {
+  validateId(input.canvasId, operation)
+  validateTimestamp(input.updatedAtMs, operation)
+  if (input.moves.length === 0) {
+    throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+  }
+  const nodeIds = new Set<string>()
+  for (const move of input.moves) {
+    validateId(move.nodeId, operation)
+    if (
+      !isCanvasCoordinate(move.x) ||
+      !isCanvasCoordinate(move.y) ||
+      nodeIds.has(move.nodeId)
+    ) {
+      throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+    }
+    nodeIds.add(move.nodeId)
+  }
+}
+
 export class WebCanvasRepository implements CanvasRepository {
   readonly #client: TaskWorkerClient
 
@@ -271,6 +295,23 @@ export class WebCanvasRepository implements CanvasRepository {
     }
     try {
       return parseNode(await this.#client.moveCanvasNode(input), operation)
+    } catch (error: unknown) {
+      throw mapError(error, operation)
+    }
+  }
+
+
+  async moveCanvasNodes(
+    input: MoveCanvasNodesInput,
+  ): Promise<readonly CanvasNode[]> {
+    const operation = 'moveCanvasNodes'
+    validateMoveCanvasNodesInput(input, operation)
+    try {
+      const value = await this.#client.moveCanvasNodes(input)
+      if (!Array.isArray(value)) {
+        throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+      }
+      return value.map((node) => parseNode(node, operation))
     } catch (error: unknown) {
       throw mapError(error, operation)
     }

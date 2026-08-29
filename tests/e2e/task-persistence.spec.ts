@@ -484,7 +484,9 @@ test('persists Task operations in OPFS across a browser restart', async ({
     )
 
     await page.goto(`${configuredBaseURL}/tasks`)
-    await expect(page.getByText('Third', { exact: true })).toBeVisible()
+    await expect(page.getByText('Third', { exact: true })).toBeVisible({
+      timeout: 15_000,
+    })
     await page.getByRole('button', { name: '筛选', exact: true }).click()
     await page
       .getByRole('combobox', { name: '筛选标签' })

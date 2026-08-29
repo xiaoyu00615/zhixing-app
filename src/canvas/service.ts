@@ -80,6 +80,14 @@ export interface CanvasService {
   listCanvasNodes(canvasId: string): Promise<readonly CanvasNode[]>
   editTextNode(id: string, text: string): Promise<CanvasNode>
   moveCanvasNode(id: string, x: number, y: number): Promise<CanvasNode>
+  moveCanvasNodes(
+    canvasId: string,
+    moves: readonly {
+      readonly nodeId: string
+      readonly x: number
+      readonly y: number
+    }[],
+  ): Promise<readonly CanvasNode[]>
   createCanvasEdge(
     canvasId: string,
     sourceNodeId: string,
@@ -258,6 +266,29 @@ export function createCanvasService({
           id,
           x,
           y,
+          updatedAtMs: readNowMs(nowMs),
+        }),
+      )
+    },
+    async moveCanvasNodes(canvasId, moves) {
+      validateId(canvasId, 'canvasId')
+      if (moves.length === 0) {
+        throw new CanvasApplicationError('VALIDATION', 'position')
+      }
+      const nodeIds = new Set<string>()
+      const validatedMoves = moves.map((move) => {
+        const nodeId = validateId(move.nodeId, 'id')
+        if (nodeIds.has(nodeId)) {
+          throw new CanvasApplicationError('VALIDATION', 'id')
+        }
+        nodeIds.add(nodeId)
+        validatePosition(move.x, move.y)
+        return { nodeId, x: move.x, y: move.y }
+      })
+      return callRepository(() =>
+        repository.moveCanvasNodes({
+          canvasId,
+          moves: validatedMoves,
           updatedAtMs: readNowMs(nowMs),
         }),
       )

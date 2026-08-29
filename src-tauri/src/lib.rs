@@ -215,6 +215,7 @@ pub fn run() {
             commands::canvas_node_list,
             commands::canvas_node_update_text,
             commands::canvas_node_move,
+            commands::canvas_nodes_move,
             commands::canvas_edge_create,
             commands::canvas_edge_list,
             commands::canvas_edge_set_direction,

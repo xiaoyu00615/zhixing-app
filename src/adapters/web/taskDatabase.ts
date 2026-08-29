@@ -50,6 +50,7 @@ import type {
   CreateTextNodeInput,
   DeleteCanvasEdgeInput,
   MoveCanvasNodeInput,
+  MoveCanvasNodesInput,
   RenameCanvasInput,
   UpdateCanvasViewportInput,
   UpdateCanvasEdgeDirectionInput,
@@ -863,6 +864,55 @@ export class WebTaskDatabase {
           throw new TaskDatabaseError('NOT_FOUND')
         }
         return this.requireCanvasNode(input.id)
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  moveCanvasNodes(input: MoveCanvasNodesInput): readonly CanvasNode[] {
+    this.validateCanvasUpdate(input.canvasId, input.updatedAtMs)
+    if (input.moves.length === 0) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    const nodeIds = new Set<string>()
+    for (const move of input.moves) {
+      if (
+        !isCanonicalCanvasId(move.nodeId) ||
+        !isCanvasCoordinate(move.x) ||
+        !isCanvasCoordinate(move.y) ||
+        nodeIds.has(move.nodeId)
+      ) {
+        throw new TaskDatabaseError('PERSISTENCE_FAILED')
+      }
+      nodeIds.add(move.nodeId)
+    }
+    try {
+      return this.#database.transaction(() => {
+        this.requireCanvas(input.canvasId)
+        for (const move of input.moves) {
+          this.requireNodeInCanvas(input.canvasId, move.nodeId)
+        }
+        for (const move of input.moves) {
+          this.#database.exec({
+            sql: `UPDATE canvas_nodes SET x = ?, y = ?, updated_at_ms = ?
+                  WHERE canvas_id = ? AND id = ?`,
+            bind: [
+              move.x,
+              move.y,
+              input.updatedAtMs,
+              input.canvasId,
+              move.nodeId,
+            ],
+          })
+          if (this.#database.changes() !== 1) {
+            throw new TaskDatabaseError('NOT_FOUND')
+          }
+        }
+        return input.moves.map((move) =>
+          this.requireNodeInCanvas(input.canvasId, move.nodeId),
+        )
       })
     } catch (error: unknown) {
       if (error instanceof TaskDatabaseError) throw error
