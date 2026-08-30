@@ -289,6 +289,12 @@ async function handleRequest(value: unknown): Promise<void> {
           state.database.updateCanvasEdgeLineStyle(request.input),
         )
         return
+      case 'canvas.edge.setRelationType':
+        success(
+          request.requestId,
+          state.database.updateCanvasEdgeRelationType(request.input),
+        )
+        return
       case 'canvas.edge.delete':
         success(
           request.requestId,

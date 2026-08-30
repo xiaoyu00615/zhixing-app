@@ -13,6 +13,7 @@ import type {
   RenameCanvasNodeInput,
   UpdateCanvasEdgeDirectionInput,
   UpdateCanvasEdgeLineStyleInput,
+  UpdateCanvasEdgeRelationTypeInput,
   UpdateCanvasViewportInput,
   UpdateCanvasNodeContentInput,
   UpdateTextNodeInput,
@@ -46,6 +47,7 @@ defineCanvasRepositoryContract('NativeCanvasRepository', () => {
       case 'canvas_edge_list': return backend.listCanvasEdges((args?.input as { id: string }).id)
       case 'canvas_edge_set_direction': return backend.updateCanvasEdgeDirection(args?.input as UpdateCanvasEdgeDirectionInput)
       case 'canvas_edge_set_line_style': return backend.updateCanvasEdgeLineStyle(args?.input as UpdateCanvasEdgeLineStyleInput)
+      case 'canvas_edge_set_relation_type': return backend.updateCanvasEdgeRelationType(args?.input as UpdateCanvasEdgeRelationTypeInput)
       case 'canvas_edge_delete': return backend.deleteCanvasEdge(args?.input as DeleteCanvasEdgeInput)
       default: throw new Error(`Unexpected command ${command}`)
     }

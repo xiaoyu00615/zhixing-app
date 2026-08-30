@@ -20,6 +20,7 @@ interface CanvasHarness {
   moveCanvasNodes(input: object): Promise<readonly Record<string, unknown>[]>
   createCanvasEdge(input: object): Promise<Record<string, unknown>>
   listCanvasEdges(canvasId: string): Promise<readonly Record<string, unknown>[]>
+  updateCanvasEdgeRelationType(input: object): Promise<Record<string, unknown>>
   updateCanvasEdgeDirection(input: object): Promise<Record<string, unknown>>
   updateCanvasEdgeLineStyle(input: object): Promise<Record<string, unknown>>
   deleteCanvasEdge(input: object): Promise<Record<string, unknown>>
@@ -41,6 +42,14 @@ const UI_EDGE_ID = '00000000-0000-4000-8000-000000000705'
 const NAME_CANVAS_ID = '00000000-0000-4000-8000-000000000801'
 const NAME_TEXT_ID = '00000000-0000-4000-8000-000000000802'
 const NAME_STICKY_ID = '00000000-0000-4000-8000-000000000803'
+const SEMANTIC_CANVAS_ID = '00000000-0000-4000-8000-000000000901'
+const SEMANTIC_TEXT_ID = '00000000-0000-4000-8000-000000000902'
+const SEMANTIC_STICKY_ID = '00000000-0000-4000-8000-000000000903'
+const SEMANTIC_EDGE_ID = '00000000-0000-4000-8000-000000000904'
+const SEMANTIC_SECOND_STICKY_ID = '00000000-0000-4000-8000-000000000905'
+const SEMANTIC_REVERSE_EDGE_ID = '00000000-0000-4000-8000-000000000906'
+const SEMANTIC_STICKY_EDGE_ID = '00000000-0000-4000-8000-000000000907'
+const SEMANTIC_CONFLICT_EDGE_ID = '00000000-0000-4000-8000-000000000908'
 
 async function openHarnessPage(context: BrowserContext, baseURL: string): Promise<Page> {
   const page = context.pages()[0] ?? await context.newPage()
@@ -609,6 +618,119 @@ test('names Text and Sticky nodes independently and restores names after restart
     await expect.poll(() => restoredSticky.evaluate((element) => (element as HTMLElement).style.transform)).toBe(persistedStickyPosition)
     await expect(page.locator('.react-flow__edge')).toHaveCount(1)
     await page.screenshot({ path: testInfo.outputPath('07-node-name-restart.png') })
+    await page.goto('about:blank')
+  } finally {
+    await context?.close()
+    await rm(profilePath, { recursive: true, force: true })
+  }
+})
+
+test('configures semantic Edge types and restores them from OPFS', async ({ browserName }, testInfo) => {
+  test.setTimeout(120_000)
+  expect(browserName).toBe('chromium')
+  const baseURL = testInfo.project.use.baseURL
+  if (typeof baseURL !== 'string') throw new Error('Playwright baseURL is required.')
+  const profilePath = testInfo.outputPath('canvas-semantic-edge-browser-profile')
+  const outputRoot = resolve(testInfo.outputDir)
+  const resolvedProfile = resolve(profilePath)
+  if (!resolvedProfile.startsWith(`${outputRoot}${sep}`)) throw new Error('Unsafe test profile path.')
+
+  let context: BrowserContext | null = null
+  try {
+    context = await chromium.launchPersistentContext(profilePath, {
+      channel: 'chromium',
+      headless: true,
+      viewport: { width: 1920, height: 1080 },
+    })
+    const page = await openHarnessPage(context, baseURL)
+    await page.evaluate(async ({ canvasId, textId, stickyId, secondStickyId, edgeId, reverseEdgeId, stickyEdgeId, conflictEdgeId }) => {
+      const harness = (window as unknown as HarnessWindow).__taskPersistenceHarness
+      const expectFailure = async (operation: Promise<unknown>, expected: string) => {
+        try {
+          await operation
+        } catch (error: unknown) {
+          if (typeof error === 'object' && error !== null && 'code' in error && error.code === expected) return
+          throw error
+        }
+        throw new Error(`Expected ${expected}.`)
+      }
+      await harness.createCanvas({ id: canvasId, title: '语义连线画布', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 200 })
+      await harness.createTextNode({ id: textId, canvasId, nodeName: '父级文本', content: { type: 'text', text: '规划' }, x: 360, y: 300, createdAtMs: 210 })
+      await harness.createCanvasNode({ id: stickyId, canvasId, type: 'sticky', nodeName: '同级便签', content: { type: 'sticky', text: '执行' }, x: 920, y: 360, createdAtMs: 220 })
+      await harness.createCanvasNode({ id: secondStickyId, canvasId, type: 'sticky', content: { type: 'sticky', text: '复核' }, x: 1180, y: 620, createdAtMs: 221 })
+      await harness.renameCanvasNode({ canvasId, id: textId, nodeName: '父级文本', updatedAtMs: 221 })
+      await harness.renameCanvasNode({ canvasId, id: stickyId, nodeName: '同级便签', updatedAtMs: 222 })
+      await harness.createCanvasEdge({ id: edgeId, canvasId, sourceNodeId: textId, targetNodeId: stickyId, relationType: 'default', direction: 'forward', lineStyle: 'solid', createdAtMs: 230 })
+      await harness.createCanvasEdge({ id: reverseEdgeId, canvasId, sourceNodeId: stickyId, targetNodeId: textId, relationType: 'peer', direction: 'none', lineStyle: 'solid', createdAtMs: 231 })
+      await harness.createCanvasEdge({ id: stickyEdgeId, canvasId, sourceNodeId: stickyId, targetNodeId: secondStickyId, relationType: 'hierarchy', direction: 'forward', lineStyle: 'solid', createdAtMs: 232 })
+      await harness.createCanvasEdge({ id: conflictEdgeId, canvasId, sourceNodeId: textId, targetNodeId: stickyId, relationType: 'hierarchy', direction: 'forward', lineStyle: 'solid', createdAtMs: 233 })
+      await expectFailure(harness.updateCanvasEdgeRelationType({ id: edgeId, relationType: 'hierarchy', direction: 'forward', lineStyle: 'solid', updatedAtMs: 234 }), 'DUPLICATE')
+      const rolledBack = (await harness.listCanvasEdges(canvasId)).find((edge) => edge.id === edgeId)
+      if (rolledBack?.relationType !== 'default' || rolledBack.direction !== 'forward' || rolledBack.lineStyle !== 'solid' || rolledBack.updatedAtMs !== 230) {
+        throw new Error('Semantic Edge conflict did not roll back atomically.')
+      }
+      await harness.deleteCanvasEdge({ id: reverseEdgeId, deletedAtMs: 235, updatedAtMs: 235 })
+      await harness.deleteCanvasEdge({ id: stickyEdgeId, deletedAtMs: 236, updatedAtMs: 236 })
+      await harness.deleteCanvasEdge({ id: conflictEdgeId, deletedAtMs: 237, updatedAtMs: 237 })
+      await harness.shutdown()
+    }, {
+      canvasId: SEMANTIC_CANVAS_ID,
+      textId: SEMANTIC_TEXT_ID,
+      stickyId: SEMANTIC_STICKY_ID,
+      secondStickyId: SEMANTIC_SECOND_STICKY_ID,
+      edgeId: SEMANTIC_EDGE_ID,
+      reverseEdgeId: SEMANTIC_REVERSE_EDGE_ID,
+      stickyEdgeId: SEMANTIC_STICKY_EDGE_ID,
+      conflictEdgeId: SEMANTIC_CONFLICT_EDGE_ID,
+    })
+
+    await page.goto(`${baseURL}/canvas/${SEMANTIC_CANVAS_ID}`)
+    await expect(page.getByRole('heading', { name: '语义连线画布' })).toBeVisible()
+    const edge = page.locator(`.react-flow__edge[data-id="${SEMANTIC_EDGE_ID}"]`)
+    await expect(edge).toBeVisible()
+    await edge.click({ force: true })
+    const toolbar = page.getByRole('complementary', { name: '连线设置' })
+    await expect(toolbar.getByRole('heading', { name: '普通关系' })).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('01-default-relation.png') })
+
+    await toolbar.getByRole('button', { name: '上下级' }).click()
+    await expect(toolbar.getByRole('heading', { name: '上下级' })).toBeVisible()
+    await expect(toolbar.getByRole('button', { name: '单向' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(toolbar.getByRole('button', { name: '实线' })).toHaveAttribute('aria-pressed', 'true')
+    await page.screenshot({ path: testInfo.outputPath('02-hierarchy-forward.png') })
+
+    await page.reload()
+    await expect(page.getByRole('heading', { name: '语义连线画布' })).toBeVisible()
+    await page.locator(`.react-flow__edge[data-id="${SEMANTIC_EDGE_ID}"]`).click({ force: true })
+    const hierarchyToolbar = page.getByRole('complementary', { name: '连线设置' })
+    await expect(hierarchyToolbar.getByRole('heading', { name: '上下级' })).toBeVisible()
+    await expect(hierarchyToolbar.getByRole('button', { name: '单向' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(hierarchyToolbar.getByRole('button', { name: '实线' })).toHaveAttribute('aria-pressed', 'true')
+    await page.screenshot({ path: testInfo.outputPath('03-hierarchy-restart.png') })
+
+    await hierarchyToolbar.getByRole('button', { name: '同级' }).click()
+    await expect(hierarchyToolbar.getByRole('heading', { name: '同级' })).toBeVisible()
+    await expect(hierarchyToolbar.getByRole('button', { name: '无方向' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(hierarchyToolbar.getByRole('button', { name: '实线' })).toHaveAttribute('aria-pressed', 'true')
+    await page.screenshot({ path: testInfo.outputPath('04-peer-default.png') })
+    await hierarchyToolbar.getByRole('button', { name: '双向' }).click()
+    await hierarchyToolbar.getByRole('button', { name: '虚线' }).click()
+    await expect(hierarchyToolbar.getByRole('heading', { name: '同级' })).toBeVisible()
+    await expect(hierarchyToolbar.getByRole('button', { name: '双向' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(hierarchyToolbar.getByRole('button', { name: '虚线' })).toHaveAttribute('aria-pressed', 'true')
+    await page.screenshot({ path: testInfo.outputPath('05-peer-independent-visuals.png') })
+
+    await page.reload()
+    await expect(page.getByRole('heading', { name: '语义连线画布' })).toBeVisible()
+    const restoredEdge = page.locator(`.react-flow__edge[data-id="${SEMANTIC_EDGE_ID}"]`)
+    await restoredEdge.click({ force: true })
+    const restoredToolbar = page.getByRole('complementary', { name: '连线设置' })
+    await expect(restoredToolbar.getByRole('heading', { name: '同级' })).toBeVisible()
+    await expect(restoredToolbar.getByRole('button', { name: '双向' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(restoredToolbar.getByRole('button', { name: '虚线' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator(`.react-flow__node[data-id="${SEMANTIC_TEXT_ID}"]`).getByText('父级文本')).toBeVisible()
+    await expect(page.locator(`.react-flow__node[data-id="${SEMANTIC_STICKY_ID}"]`).getByText('同级便签')).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('06-peer-restart.png') })
     await page.goto('about:blank')
   } finally {
     await context?.close()

@@ -17,6 +17,7 @@ import {
   type RegisteredCanvasNodeContent,
   type RegisteredCanvasNodeType,
 } from '@/canvas/model'
+import { canvasEdgeRegistry } from '@/canvas/edgeRegistry'
 import {
   CanvasRepositoryError,
   type CanvasRepository,
@@ -117,6 +118,10 @@ export interface CanvasService {
   updateCanvasEdgeLineStyle(
     id: string,
     lineStyle: CanvasEdgeLineStyle,
+  ): Promise<CanvasEdge>
+  updateCanvasEdgeRelationType(
+    id: string,
+    relationType: import('@/canvas/model').CanvasEdgeRelationType,
   ): Promise<CanvasEdge>
   deleteCanvasEdge(id: string): Promise<CanvasEdge>
 }
@@ -350,21 +355,16 @@ export function createCanvasService({
       if (sourceNodeId === targetNodeId) {
         throw new CanvasApplicationError('VALIDATION', 'targetNodeId')
       }
-      const relationType = 'default' as const
-      const direction = 'forward' as const
-      const lineStyle = 'solid' as const
-      if (!isCanvasEdgeRelationType(relationType)) {
-        throw new CanvasApplicationError('VALIDATION', 'relationType')
-      }
+      const definition = canvasEdgeRegistry.default
       return callRepository(() =>
         repository.createCanvasEdge({
           id: readGeneratedId(generateId),
           canvasId,
           sourceNodeId,
           targetNodeId,
-          relationType,
-          direction,
-          lineStyle,
+          relationType: definition.relationType,
+          direction: definition.defaultDirection,
+          lineStyle: definition.defaultLineStyle,
           createdAtMs: readNowMs(nowMs),
         }),
       )
@@ -395,6 +395,22 @@ export function createCanvasService({
         repository.updateCanvasEdgeLineStyle({
           id,
           lineStyle,
+          updatedAtMs: readNowMs(nowMs),
+        }),
+      )
+    },
+    updateCanvasEdgeRelationType(id, relationType) {
+      validateId(id, 'id')
+      if (!isCanvasEdgeRelationType(relationType)) {
+        throw new CanvasApplicationError('VALIDATION', 'relationType')
+      }
+      const definition = canvasEdgeRegistry.byRelationType.get(relationType)!
+      return callRepository(() =>
+        repository.updateCanvasEdgeRelationType({
+          id,
+          relationType,
+          direction: definition.defaultDirection,
+          lineStyle: definition.defaultLineStyle,
           updatedAtMs: readNowMs(nowMs),
         }),
       )

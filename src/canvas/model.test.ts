@@ -59,6 +59,9 @@ describe('Canvas domain validation', () => {
 
   test('accepts only the frozen Canvas Edge V1 enums', () => {
     expect(isCanvasEdgeRelationType('default')).toBe(true)
+    expect(isCanvasEdgeRelationType('hierarchy')).toBe(true)
+    expect(isCanvasEdgeRelationType('peer')).toBe(true)
+    expect(isCanvasEdgeRelationType('ordered_box_member')).toBe(false)
     expect(isCanvasEdgeRelationType('dependency')).toBe(false)
     expect(isCanvasEdgeDirection('forward')).toBe(true)
     expect(isCanvasEdgeDirection('bidirectional')).toBe(true)

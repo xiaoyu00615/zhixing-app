@@ -5,7 +5,7 @@ import {
   isCanvasCoordinate,
   isCanvasEdgeDirection,
   isCanvasEdgeLineStyle,
-  isCanvasEdgeRelationType,
+  isPersistedCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
   isPersistedCanvasNodeName,
@@ -31,6 +31,7 @@ import {
   type UpdateCanvasViewportInput,
   type UpdateCanvasEdgeDirectionInput,
   type UpdateCanvasEdgeLineStyleInput,
+  type UpdateCanvasEdgeRelationTypeInput,
   type UpdateCanvasNodeContentInput,
   type UpdateTextNodeInput,
 } from '@/canvas/repository'
@@ -116,7 +117,7 @@ function parseEdge(
     !isCanonicalCanvasId(sourceNodeId) ||
     !isCanonicalCanvasId(targetNodeId) ||
     sourceNodeId === targetNodeId ||
-    !isCanvasEdgeRelationType(relationType) ||
+    !isPersistedCanvasEdgeRelationType(relationType) ||
     !isCanvasEdgeDirection(direction) ||
     !isCanvasEdgeLineStyle(lineStyle) ||
     !isTimestamp(createdAtMs) ||
@@ -306,6 +307,19 @@ export class NativeCanvasRepository implements CanvasRepository {
         { input },
       ),
       'updateCanvasEdgeLineStyle',
+    )
+  }
+
+  async updateCanvasEdgeRelationType(
+    input: UpdateCanvasEdgeRelationTypeInput,
+  ): Promise<CanvasEdge> {
+    return parseEdge(
+      await invokeCanvas(
+        'canvas_edge_set_relation_type',
+        'updateCanvasEdgeRelationType',
+        { input },
+      ),
+      'updateCanvasEdgeRelationType',
     )
   }
 

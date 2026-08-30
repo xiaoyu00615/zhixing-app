@@ -35,6 +35,7 @@ import {
   isCanvasEdgeDirection,
   isCanvasEdgeLineStyle,
   isCanvasEdgeRelationType,
+  isPersistedCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
   isPersistedCanvasNodeName,
@@ -58,6 +59,7 @@ import type {
   UpdateCanvasViewportInput,
   UpdateCanvasEdgeDirectionInput,
   UpdateCanvasEdgeLineStyleInput,
+  UpdateCanvasEdgeRelationTypeInput,
   UpdateCanvasNodeContentInput,
   UpdateTextNodeInput,
 } from '@/canvas/repository'
@@ -168,7 +170,7 @@ function parseCanvasEdgeRow(
     !isCanonicalCanvasId(sourceNodeId) ||
     !isCanonicalCanvasId(targetNodeId) ||
     sourceNodeId === targetNodeId ||
-    !isCanvasEdgeRelationType(relationType) ||
+    !isPersistedCanvasEdgeRelationType(relationType) ||
     !isCanvasEdgeDirection(direction) ||
     !isCanvasEdgeLineStyle(lineStyle) ||
     !isNonNegativeSafeIntegerMilliseconds(createdAtMs) ||
@@ -1085,6 +1087,54 @@ export class WebTaskDatabase {
         throw new TaskDatabaseError('NOT_FOUND')
       }
       return this.requireCanvasEdge(input.id, false)
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  updateCanvasEdgeRelationType(
+    input: UpdateCanvasEdgeRelationTypeInput,
+  ): CanvasEdge {
+    this.validateCanvasUpdate(input.id, input.updatedAtMs)
+    if (
+      !isCanvasEdgeRelationType(input.relationType) ||
+      !isCanvasEdgeDirection(input.direction) ||
+      !isCanvasEdgeLineStyle(input.lineStyle)
+    ) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    try {
+      return this.#database.transaction(() => {
+        const current = this.requireCanvasEdge(input.id, false)
+        if (!isCanvasEdgeRelationType(current.relationType)) {
+          throw new TaskDatabaseError('PERSISTENCE_FAILED')
+        }
+        this.assertNoDuplicateCanvasEdge(
+          current.canvasId,
+          current.sourceNodeId,
+          current.targetNodeId,
+          input.relationType,
+          input.direction,
+          input.id,
+        )
+        this.#database.exec({
+          sql: `UPDATE canvas_edges
+                SET relation_type = ?, direction = ?, line_style = ?, updated_at_ms = ?
+                WHERE id = ? AND deleted_at_ms IS NULL`,
+          bind: [
+            input.relationType,
+            input.direction,
+            input.lineStyle,
+            input.updatedAtMs,
+            input.id,
+          ],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+        return this.requireCanvasEdge(input.id, false)
+      })
     } catch (error: unknown) {
       if (error instanceof TaskDatabaseError) throw error
       throw new TaskDatabaseError('PERSISTENCE_FAILED')

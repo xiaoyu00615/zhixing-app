@@ -40,6 +40,7 @@ class CanvasWorker implements TaskWorkerEndpoint {
       case 'canvas.edge.list': return this.backend.listCanvasEdges(request.canvasId)
       case 'canvas.edge.setDirection': return this.backend.updateCanvasEdgeDirection(request.input)
       case 'canvas.edge.setLineStyle': return this.backend.updateCanvasEdgeLineStyle(request.input)
+      case 'canvas.edge.setRelationType': return this.backend.updateCanvasEdgeRelationType(request.input)
       case 'canvas.edge.delete': return this.backend.deleteCanvasEdge(request.input)
       default: throw new Error(`Unexpected request ${request.type}`)
     }
@@ -72,6 +73,23 @@ test('Canvas Edge Worker messages remain capability-specific and strictly parsed
   expect(parseTaskWorkerRequest(validCreate)).toEqual(validCreate)
   expect(parseTaskWorkerRequest({ ...validCreate, input: { ...validCreate.input, direction: 'reverse' } })).toBeNull()
   expect(parseTaskWorkerRequest({ requestId: 2, type: 'canvas.edge.execute', sql: 'DELETE' })).toBeNull()
+
+  const semanticUpdate = {
+    requestId: 2,
+    type: 'canvas.edge.setRelationType',
+    input: {
+      id: validCreate.input.id,
+      relationType: 'peer',
+      direction: 'none',
+      lineStyle: 'solid',
+      updatedAtMs: 20,
+    },
+  }
+  expect(parseTaskWorkerRequest(semanticUpdate)).toEqual(semanticUpdate)
+  expect(parseTaskWorkerRequest({
+    ...semanticUpdate,
+    input: { ...semanticUpdate.input, relationType: 'ordered_box_member' },
+  })).toBeNull()
 })
 
 test('Canvas batch move Worker messages are explicit and reject invalid batches', () => {

@@ -28,6 +28,7 @@ import type {
   UpdateCanvasViewportInput,
   UpdateCanvasEdgeDirectionInput,
   UpdateCanvasEdgeLineStyleInput,
+  UpdateCanvasEdgeRelationTypeInput,
   UpdateCanvasNodeContentInput,
   UpdateTextNodeInput,
 } from '@/canvas/repository'
@@ -378,6 +379,16 @@ export class TaskWorkerClient {
     return this.send((requestId) => ({
       requestId,
       type: 'canvas.edge.setLineStyle',
+      input,
+    }))
+  }
+
+  updateCanvasEdgeRelationType(
+    input: UpdateCanvasEdgeRelationTypeInput,
+  ): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.edge.setRelationType',
       input,
     }))
   }

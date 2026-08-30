@@ -23,6 +23,7 @@ import { CanvasEdgeToolbar } from '@/components/canvas/CanvasEdgeToolbar'
 import { Button } from '@/components/ui/button'
 import type { Canvas, CanvasEdge, CanvasNode } from '@/canvas/model'
 import type { RegisteredCanvasNodeType } from '@/canvas/model'
+import { getCanvasEdgeTypeDefinition, UNKNOWN_CANVAS_EDGE_RENDER } from '@/canvas/edgeRegistry'
 import { canvasNodeRegistry, toCanvasFlowNode, type CanvasFlowNode } from '@/canvas/nodeRegistry'
 import { openCanvasRuntime } from '@/canvas/runtime'
 import type { OpenCanvasRuntime } from '@/canvas/runtime.types'
@@ -46,7 +47,8 @@ function edgeStrokeDasharray(edge: CanvasEdge): string | undefined {
 }
 
 function toFlowEdge(edge: CanvasEdge, selected: boolean): Edge {
-  const marker = { type: MarkerType.ArrowClosed, width: 16, height: 16 }
+  const render = getCanvasEdgeTypeDefinition(edge.relationType)?.render ?? UNKNOWN_CANVAS_EDGE_RENDER
+  const marker = { type: MarkerType.ArrowClosed, width: render.markerSize, height: render.markerSize }
   return {
     id: edge.id,
     source: edge.sourceNodeId,
@@ -55,7 +57,7 @@ function toFlowEdge(edge: CanvasEdge, selected: boolean): Edge {
     markerStart: edge.direction === 'bidirectional' ? marker : undefined,
     markerEnd: edge.direction === 'none' ? undefined : marker,
     style: {
-      stroke: selected ? 'var(--color-primary)' : '#7b8495',
+      stroke: selected ? render.selectedStroke : render.stroke,
       strokeWidth: selected ? 2.2 : 1.8,
       strokeDasharray: edgeStrokeDasharray(edge),
     },
@@ -482,6 +484,30 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
     }
   }
 
+  async function changeEdgeRelationType(
+    edge: CanvasEdge,
+    relationType: import('@/canvas/model').CanvasEdgeRelationType,
+  ): Promise<void> {
+    if (service === null || relationType === edge.relationType) return
+    setEdgeBusy(true)
+    try {
+      const updated = await service.updateCanvasEdgeRelationType(edge.id, relationType)
+      setCanvasEdges((edges) =>
+        edges.map((item) => (item.id === updated.id ? updated : item)),
+      )
+      const definition = getCanvasEdgeTypeDefinition(updated.relationType)
+      setFeedback(`${definition?.displayName ?? '关系类型'}已保存`)
+    } catch (error: unknown) {
+      setFeedback(
+        error instanceof Error && 'code' in error && error.code === 'CONFLICT'
+          ? '该关系类型会产生重复关系，已保留原配置。'
+          : '关系类型保存失败，已保留原配置。',
+      )
+    } finally {
+      setEdgeBusy(false)
+    }
+  }
+
   async function removeEdge(edge: CanvasEdge): Promise<void> {
     if (service === null) return
     setEdgeBusy(true)
@@ -551,6 +577,9 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
             busy={edgeBusy}
             edge={selectedEdge}
             onDelete={() => void removeEdge(selectedEdge)}
+            onRelationTypeChange={(relationType) =>
+              void changeEdgeRelationType(selectedEdge, relationType)
+            }
             onDirectionChange={(direction) =>
               void changeEdgeDirection(selectedEdge, direction)
             }

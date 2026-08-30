@@ -4,6 +4,7 @@ import {
   isCanvasEdgeDirection,
   isCanvasEdgeLineStyle,
   isCanvasEdgeRelationType,
+  isPersistedCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
   isPersistedCanvasNodeName,
@@ -29,6 +30,7 @@ import {
   type UpdateCanvasViewportInput,
   type UpdateCanvasEdgeDirectionInput,
   type UpdateCanvasEdgeLineStyleInput,
+  type UpdateCanvasEdgeRelationTypeInput,
   type UpdateCanvasNodeContentInput,
   type UpdateTextNodeInput,
 } from '@/canvas/repository'
@@ -114,7 +116,7 @@ function parseEdge(
     !isCanonicalCanvasId(sourceNodeId) ||
     !isCanonicalCanvasId(targetNodeId) ||
     sourceNodeId === targetNodeId ||
-    !isCanvasEdgeRelationType(relationType) ||
+    !isPersistedCanvasEdgeRelationType(relationType) ||
     !isCanvasEdgeDirection(direction) ||
     !isCanvasEdgeLineStyle(lineStyle) ||
     !isTimestamp(createdAtMs) ||
@@ -419,6 +421,29 @@ export class WebCanvasRepository implements CanvasRepository {
     try {
       return parseEdge(
         await this.#client.updateCanvasEdgeLineStyle(input),
+        operation,
+      )
+    } catch (error: unknown) {
+      throw mapError(error, operation)
+    }
+  }
+
+  async updateCanvasEdgeRelationType(
+    input: UpdateCanvasEdgeRelationTypeInput,
+  ): Promise<CanvasEdge> {
+    const operation = 'updateCanvasEdgeRelationType'
+    validateId(input.id, operation)
+    validateTimestamp(input.updatedAtMs, operation)
+    if (
+      !isCanvasEdgeRelationType(input.relationType) ||
+      !isCanvasEdgeDirection(input.direction) ||
+      !isCanvasEdgeLineStyle(input.lineStyle)
+    ) {
+      throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+    }
+    try {
+      return parseEdge(
+        await this.#client.updateCanvasEdgeRelationType(input),
         operation,
       )
     } catch (error: unknown) {

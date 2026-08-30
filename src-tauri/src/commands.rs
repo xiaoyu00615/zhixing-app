@@ -843,6 +843,16 @@ pub(crate) struct UpdateCanvasEdgeLineStyleDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateCanvasEdgeRelationTypeDto {
+    id: String,
+    relation_type: String,
+    direction: CanvasEdgeDirection,
+    line_style: CanvasEdgeLineStyle,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DeleteCanvasEdgeDto {
     id: String,
     deleted_at_ms: i64,
@@ -1179,6 +1189,27 @@ pub(crate) fn canvas_edge_set_line_style(
         &connection,
         UpdateCanvasEdgeLineStyleInput {
             id: input.id,
+            line_style: input.line_style,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(CanvasEdgeDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_edge_set_relation_type(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: UpdateCanvasEdgeRelationTypeDto,
+) -> Result<CanvasEdgeDto, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::update_edge_relation_type(
+        &connection,
+        crate::canvas::UpdateCanvasEdgeRelationTypeInput {
+            id: input.id,
+            relation_type: input.relation_type,
+            direction: input.direction,
             line_style: input.line_style,
             updated_at_ms: input.updated_at_ms,
         },

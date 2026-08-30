@@ -276,6 +276,14 @@ pub(crate) struct UpdateCanvasEdgeLineStyleInput {
     pub(crate) updated_at_ms: i64,
 }
 
+pub(crate) struct UpdateCanvasEdgeRelationTypeInput {
+    pub(crate) id: String,
+    pub(crate) relation_type: String,
+    pub(crate) direction: CanvasEdgeDirection,
+    pub(crate) line_style: CanvasEdgeLineStyle,
+    pub(crate) updated_at_ms: i64,
+}
+
 pub(crate) struct DeleteCanvasEdgeInput {
     pub(crate) id: String,
     pub(crate) deleted_at_ms: i64,
@@ -341,7 +349,15 @@ fn validate_node_name(node_name: &str) -> Result<(), CanvasError> {
 }
 
 fn validate_relation_type(relation_type: &str) -> Result<(), CanvasError> {
-    if relation_type == "default" {
+    if matches!(relation_type, "default" | "hierarchy" | "peer") {
+        Ok(())
+    } else {
+        Err(CanvasError::PersistenceFailed)
+    }
+}
+
+fn validate_persisted_relation_type(relation_type: &str) -> Result<(), CanvasError> {
+    if !relation_type.is_empty() && relation_type.trim() == relation_type {
         Ok(())
     } else {
         Err(CanvasError::PersistenceFailed)
@@ -530,7 +546,7 @@ fn validate_edge(raw: EdgeRow) -> Result<CanvasEdgeRecord, CanvasError> {
     validate_id(&canvas_id)?;
     validate_id(&source_node_id)?;
     validate_id(&target_node_id)?;
-    validate_relation_type(&relation_type)?;
+    validate_persisted_relation_type(&relation_type)?;
     validate_timestamp(created_at_ms)?;
     validate_timestamp(updated_at_ms)?;
     if let Some(value) = deleted_at_ms {
@@ -977,6 +993,35 @@ impl CanvasDbService {
                 params![input.line_style.as_str(), input.updated_at_ms, input.id],
             )
             .map_err(|_| CanvasError::PersistenceFailed)?;
+        if changed != 1 {
+            return Err(CanvasError::NotFound);
+        }
+        Self::get_active_edge(connection, &input.id)
+    }
+
+    pub(crate) fn update_edge_relation_type(
+        connection: &Connection,
+        input: UpdateCanvasEdgeRelationTypeInput,
+    ) -> Result<CanvasEdgeRecord, CanvasError> {
+        validate_id(&input.id)?;
+        validate_relation_type(&input.relation_type)?;
+        validate_timestamp(input.updated_at_ms)?;
+        let current = Self::get_active_edge(connection, &input.id)?;
+        validate_relation_type(&current.relation_type)?;
+        let changed = connection
+            .execute(
+                "UPDATE canvas_edges \
+                 SET relation_type = ?1, direction = ?2, line_style = ?3, updated_at_ms = ?4 \
+                 WHERE id = ?5 AND deleted_at_ms IS NULL",
+                params![
+                    input.relation_type,
+                    input.direction.as_str(),
+                    input.line_style.as_str(),
+                    input.updated_at_ms,
+                    input.id
+                ],
+            )
+            .map_err(map_edge_write_error)?;
         if changed != 1 {
             return Err(CanvasError::NotFound);
         }
@@ -2372,5 +2417,148 @@ mod tests {
                 text: "Remember".into()
             }
         );
+    }
+
+    #[test]
+    fn semantic_edge_types_update_atomically_preserve_unknowns_and_restart() {
+        let (_sandbox, database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        create_node(&connection, NODE_ID, CANVAS_ID, "Source");
+        create_node(&connection, TARGET_NODE_ID, CANVAS_ID, "Target");
+
+        let mut hierarchy = edge_input(
+            EDGE_ID,
+            NODE_ID,
+            TARGET_NODE_ID,
+            CanvasEdgeDirection::Forward,
+        );
+        hierarchy.relation_type = "hierarchy".into();
+        let created = CanvasDbService::create_edge(&connection, hierarchy).unwrap();
+        assert_eq!(created.relation_type, "hierarchy");
+
+        let default_id = "00000000-0000-4000-8000-000000000605";
+        CanvasDbService::create_edge(
+            &connection,
+            edge_input(
+                default_id,
+                NODE_ID,
+                TARGET_NODE_ID,
+                CanvasEdgeDirection::Forward,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            CanvasDbService::update_edge_relation_type(
+                &connection,
+                UpdateCanvasEdgeRelationTypeInput {
+                    id: default_id.into(),
+                    relation_type: "hierarchy".into(),
+                    direction: CanvasEdgeDirection::Forward,
+                    line_style: CanvasEdgeLineStyle::Solid,
+                    updated_at_ms: 40,
+                },
+            ),
+            Err(CanvasError::Duplicate)
+        );
+        let unchanged = CanvasDbService::get_active_edge(&connection, default_id).unwrap();
+        assert_eq!(
+            (
+                unchanged.relation_type.as_str(),
+                unchanged.direction,
+                unchanged.line_style,
+                unchanged.updated_at_ms,
+            ),
+            (
+                "default",
+                CanvasEdgeDirection::Forward,
+                CanvasEdgeLineStyle::Solid,
+                30,
+            )
+        );
+
+        CanvasDbService::delete_edge(
+            &connection,
+            DeleteCanvasEdgeInput {
+                id: EDGE_ID.into(),
+                deleted_at_ms: 50,
+                updated_at_ms: 50,
+            },
+        )
+        .unwrap();
+        let hierarchy = CanvasDbService::update_edge_relation_type(
+            &connection,
+            UpdateCanvasEdgeRelationTypeInput {
+                id: default_id.into(),
+                relation_type: "hierarchy".into(),
+                direction: CanvasEdgeDirection::Forward,
+                line_style: CanvasEdgeLineStyle::Solid,
+                updated_at_ms: 60,
+            },
+        )
+        .unwrap();
+        assert_eq!(hierarchy.relation_type, "hierarchy");
+        let peer = CanvasDbService::update_edge_relation_type(
+            &connection,
+            UpdateCanvasEdgeRelationTypeInput {
+                id: default_id.into(),
+                relation_type: "peer".into(),
+                direction: CanvasEdgeDirection::None,
+                line_style: CanvasEdgeLineStyle::Solid,
+                updated_at_ms: 70,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (peer.relation_type.as_str(), peer.direction, peer.line_style,),
+            (
+                "peer",
+                CanvasEdgeDirection::None,
+                CanvasEdgeLineStyle::Solid,
+            )
+        );
+
+        let unknown_id = "00000000-0000-4000-8000-000000000606";
+        connection
+            .execute(
+                "INSERT INTO canvas_edges(
+                    id, canvas_id, source_node_id, target_node_id, relation_type,
+                    direction, line_style, created_at_ms, updated_at_ms, deleted_at_ms
+                 ) VALUES(?1, ?2, ?3, ?4, 'future_relation', 'bidirectional', 'dotted', 80, 80, NULL)",
+                params![unknown_id, CANVAS_ID, NODE_ID, TARGET_NODE_ID],
+            )
+            .unwrap();
+        let unknown = CanvasDbService::get_active_edge(&connection, unknown_id).unwrap();
+        assert_eq!(unknown.relation_type, "future_relation");
+        assert_eq!(unknown.direction, CanvasEdgeDirection::Bidirectional);
+        assert_eq!(unknown.line_style, CanvasEdgeLineStyle::Dotted);
+        assert_eq!(
+            CanvasDbService::update_edge_relation_type(
+                &connection,
+                UpdateCanvasEdgeRelationTypeInput {
+                    id: unknown_id.into(),
+                    relation_type: "peer".into(),
+                    direction: CanvasEdgeDirection::None,
+                    line_style: CanvasEdgeLineStyle::Solid,
+                    updated_at_ms: 90,
+                },
+            ),
+            Err(CanvasError::PersistenceFailed)
+        );
+
+        drop(connection);
+        let reopened = open_existing_configured_connection(database_path).unwrap();
+        let edges = CanvasDbService::list_edges(&reopened, CANVAS_ID).unwrap();
+        assert!(edges.iter().any(|edge| {
+            edge.id == default_id
+                && edge.relation_type == "peer"
+                && edge.direction == CanvasEdgeDirection::None
+                && edge.line_style == CanvasEdgeLineStyle::Solid
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge.id == unknown_id
+                && edge.relation_type == "future_relation"
+                && edge.direction == CanvasEdgeDirection::Bidirectional
+                && edge.line_style == CanvasEdgeLineStyle::Dotted
+        }));
     }
 }

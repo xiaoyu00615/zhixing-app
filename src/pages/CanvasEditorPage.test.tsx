@@ -200,6 +200,7 @@ function fixture() {
   const createCanvasEdgeMock = vi.fn<CanvasService['createCanvasEdge']>(() => Promise.resolve({ ...edge, id: '00000000-0000-4000-8000-000000000606' }))
   const updateCanvasEdgeDirectionMock = vi.fn<CanvasService['updateCanvasEdgeDirection']>((id, direction) => Promise.resolve({ ...edge, id, direction, updatedAtMs: 20 }))
   const updateCanvasEdgeLineStyleMock = vi.fn<CanvasService['updateCanvasEdgeLineStyle']>((id, lineStyle) => Promise.resolve({ ...edge, id, lineStyle, updatedAtMs: 20 }))
+  const updateCanvasEdgeRelationTypeMock = vi.fn<CanvasService['updateCanvasEdgeRelationType']>((id, relationType) => Promise.resolve({ ...edge, id, relationType, direction: relationType === 'peer' ? 'none' : 'forward', lineStyle: 'solid', updatedAtMs: 20 }))
   const deleteCanvasEdgeMock = vi.fn<CanvasService['deleteCanvasEdge']>(() => Promise.resolve({ ...edge, deletedAtMs: 20, updatedAtMs: 20 }))
   const service: CanvasService = {
     createCanvas: vi.fn(), listCanvases: vi.fn(), renameCanvas: vi.fn(),
@@ -213,10 +214,11 @@ function fixture() {
     createCanvasEdge: createCanvasEdgeMock, listCanvasEdges: vi.fn(),
     updateCanvasEdgeDirection: updateCanvasEdgeDirectionMock,
     updateCanvasEdgeLineStyle: updateCanvasEdgeLineStyleMock,
+    updateCanvasEdgeRelationType: updateCanvasEdgeRelationTypeMock,
     deleteCanvasEdge: deleteCanvasEdgeMock,
   }
   const openRuntime: OpenCanvasRuntime = vi.fn(() => Promise.resolve({ service, dispose: vi.fn() }))
-  return { canvas, service, openRuntime, openCanvasMock, createTextNodeMock, editTextNodeMock, createCanvasNodeMock, updateCanvasNodeContentMock, renameCanvasNodeMock, moveCanvasNodeMock, moveCanvasNodesMock, updateViewportMock, createCanvasEdgeMock, updateCanvasEdgeDirectionMock, updateCanvasEdgeLineStyleMock, deleteCanvasEdgeMock }
+  return { canvas, service, openRuntime, openCanvasMock, createTextNodeMock, editTextNodeMock, createCanvasNodeMock, updateCanvasNodeContentMock, renameCanvasNodeMock, moveCanvasNodeMock, moveCanvasNodesMock, updateViewportMock, createCanvasEdgeMock, updateCanvasEdgeDirectionMock, updateCanvasEdgeLineStyleMock, updateCanvasEdgeRelationTypeMock, deleteCanvasEdgeMock }
 }
 
 function renderEditor(openRuntime: OpenCanvasRuntime) {
@@ -644,6 +646,7 @@ describe('CanvasEditorPage', () => {
       createCanvasEdgeMock,
       updateCanvasEdgeDirectionMock,
       updateCanvasEdgeLineStyleMock,
+      updateCanvasEdgeRelationTypeMock,
       deleteCanvasEdgeMock,
     } = fixture()
     renderEditor(openRuntime)
@@ -657,6 +660,8 @@ describe('CanvasEditorPage', () => {
 
     await userEvent.click(restoredEdge)
     expect(screen.getByRole('complementary', { name: '连线设置' })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '上下级' }))
+    await waitFor(() => expect(updateCanvasEdgeRelationTypeMock).toHaveBeenCalledWith(EDGE_ID, 'hierarchy'))
     await userEvent.click(screen.getByRole('button', { name: '双向' }))
     await waitFor(() => expect(updateCanvasEdgeDirectionMock).toHaveBeenCalledWith(EDGE_ID, 'bidirectional'))
     await userEvent.click(screen.getByRole('button', { name: '虚线' }))
@@ -664,6 +669,20 @@ describe('CanvasEditorPage', () => {
     await userEvent.click(screen.getByRole('button', { name: '删除连线' }))
     await waitFor(() => expect(deleteCanvasEdgeMock).toHaveBeenCalledWith(EDGE_ID))
     expect(screen.queryByRole('button', { name: `测试连线 ${EDGE_ID}` })).not.toBeInTheDocument()
+  })
+
+  test('keeps the selected Edge configuration unchanged when semantic update conflicts', async () => {
+    const resolved = fixture()
+    resolved.updateCanvasEdgeRelationTypeMock.mockRejectedValueOnce(
+      new CanvasApplicationError('CONFLICT'),
+    )
+    renderEditor(resolved.openRuntime)
+    await userEvent.click(await screen.findByRole('button', { name: `测试连线 ${EDGE_ID}` }))
+    await userEvent.click(screen.getByRole('button', { name: '上下级' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('已保留原配置')
+    expect(screen.getByRole('button', { name: '普通关系' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: '单向' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: '实线' })).toHaveAttribute('aria-pressed', 'true')
   })
 
   test('keeps the persisted Edge set unchanged when a duplicate connect conflicts', async () => {

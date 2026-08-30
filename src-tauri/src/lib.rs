@@ -221,6 +221,7 @@ pub fn run() {
             commands::canvas_edge_list,
             commands::canvas_edge_set_direction,
             commands::canvas_edge_set_line_style,
+            commands::canvas_edge_set_relation_type,
             commands::canvas_edge_delete
         ])
         .setup(|app| {

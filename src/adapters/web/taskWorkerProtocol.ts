@@ -49,6 +49,7 @@ import type {
   UpdateCanvasViewportInput,
   UpdateCanvasEdgeDirectionInput,
   UpdateCanvasEdgeLineStyleInput,
+  UpdateCanvasEdgeRelationTypeInput,
   UpdateCanvasNodeContentInput,
   UpdateTextNodeInput,
 } from '@/canvas/repository'
@@ -228,6 +229,11 @@ export type TaskWorkerRequest =
       readonly requestId: number
       readonly type: 'canvas.edge.setLineStyle'
       readonly input: UpdateCanvasEdgeLineStyleInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.edge.setRelationType'
+      readonly input: UpdateCanvasEdgeRelationTypeInput
     }
   | {
       readonly requestId: number
@@ -685,6 +691,17 @@ export function parseTaskWorkerRequest(
             requestId: value.requestId,
             type: value.type,
             input: value.input as unknown as UpdateCanvasEdgeLineStyleInput,
+          }
+        : null
+    case 'canvas.edge.setRelationType':
+      return isCanvasUpdateBase(value.input) &&
+        isCanvasEdgeRelationType(value.input.relationType) &&
+        isCanvasEdgeDirection(value.input.direction) &&
+        isCanvasEdgeLineStyle(value.input.lineStyle)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input as unknown as UpdateCanvasEdgeRelationTypeInput,
           }
         : null
     case 'canvas.edge.delete':

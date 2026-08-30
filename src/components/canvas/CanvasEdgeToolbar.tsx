@@ -4,11 +4,14 @@ import type {
   CanvasEdge,
   CanvasEdgeDirection,
   CanvasEdgeLineStyle,
+  CanvasEdgeRelationType,
 } from '@/canvas/model'
+import { getCanvasEdgeTypeDefinition, canvasEdgeRegistry } from '@/canvas/edgeRegistry'
 
 interface CanvasEdgeToolbarProps {
   readonly edge: CanvasEdge
   readonly busy: boolean
+  readonly onRelationTypeChange: (relationType: CanvasEdgeRelationType) => void
   readonly onDirectionChange: (direction: CanvasEdgeDirection) => void
   readonly onLineStyleChange: (lineStyle: CanvasEdgeLineStyle) => void
   readonly onDelete: () => void
@@ -37,10 +40,12 @@ const LINE_STYLES: readonly {
 export function CanvasEdgeToolbar({
   edge,
   busy,
+  onRelationTypeChange,
   onDirectionChange,
   onLineStyleChange,
   onDelete,
 }: CanvasEdgeToolbarProps) {
+  const definition = getCanvasEdgeTypeDefinition(edge.relationType)
   return (
     <aside
       aria-label="连线设置"
@@ -51,12 +56,48 @@ export function CanvasEdgeToolbar({
           <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-foreground-tertiary">
             连线设置
           </p>
-          <h3 className="mt-1 text-sm font-semibold">普通关系</h3>
+          <h3 className="mt-1 text-sm font-semibold">
+            {definition?.displayName ?? '未知关系'}
+          </h3>
+          {definition === null && (
+            <p className="mt-1 max-w-44 truncate text-[11px] text-foreground-tertiary" title={edge.relationType}>
+              原始类型：{edge.relationType}
+            </p>
+          )}
         </div>
         <span className="rounded-full bg-primary/8 px-2.5 py-1 text-[11px] font-medium text-primary">
           已自动保存
         </span>
       </div>
+
+      <fieldset className="mt-4" disabled={busy || definition === null}>
+        <legend className="mb-2 text-xs font-medium text-foreground-secondary">
+          关系类型
+        </legend>
+        {definition === null ? (
+          <div className="rounded-xl bg-surface-secondary px-3 py-2.5 text-xs text-foreground-secondary">
+            未知关系保持只读，不会自动转换。
+          </div>
+        ) : (
+          <div className="grid grid-cols-3 gap-1 rounded-xl bg-surface-secondary p-1">
+            {canvasEdgeRegistry.definitions.map((item) => (
+              <button
+                aria-pressed={edge.relationType === item.relationType}
+                className={`h-9 rounded-lg text-xs font-medium transition ${
+                  edge.relationType === item.relationType
+                    ? 'bg-surface text-primary shadow-sm'
+                    : 'text-foreground-secondary hover:text-foreground'
+                }`}
+                key={item.relationType}
+                onClick={() => onRelationTypeChange(item.relationType)}
+                type="button"
+              >
+                {item.displayName}
+              </button>
+            ))}
+          </div>
+        )}
+      </fieldset>
 
       <fieldset className="mt-4" disabled={busy}>
         <legend className="mb-2 text-xs font-medium text-foreground-secondary">

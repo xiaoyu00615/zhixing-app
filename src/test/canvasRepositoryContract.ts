@@ -20,6 +20,7 @@ import {
   type UpdateCanvasViewportInput,
   type UpdateCanvasEdgeDirectionInput,
   type UpdateCanvasEdgeLineStyleInput,
+  type UpdateCanvasEdgeRelationTypeInput,
   type UpdateTextNodeInput,
 } from '@/canvas/repository'
 
@@ -208,6 +209,23 @@ export class CanvasContractBackend implements CanvasRepository {
     return Promise.resolve(updated)
   }
 
+  updateCanvasEdgeRelationType(
+    input: UpdateCanvasEdgeRelationTypeInput,
+  ): Promise<CanvasEdge> {
+    const edge = this.requireActiveEdge(input.id, 'updateCanvasEdgeRelationType')
+    this.assertNoDuplicate(
+      edge.canvasId,
+      edge.sourceNodeId,
+      edge.targetNodeId,
+      input.relationType,
+      input.direction,
+      edge.id,
+    )
+    const updated = { ...edge, ...input }
+    this.edges.set(edge.id, updated)
+    return Promise.resolve(updated)
+  }
+
   deleteCanvasEdge(input: DeleteCanvasEdgeInput): Promise<CanvasEdge> {
     const edge = this.requireActiveEdge(input.id, 'deleteCanvasEdge')
     const updated = { ...edge, ...input }
@@ -220,6 +238,7 @@ export class CanvasContractBackend implements CanvasRepository {
     operation:
       | 'updateCanvasEdgeDirection'
       | 'updateCanvasEdgeLineStyle'
+      | 'updateCanvasEdgeRelationType'
       | 'deleteCanvasEdge',
   ): CanvasEdge {
     const edge = this.edges.get(id)
@@ -361,6 +380,52 @@ export function defineCanvasRepositoryContract(
       await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toEqual([])
       await expect(repository.deleteCanvasEdge({ id: CONTRACT_EDGE_ID, deletedAtMs: 70, updatedAtMs: 70 })).rejects.toMatchObject({ code: 'NOT_FOUND' })
       await expect(repository.createCanvasEdge({ id: '00000000-0000-4000-8000-000000000615', canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_TARGET_NODE_ID, relationType: 'default', direction: 'forward', lineStyle: 'dotted', createdAtMs: 80 })).resolves.toMatchObject({ lineStyle: 'dotted' })
+    })
+
+    test('atomically changes semantic type with explicit presentation defaults', async () => {
+      const { repository } = createFixture()
+      await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+      await repository.createTextNode({ id: CONTRACT_NODE_ID, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: 'A' }, x: 1, y: 2, createdAtMs: 20 })
+      await repository.createCanvasNode({ id: CONTRACT_TARGET_NODE_ID, canvasId: CONTRACT_CANVAS_ID, type: 'sticky', content: { type: 'sticky', text: 'B' }, x: 3, y: 4, createdAtMs: 21 })
+      await repository.createCanvasEdge({ id: CONTRACT_EDGE_ID, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_TARGET_NODE_ID, relationType: 'default', direction: 'forward', lineStyle: 'dashed', createdAtMs: 30 })
+
+      await expect(repository.updateCanvasEdgeRelationType({ id: CONTRACT_EDGE_ID, relationType: 'hierarchy', direction: 'forward', lineStyle: 'solid', updatedAtMs: 40 })).resolves.toMatchObject({ relationType: 'hierarchy', direction: 'forward', lineStyle: 'solid', updatedAtMs: 40 })
+      await expect(repository.updateCanvasEdgeRelationType({ id: CONTRACT_EDGE_ID, relationType: 'peer', direction: 'none', lineStyle: 'solid', updatedAtMs: 50 })).resolves.toMatchObject({ relationType: 'peer', direction: 'none', lineStyle: 'solid', updatedAtMs: 50 })
+      await expect(repository.updateCanvasEdgeRelationType({ id: CONTRACT_EDGE_ID, relationType: 'default', direction: 'forward', lineStyle: 'solid', updatedAtMs: 60 })).resolves.toMatchObject({ relationType: 'default', direction: 'forward', lineStyle: 'solid', updatedAtMs: 60 })
+    })
+
+    test('rolls back every semantic field when a type change conflicts', async () => {
+      const { repository } = createFixture()
+      await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+      await repository.createTextNode({ id: CONTRACT_NODE_ID, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: 'A' }, x: 1, y: 2, createdAtMs: 20 })
+      await repository.createTextNode({ id: CONTRACT_TARGET_NODE_ID, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: 'B' }, x: 3, y: 4, createdAtMs: 21 })
+      await repository.createCanvasEdge({ id: CONTRACT_EDGE_ID, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_TARGET_NODE_ID, relationType: 'hierarchy', direction: 'forward', lineStyle: 'solid', createdAtMs: 30 })
+      await repository.createCanvasEdge({ id: CONTRACT_REVERSE_EDGE_ID, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_TARGET_NODE_ID, relationType: 'default', direction: 'forward', lineStyle: 'dashed', createdAtMs: 31 })
+
+      await expect(repository.updateCanvasEdgeRelationType({ id: CONTRACT_REVERSE_EDGE_ID, relationType: 'hierarchy', direction: 'forward', lineStyle: 'solid', updatedAtMs: 40 })).rejects.toMatchObject({ code: 'DUPLICATE' })
+      await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: CONTRACT_REVERSE_EDGE_ID, relationType: 'default', direction: 'forward', lineStyle: 'dashed', updatedAtMs: 31 }),
+      ]))
+    })
+
+    test('preserves unknown relation strings when listing existing data', async () => {
+      const { repository, backend } = createFixture()
+      await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+      backend.edges.set(CONTRACT_EDGE_ID, {
+        id: CONTRACT_EDGE_ID,
+        canvasId: CONTRACT_CANVAS_ID,
+        sourceNodeId: CONTRACT_NODE_ID,
+        targetNodeId: CONTRACT_TARGET_NODE_ID,
+        relationType: 'future_relation' as CanvasEdge['relationType'],
+        direction: 'bidirectional',
+        lineStyle: 'dotted',
+        createdAtMs: 30,
+        updatedAtMs: 30,
+        deletedAtMs: null,
+      })
+      await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toEqual([
+        expect.objectContaining({ relationType: 'future_relation', direction: 'bidirectional', lineStyle: 'dotted' }),
+      ])
     })
 
     test('connects text and sticky nodes in every supported pairing', async () => {

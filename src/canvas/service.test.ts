@@ -24,6 +24,7 @@ function fixture(): {
   createCanvasEdgeMock: ReturnType<typeof vi.fn>
   updateCanvasEdgeDirectionMock: ReturnType<typeof vi.fn>
   updateCanvasEdgeLineStyleMock: ReturnType<typeof vi.fn>
+  updateCanvasEdgeRelationTypeMock: ReturnType<typeof vi.fn>
   deleteCanvasEdgeMock: ReturnType<typeof vi.fn>
   moveCanvasNodesMock: ReturnType<typeof vi.fn>
   renameCanvasNodeMock: ReturnType<typeof vi.fn>
@@ -67,6 +68,9 @@ function fixture(): {
   const updateCanvasEdgeLineStyleMock = vi.fn((input) =>
     Promise.resolve({ ...edge, ...input }),
   )
+  const updateCanvasEdgeRelationTypeMock = vi.fn((input) =>
+    Promise.resolve({ ...edge, ...input }),
+  )
   const deleteCanvasEdgeMock = vi.fn((input) =>
     Promise.resolve({ ...edge, ...input }),
   )
@@ -93,6 +97,7 @@ function fixture(): {
       listCanvasEdges: vi.fn(() => Promise.resolve([edge])),
       updateCanvasEdgeDirection: updateCanvasEdgeDirectionMock,
       updateCanvasEdgeLineStyle: updateCanvasEdgeLineStyleMock,
+      updateCanvasEdgeRelationType: updateCanvasEdgeRelationTypeMock,
       deleteCanvasEdge: deleteCanvasEdgeMock,
     },
     createCanvasMock,
@@ -100,6 +105,7 @@ function fixture(): {
     createCanvasEdgeMock,
     updateCanvasEdgeDirectionMock,
     updateCanvasEdgeLineStyleMock,
+    updateCanvasEdgeRelationTypeMock,
     deleteCanvasEdgeMock,
     moveCanvasNodesMock,
     renameCanvasNodeMock,
@@ -321,5 +327,62 @@ describe('CanvasService', () => {
       deletedAtMs: 75,
       updatedAtMs: 75,
     })
+  })
+
+  test('uses registry defaults when semantic relation type changes', async () => {
+    const { repository, updateCanvasEdgeRelationTypeMock } = fixture()
+    const service = createCanvasService({ repository, nowMs: () => 80 })
+
+    await service.updateCanvasEdgeRelationType(EDGE_ID, 'hierarchy')
+    expect(updateCanvasEdgeRelationTypeMock).toHaveBeenLastCalledWith({
+      id: EDGE_ID,
+      relationType: 'hierarchy',
+      direction: 'forward',
+      lineStyle: 'solid',
+      updatedAtMs: 80,
+    })
+    await service.updateCanvasEdgeRelationType(EDGE_ID, 'peer')
+    expect(updateCanvasEdgeRelationTypeMock).toHaveBeenLastCalledWith({
+      id: EDGE_ID,
+      relationType: 'peer',
+      direction: 'none',
+      lineStyle: 'solid',
+      updatedAtMs: 80,
+    })
+    await service.updateCanvasEdgeRelationType(EDGE_ID, 'default')
+    expect(updateCanvasEdgeRelationTypeMock).toHaveBeenLastCalledWith({
+      id: EDGE_ID,
+      relationType: 'default',
+      direction: 'forward',
+      lineStyle: 'solid',
+      updatedAtMs: 80,
+    })
+  })
+
+  test('maps semantic type conflicts and repository failures safely', async () => {
+    const { repository } = fixture()
+    const service = createCanvasService({ repository, nowMs: () => 80 })
+    repository.updateCanvasEdgeRelationType = vi.fn(() =>
+      Promise.reject(
+        new CanvasRepositoryError('DUPLICATE', 'updateCanvasEdgeRelationType'),
+      ),
+    )
+    await expect(
+      service.updateCanvasEdgeRelationType(EDGE_ID, 'hierarchy'),
+    ).rejects.toMatchObject({ code: 'CONFLICT' })
+    repository.updateCanvasEdgeRelationType = vi.fn(() =>
+      Promise.reject(new Error('private SQL')),
+    )
+    await expect(
+      service.updateCanvasEdgeRelationType(EDGE_ID, 'peer'),
+    ).rejects.toMatchObject({ code: 'UNAVAILABLE' })
+    expect(() =>
+      service.updateCanvasEdgeRelationType(
+        EDGE_ID,
+        'ordered_box_member' as never,
+      ),
+    ).toThrowError(
+      expect.objectContaining({ code: 'VALIDATION', field: 'relationType' }),
+    )
   })
 })

@@ -103,6 +103,14 @@ export interface UpdateCanvasEdgeLineStyleInput {
   readonly updatedAtMs: number
 }
 
+export interface UpdateCanvasEdgeRelationTypeInput {
+  readonly id: string
+  readonly relationType: CanvasEdgeRelationType
+  readonly direction: CanvasEdgeDirection
+  readonly lineStyle: CanvasEdgeLineStyle
+  readonly updatedAtMs: number
+}
+
 export interface DeleteCanvasEdgeInput {
   readonly id: string
   readonly deletedAtMs: number
@@ -130,6 +138,9 @@ export interface CanvasRepository {
   ): Promise<CanvasEdge>
   updateCanvasEdgeLineStyle(
     input: UpdateCanvasEdgeLineStyleInput,
+  ): Promise<CanvasEdge>
+  updateCanvasEdgeRelationType(
+    input: UpdateCanvasEdgeRelationTypeInput,
   ): Promise<CanvasEdge>
   deleteCanvasEdge(input: DeleteCanvasEdgeInput): Promise<CanvasEdge>
 }

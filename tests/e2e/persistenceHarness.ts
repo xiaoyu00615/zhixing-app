@@ -31,6 +31,7 @@ import type {
   MoveCanvasNodesInput,
   RenameCanvasInput,
   RenameCanvasNodeInput,
+  UpdateCanvasEdgeRelationTypeInput,
   UpdateCanvasEdgeDirectionInput,
   UpdateCanvasEdgeLineStyleInput,
   UpdateCanvasViewportInput,
@@ -80,6 +81,7 @@ interface PersistenceHarness {
   moveCanvasNodes(input: MoveCanvasNodesInput): Promise<readonly CanvasNode[]>
   createCanvasEdge(input: CreateCanvasEdgeInput): Promise<CanvasEdge>
   listCanvasEdges(canvasId: string): Promise<readonly CanvasEdge[]>
+  updateCanvasEdgeRelationType(input: UpdateCanvasEdgeRelationTypeInput): Promise<CanvasEdge>
   updateCanvasEdgeDirection(input: UpdateCanvasEdgeDirectionInput): Promise<CanvasEdge>
   updateCanvasEdgeLineStyle(input: UpdateCanvasEdgeLineStyleInput): Promise<CanvasEdge>
   deleteCanvasEdge(input: DeleteCanvasEdgeInput): Promise<CanvasEdge>
@@ -223,6 +225,9 @@ window.__taskPersistenceHarness = {
   },
   async listCanvasEdges(canvasId) {
     return (await requireCanvasRepository()).listCanvasEdges(canvasId)
+  },
+  async updateCanvasEdgeRelationType(input) {
+    return (await requireCanvasRepository()).updateCanvasEdgeRelationType(input)
   },
   async updateCanvasEdgeDirection(input) {
     return (await requireCanvasRepository()).updateCanvasEdgeDirection(input)

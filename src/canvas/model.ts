@@ -70,9 +70,21 @@ export interface CanvasUnknownNode {
 
 export type CanvasNode = CanvasTextNode | CanvasStickyNode | CanvasUnknownNode
 
-export const CANVAS_EDGE_RELATION_TYPES = ['default'] as const
+export const CANVAS_EDGE_RELATION_TYPES = [
+  'default',
+  'hierarchy',
+  'peer',
+] as const
 export type CanvasEdgeRelationType =
   (typeof CANVAS_EDGE_RELATION_TYPES)[number]
+
+declare const UNKNOWN_CANVAS_EDGE_RELATION_TYPE: unique symbol
+export type UnknownCanvasEdgeRelationType = string & {
+  readonly [UNKNOWN_CANVAS_EDGE_RELATION_TYPE]: true
+}
+export type PersistedCanvasEdgeRelationType =
+  | CanvasEdgeRelationType
+  | UnknownCanvasEdgeRelationType
 
 export const CANVAS_EDGE_DIRECTIONS = [
   'forward',
@@ -89,7 +101,7 @@ export interface CanvasEdge {
   readonly canvasId: string
   readonly sourceNodeId: string
   readonly targetNodeId: string
-  readonly relationType: CanvasEdgeRelationType
+  readonly relationType: PersistedCanvasEdgeRelationType
   readonly direction: CanvasEdgeDirection
   readonly lineStyle: CanvasEdgeLineStyle
   readonly createdAtMs: number
@@ -123,7 +135,16 @@ export function isCanvasCoordinate(value: unknown): value is number {
 export function isCanvasEdgeRelationType(
   value: unknown,
 ): value is CanvasEdgeRelationType {
-  return value === 'default'
+  return (
+    typeof value === 'string' &&
+    CANVAS_EDGE_RELATION_TYPES.includes(value as CanvasEdgeRelationType)
+  )
+}
+
+export function isPersistedCanvasEdgeRelationType(
+  value: unknown,
+): value is PersistedCanvasEdgeRelationType {
+  return typeof value === 'string' && value.length > 0 && value === value.trim()
 }
 
 export function isCanvasEdgeDirection(
