@@ -8,6 +8,7 @@ import {
   isCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
+  isPersistedCanvasNodeName,
   isStickyNodeContent,
   isTextNodeContent,
   type Canvas,
@@ -26,6 +27,7 @@ import {
   type MoveCanvasNodeInput,
   type MoveCanvasNodesInput,
   type RenameCanvasInput,
+  type RenameCanvasNodeInput,
   type UpdateCanvasViewportInput,
   type UpdateCanvasEdgeDirectionInput,
   type UpdateCanvasEdgeLineStyleInput,
@@ -67,10 +69,11 @@ function parseNode(
 ): CanvasNode {
   if (!isRecord(value))
     throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
-  const { id, canvasId, type, content, x, y, createdAtMs, updatedAtMs } = value
+  const { id, canvasId, type, nodeName, content, x, y, createdAtMs, updatedAtMs } = value
   if (
     !isCanonicalCanvasId(id) ||
     !isCanonicalCanvasId(canvasId) ||
+    !isPersistedCanvasNodeName(nodeName) ||
     ((type === 'text' && !isTextNodeContent(content)) ||
       (type === 'sticky' && !isStickyNodeContent(content)) ||
       (type !== 'text' && type !== 'sticky' && typeof type !== 'string')) ||
@@ -83,9 +86,9 @@ function parseNode(
     throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
   }
   if (type === 'text' || type === 'sticky') {
-    return { id, canvasId, type, content, x, y, createdAtMs, updatedAtMs } as CanvasNode
+    return { id, canvasId, type, nodeName, content, x, y, createdAtMs, updatedAtMs } as CanvasNode
   }
-  return { id, canvasId, type: 'unknown', originalType: type, content: { type: 'unknown', raw: content }, x, y, createdAtMs, updatedAtMs }
+  return { id, canvasId, type: 'unknown', originalType: type, nodeName, content: { type: 'unknown', raw: content }, x, y, createdAtMs, updatedAtMs }
 }
 
 function parseEdge(
@@ -230,6 +233,13 @@ export class NativeCanvasRepository implements CanvasRepository {
     return parseNode(
       await invokeCanvas('canvas_node_update_content', 'updateCanvasNodeContent', { input }),
       'updateCanvasNodeContent',
+    )
+  }
+
+  async renameCanvasNode(input: RenameCanvasNodeInput): Promise<CanvasNode> {
+    return parseNode(
+      await invokeCanvas('canvas_node_rename', 'renameCanvasNode', { input }),
+      'renameCanvasNode',
     )
   }
 

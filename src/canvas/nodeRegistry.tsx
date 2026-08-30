@@ -37,11 +37,12 @@ export type CanvasFlowNode = Node<Record<string, unknown>, string>
 export function toCanvasFlowNode(
   node: CanvasNode,
   onCommit: (id: string, type: RegisteredCanvasNodeType, text: string) => void,
+  onRename: (id: string, nodeName: string) => Promise<boolean>,
 ): CanvasFlowNode {
   if (node.type === 'unknown') {
-    return { id: node.id, type: 'unsupportedCanvas', position: { x: node.x, y: node.y }, data: { originalType: node.originalType } }
+    return { id: node.id, type: 'unsupportedCanvas', position: { x: node.x, y: node.y }, data: { originalType: node.originalType, nodeName: node.nodeName } }
   }
   const entry = canvasNodeRegistry.byType.get(node.type)!
   const data = entry.parseData(node.content)
-  return { id: node.id, type: entry.flowNodeType, position: { x: node.x, y: node.y }, data: { ...data, onCommit: (id: string, text: string) => onCommit(id, node.type, text) } }
+  return { id: node.id, type: entry.flowNodeType, position: { x: node.x, y: node.y }, data: { ...data, nodeName: node.nodeName, renameRequest: 0, onRename, onCommit: (id: string, text: string) => onCommit(id, node.type, text) } }
 }

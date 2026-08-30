@@ -29,11 +29,13 @@ export interface UnknownNodeContent {
 
 export type RegisteredCanvasNodeType = 'text' | 'sticky'
 export type RegisteredCanvasNodeContent = TextNodeContent | StickyNodeContent
+export const CANVAS_NODE_NAME_MAX_LENGTH = 120
 
 export interface CanvasTextNode {
   readonly id: string
   readonly canvasId: string
   readonly type: 'text'
+  readonly nodeName: string
   readonly content: TextNodeContent
   readonly x: number
   readonly y: number
@@ -45,6 +47,7 @@ export interface CanvasStickyNode {
   readonly id: string
   readonly canvasId: string
   readonly type: 'sticky'
+  readonly nodeName: string
   readonly content: StickyNodeContent
   readonly x: number
   readonly y: number
@@ -57,6 +60,7 @@ export interface CanvasUnknownNode {
   readonly canvasId: string
   readonly type: 'unknown'
   readonly originalType: string
+  readonly nodeName: string
   readonly content: UnknownNodeContent
   readonly x: number
   readonly y: number
@@ -102,6 +106,14 @@ export function isCanonicalCanvasId(value: unknown): value is string {
 
 export function isNonEmptyCanvasTitle(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
+}
+
+export function isPersistedCanvasNodeName(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    Array.from(value).length <= CANVAS_NODE_NAME_MAX_LENGTH &&
+    value === value.trim()
+  )
 }
 
 export function isCanvasCoordinate(value: unknown): value is number {

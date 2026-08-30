@@ -37,6 +37,7 @@ import {
   isCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
+  isPersistedCanvasNodeName,
   parseCanvasViewportJson,
   parseCanvasNodeContentJson,
   type Canvas,
@@ -53,6 +54,7 @@ import type {
   MoveCanvasNodeInput,
   MoveCanvasNodesInput,
   RenameCanvasInput,
+  RenameCanvasNodeInput,
   UpdateCanvasViewportInput,
   UpdateCanvasEdgeDirectionInput,
   UpdateCanvasEdgeLineStyleInput,
@@ -80,7 +82,7 @@ const TASK_COLUMNS = `id, title, status, created_at_ms, updated_at_ms,
 const PROJECT_COLUMNS = 'id, name, created_at_ms, updated_at_ms'
 const TAG_COLUMNS = 'id, name, created_at_ms, updated_at_ms'
 const CANVAS_COLUMNS = 'id, title, viewport_json, created_at_ms, updated_at_ms'
-const CANVAS_NODE_COLUMNS = `id, canvas_id, type, content_json, x, y,
+const CANVAS_NODE_COLUMNS = `id, canvas_id, type, node_name, content_json, x, y,
                              created_at_ms, updated_at_ms`
 const CANVAS_EDGE_COLUMNS = `id, canvas_id, source_node_id, target_node_id,
                              relation_type, direction, line_style,
@@ -117,6 +119,7 @@ function parseCanvasNodeRow(
     id,
     canvas_id: canvasId,
     type,
+    node_name: nodeName,
     content_json: contentJson,
     x,
     y,
@@ -127,6 +130,7 @@ function parseCanvasNodeRow(
   if (
     !isCanonicalCanvasId(id) ||
     !isCanonicalCanvasId(canvasId) ||
+    !isPersistedCanvasNodeName(nodeName) ||
     content === null ||
     !isCanvasCoordinate(x) ||
     !isCanvasCoordinate(y) ||
@@ -137,9 +141,9 @@ function parseCanvasNodeRow(
     throw new TaskDatabaseError('PERSISTENCE_FAILED')
   }
   if (type === 'text' || type === 'sticky') {
-    return { id, canvasId, type, content, x, y, createdAtMs, updatedAtMs } as CanvasNode
+    return { id, canvasId, type, nodeName, content, x, y, createdAtMs, updatedAtMs } as CanvasNode
   }
-  return { id, canvasId, type: 'unknown', originalType: type as string, content: content as import('@/canvas/model').UnknownNodeContent, x, y, createdAtMs, updatedAtMs }
+  return { id, canvasId, type: 'unknown', originalType: type as string, nodeName, content: content as import('@/canvas/model').UnknownNodeContent, x, y, createdAtMs, updatedAtMs }
 }
 
 function parseCanvasEdgeRow(
@@ -857,6 +861,36 @@ export class WebTaskDatabase {
       JSON.stringify(input.content),
       input.updatedAtMs,
     )
+  }
+
+  renameCanvasNode(input: RenameCanvasNodeInput): CanvasNode {
+    this.validateCanvasUpdate(input.id, input.updatedAtMs)
+    if (
+      !isCanonicalCanvasId(input.canvasId) ||
+      !isPersistedCanvasNodeName(input.nodeName)
+    ) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    try {
+      return this.#database.transaction(() => {
+        const current = this.requireNodeInCanvas(input.canvasId, input.id)
+        if (current.type === 'unknown') {
+          throw new TaskDatabaseError('PERSISTENCE_FAILED')
+        }
+        this.#database.exec({
+          sql: `UPDATE canvas_nodes SET node_name = ?, updated_at_ms = ?
+                WHERE canvas_id = ? AND id = ? AND type IN ('text', 'sticky')`,
+          bind: [input.nodeName, input.updatedAtMs, input.canvasId, input.id],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+        return this.requireCanvasNode(input.id)
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
   }
 
   updateTextNode(input: UpdateTextNodeInput): CanvasNode {

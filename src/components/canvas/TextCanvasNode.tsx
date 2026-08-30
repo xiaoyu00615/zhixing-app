@@ -1,9 +1,14 @@
 import { memo, useEffect, useState } from 'react'
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
 
+import { CanvasNodeHeader } from '@/components/canvas/CanvasNodeHeader'
+
 export interface TextCanvasNodeData extends Record<string, unknown> {
   readonly text: string
   readonly onCommit: (id: string, text: string) => void
+  readonly nodeName: string
+  readonly renameRequest: number
+  readonly onRename: (id: string, nodeName: string) => Promise<boolean>
 }
 
 export type TextFlowNode = Node<TextCanvasNodeData, 'textCanvas'>
@@ -19,7 +24,7 @@ export const TextCanvasNode = memo(function TextCanvasNode({ id, data, selected 
         position={Position.Left}
         type="target"
       />
-      <div className="flex h-7 items-center px-3"><span className="rounded-full bg-surface-secondary px-2 py-0.5 text-[9px] font-semibold tracking-wider text-foreground-tertiary">TEXT</span><span className="min-w-0 flex-1" aria-hidden="true" /></div>
+      <CanvasNodeHeader nodeId={id} nodeName={data.nodeName} typeLabel="TEXT" renameRequest={data.renameRequest} badgeClassName="bg-surface-secondary text-foreground-tertiary" onRename={data.onRename} />
       <textarea aria-label="文字节点内容" className="nodrag nopan min-h-28 w-full resize-none rounded-lg bg-transparent px-3 py-2.5 text-sm leading-6 text-foreground outline-none placeholder:text-foreground-tertiary focus:bg-surface-secondary/40" placeholder="写下一个想法…" value={text} onChange={(event) => setText(event.target.value)} onBlur={() => { if (text !== data.text) data.onCommit(id, text) }} />
       <Handle
         aria-label="从此节点创建连线"

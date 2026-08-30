@@ -6,6 +6,7 @@ import {
   isCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
+  isPersistedCanvasNodeName,
   isStickyNodeContent,
   isTextNodeContent,
   type Canvas,
@@ -24,6 +25,7 @@ import {
   type MoveCanvasNodesInput,
   type DeleteCanvasEdgeInput,
   type RenameCanvasInput,
+  type RenameCanvasNodeInput,
   type UpdateCanvasViewportInput,
   type UpdateCanvasEdgeDirectionInput,
   type UpdateCanvasEdgeLineStyleInput,
@@ -65,10 +67,11 @@ function parseNode(
   if (!isRecord(value)) {
     throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
   }
-  const { id, canvasId, type, content, x, y, createdAtMs, updatedAtMs } = value
+  const { id, canvasId, type, nodeName, content, x, y, createdAtMs, updatedAtMs } = value
   if (
     !isCanonicalCanvasId(id) ||
     !isCanonicalCanvasId(canvasId) ||
+    !isPersistedCanvasNodeName(nodeName) ||
     ((type === 'text' && !isTextNodeContent(content)) ||
       (type === 'sticky' && !isStickyNodeContent(content)) ||
       (type !== 'text' && type !== 'sticky' && typeof type !== 'string')) ||
@@ -81,9 +84,9 @@ function parseNode(
     throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
   }
   if (type === 'text' || type === 'sticky') {
-    return { id, canvasId, type, content, x, y, createdAtMs, updatedAtMs } as CanvasNode
+    return { id, canvasId, type, nodeName, content, x, y, createdAtMs, updatedAtMs } as CanvasNode
   }
-  return { id, canvasId, type: 'unknown', originalType: type, content: { type: 'unknown', raw: content }, x, y, createdAtMs, updatedAtMs }
+  return { id, canvasId, type: 'unknown', originalType: type, nodeName, content: { type: 'unknown', raw: content }, x, y, createdAtMs, updatedAtMs }
 }
 
 function parseEdge(
@@ -293,6 +296,21 @@ export class WebCanvasRepository implements CanvasRepository {
     }
     try {
       return parseNode(await this.#client.updateCanvasNodeContent(input), operation)
+    } catch (error: unknown) {
+      throw mapError(error, operation)
+    }
+  }
+
+  async renameCanvasNode(input: RenameCanvasNodeInput): Promise<CanvasNode> {
+    const operation = 'renameCanvasNode'
+    validateId(input.canvasId, operation)
+    validateId(input.id, operation)
+    validateTimestamp(input.updatedAtMs, operation)
+    if (!isPersistedCanvasNodeName(input.nodeName)) {
+      throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+    }
+    try {
+      return parseNode(await this.#client.renameCanvasNode(input), operation)
     } catch (error: unknown) {
       throw mapError(error, operation)
     }

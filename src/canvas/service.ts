@@ -7,6 +7,7 @@ import {
   isCanvasViewport,
   isNonEmptyCanvasTitle,
   isRegisteredCanvasNodeContent,
+  CANVAS_NODE_NAME_MAX_LENGTH,
   type Canvas,
   type CanvasEdge,
   type CanvasEdgeDirection,
@@ -33,6 +34,7 @@ export type CanvasApplicationErrorField =
   | 'title'
   | 'viewport'
   | 'content'
+  | 'nodeName'
   | 'position'
   | 'sourceNodeId'
   | 'targetNodeId'
@@ -87,6 +89,11 @@ export interface CanvasService {
     type: RegisteredCanvasNodeType,
     content: RegisteredCanvasNodeContent,
   ): Promise<CanvasNode>
+  renameCanvasNode(
+    canvasId: string,
+    id: string,
+    nodeName: string,
+  ): Promise<CanvasNode>
   editTextNode(id: string, text: string): Promise<CanvasNode>
   moveCanvasNode(id: string, x: number, y: number): Promise<CanvasNode>
   moveCanvasNodes(
@@ -125,6 +132,17 @@ function normalizeTitle(title: unknown): string {
     throw new CanvasApplicationError('VALIDATION', 'title')
   }
   return title.trim()
+}
+
+function normalizeNodeName(nodeName: unknown): string {
+  if (typeof nodeName !== 'string') {
+    throw new CanvasApplicationError('VALIDATION', 'nodeName')
+  }
+  const normalized = nodeName.trim()
+  if (Array.from(normalized).length > CANVAS_NODE_NAME_MAX_LENGTH) {
+    throw new CanvasApplicationError('VALIDATION', 'nodeName')
+  }
+  return normalized
 }
 
 function validateId(
@@ -269,6 +287,20 @@ export function createCanvasService({
           type,
           content,
           updatedAtMs: readNowMs(nowMs),
+        }),
+      )
+    },
+    async renameCanvasNode(canvasId, id, nodeName) {
+      validateId(canvasId, 'canvasId')
+      validateId(id, 'id')
+      const normalizedName = normalizeNodeName(nodeName)
+      const updatedAtMs = readNowMs(nowMs)
+      return callRepository(() =>
+        repository.renameCanvasNode({
+          canvasId,
+          id,
+          nodeName: normalizedName,
+          updatedAtMs,
         }),
       )
     },

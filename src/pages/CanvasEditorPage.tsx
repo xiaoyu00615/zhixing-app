@@ -108,6 +108,22 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
     }
   }, [])
 
+  const commitNodeName = useCallback(async (id: string, nodeName: string): Promise<boolean> => {
+    const currentService = serviceRef.current
+    if (currentService === null || canvasId === '') return false
+    try {
+      const updated = await currentService.renameCanvasNode(canvasId, id, nodeName)
+      setFlowNodes((nodes) => nodes.map((node) => node.id === id
+        ? { ...node, data: { ...node.data, nodeName: updated.nodeName } }
+        : node))
+      setFeedback(updated.nodeName === '' ? '节点名称已清空' : '节点名称已保存')
+      return true
+    } catch {
+      setFeedback('节点名称保存失败，已恢复原名称。')
+      return false
+    }
+  }, [canvasId])
+
   useEffect(() => {
     let active = true
     let runtime: Awaited<ReturnType<OpenCanvasRuntime>> | null = null
@@ -122,7 +138,11 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
         setService(runtime.service)
         setCanvas(workspace.canvas)
         setFlowNodes(workspace.nodes.map((node: CanvasNode) =>
-          toCanvasFlowNode(node, (id, type, text) => void commitNodeContent(id, type, text)),
+          toCanvasFlowNode(
+            node,
+            (id, type, text) => void commitNodeContent(id, type, text),
+            commitNodeName,
+          ),
         ))
         setCanvasEdges([...workspace.edges])
         setPhase('ready')
@@ -132,7 +152,29 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
       }
     })()
     return () => { active = false; void runtime?.dispose() }
-  }, [attempt, canvasId, commitNodeContent, openRuntime])
+  }, [attempt, canvasId, commitNodeContent, commitNodeName, openRuntime])
+
+  useEffect(() => {
+    const onRenameKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'F2' || isEditableTarget(event.target)) return
+      const selectedNodes = flowNodes.filter((node) => node.selected)
+      if (selectedNodes.length !== 1 || selectedNodes[0]?.type === 'unsupportedCanvas') return
+      event.preventDefault()
+      const selectedId = selectedNodes[0]!.id
+      setFlowNodes((nodes) => nodes.map((node) => {
+        if (node.id !== selectedId) return node
+        const currentRequest = typeof node.data.renameRequest === 'number'
+          ? node.data.renameRequest
+          : 0
+        return {
+          ...node,
+          data: { ...node.data, renameRequest: currentRequest + 1 },
+        }
+      }))
+    }
+    window.addEventListener('keydown', onRenameKeyDown)
+    return () => window.removeEventListener('keydown', onRenameKeyDown)
+  }, [flowNodes])
 
   const persistViewport = useCallback(async (viewport: Viewport) => {
     latestViewport.current = viewport
@@ -294,7 +336,11 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
     try {
       const entry = canvasNodeRegistry.byType.get(type)!
       const created = await service.createCanvasNode(canvas.id, type, entry.createDefaultData(), position)
-      setFlowNodes((nodes) => [...nodes, toCanvasFlowNode(created, (id, nodeType, text) => void commitNodeContent(id, nodeType, text))])
+      setFlowNodes((nodes) => [...nodes, toCanvasFlowNode(
+        created,
+        (id, nodeType, text) => void commitNodeContent(id, nodeType, text),
+        commitNodeName,
+      )])
       setFeedback(`已添加${entry.displayName}`)
     } catch {
       setFeedback('节点创建失败，请重试。')

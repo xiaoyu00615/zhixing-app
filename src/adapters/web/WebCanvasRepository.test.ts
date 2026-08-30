@@ -33,6 +33,7 @@ class CanvasWorker implements TaskWorkerEndpoint {
       case 'canvas.node.list': return this.backend.listCanvasNodes(request.canvasId)
       case 'canvas.node.updateText': return this.backend.updateTextNode(request.input)
       case 'canvas.node.updateContent': return this.backend.updateCanvasNodeContent(request.input)
+      case 'canvas.node.rename': return this.backend.renameCanvasNode(request.input)
       case 'canvas.node.move': return this.backend.moveCanvasNode(request.input)
       case 'canvas.nodes.move': return this.backend.moveCanvasNodes(request.input)
       case 'canvas.edge.create': return this.backend.createCanvasEdge(request.input)
@@ -104,5 +105,27 @@ test('Canvas batch move Worker messages are explicit and reject invalid batches'
       ...validMove.input,
       moves: [{ ...validMove.input.moves[0], x: Number.POSITIVE_INFINITY }],
     },
+  })).toBeNull()
+})
+
+test('Canvas node rename Worker messages enforce trimmed 120-code-point names', () => {
+  const validRename = {
+    requestId: 4,
+    type: 'canvas.node.rename',
+    input: {
+      canvasId: '00000000-0000-4000-8000-000000000601',
+      id: '00000000-0000-4000-8000-000000000602',
+      nodeName: '😀'.repeat(120),
+      updatedAtMs: 50,
+    },
+  }
+  expect(parseTaskWorkerRequest(validRename)).toEqual(validRename)
+  expect(parseTaskWorkerRequest({
+    ...validRename,
+    input: { ...validRename.input, nodeName: '😀'.repeat(121) },
+  })).toBeNull()
+  expect(parseTaskWorkerRequest({
+    ...validRename,
+    input: { ...validRename.input, nodeName: ' untrimmed ' },
   })).toBeNull()
 })

@@ -15,6 +15,7 @@ interface CanvasHarness {
   listCanvasNodes(canvasId: string): Promise<readonly Record<string, unknown>[]>
   updateTextNode(input: object): Promise<unknown>
   updateCanvasNodeContent(input: object): Promise<unknown>
+  renameCanvasNode(input: object): Promise<unknown>
   moveCanvasNode(input: object): Promise<unknown>
   moveCanvasNodes(input: object): Promise<readonly Record<string, unknown>[]>
   createCanvasEdge(input: object): Promise<Record<string, unknown>>
@@ -37,6 +38,9 @@ const UI_NODE_A_ID = '00000000-0000-4000-8000-000000000702'
 const UI_NODE_B_ID = '00000000-0000-4000-8000-000000000703'
 const UI_NODE_C_ID = '00000000-0000-4000-8000-000000000704'
 const UI_EDGE_ID = '00000000-0000-4000-8000-000000000705'
+const NAME_CANVAS_ID = '00000000-0000-4000-8000-000000000801'
+const NAME_TEXT_ID = '00000000-0000-4000-8000-000000000802'
+const NAME_STICKY_ID = '00000000-0000-4000-8000-000000000803'
 
 async function openHarnessPage(context: BrowserContext, baseURL: string): Promise<Page> {
   const page = context.pages()[0] ?? await context.newPage()
@@ -95,6 +99,8 @@ test('persists Canvas nodes, viewport, and configured Edge in OPFS across restar
       await harness.updateCanvasEdgeLineStyle({ id: edgeId, lineStyle: 'dashed', updatedAtMs: 36 })
       await harness.updateTextNode({ id: nodeId, content: { type: 'text', text: 'persisted text' }, updatedAtMs: 30 })
       await harness.updateCanvasNodeContent({ id: targetNodeId, type: 'sticky', content: { type: 'sticky', text: 'persisted sticky' }, updatedAtMs: 31 })
+      await harness.renameCanvasNode({ canvasId, id: nodeId, nodeName: '产品构思', updatedAtMs: 32 })
+      await harness.renameCanvasNode({ canvasId, id: targetNodeId, nodeName: '灵感记录', updatedAtMs: 33 })
       await harness.moveCanvasNodes({ canvasId, moves: [
         { nodeId, x: 240, y: -60 },
         { nodeId: targetNodeId, x: 560, y: 240 },
@@ -121,8 +127,8 @@ test('persists Canvas nodes, viewport, and configured Edge in OPFS across restar
     expect(restored.canvases).toEqual(expect.arrayContaining([expect.objectContaining({ id: CANVAS_ID }), expect.objectContaining({ id: OTHER_CANVAS_ID })]))
     expect(restored.canvas).toMatchObject({ title: 'Canvas Restored', viewport: { x: 120, y: 48, zoom: 1.35 } })
     expect(restored.nodes).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: NODE_ID, content: { type: 'text', text: 'persisted text' }, x: 240, y: -60, updatedAtMs: 40 }),
-      expect.objectContaining({ id: TARGET_NODE_ID, type: 'sticky', content: { type: 'sticky', text: 'persisted sticky' }, x: 560, y: 240, updatedAtMs: 40 }),
+      expect.objectContaining({ id: NODE_ID, nodeName: '产品构思', content: { type: 'text', text: 'persisted text' }, x: 240, y: -60, updatedAtMs: 40 }),
+      expect.objectContaining({ id: TARGET_NODE_ID, type: 'sticky', nodeName: '灵感记录', content: { type: 'sticky', text: 'persisted sticky' }, x: 560, y: 240, updatedAtMs: 40 }),
     ]))
     expect(restored.edges).toEqual([expect.objectContaining({ id: EDGE_ID, canvasId: CANVAS_ID, sourceNodeId: NODE_ID, targetNodeId: TARGET_NODE_ID, relationType: 'default', direction: 'bidirectional', lineStyle: 'dashed', deletedAtMs: null })])
 
@@ -478,6 +484,131 @@ test('selects, collectively moves, and pans the real Canvas editor', async ({ br
     await expect.poll(() => page.locator(`.react-flow__node[data-id="${UI_NODE_C_ID}"]`).evaluate((element) => (element as HTMLElement).style.transform)).toBe(persistedC)
     await expect(page.locator('.react-flow__edge')).toHaveCount(1)
     await page.screenshot({ path: testInfo.outputPath('05-restart-restored.png') })
+    await page.goto('about:blank')
+  } finally {
+    await context?.close()
+    await rm(profilePath, { recursive: true, force: true })
+  }
+})
+
+test('names Text and Sticky nodes independently and restores names after restart', async ({ browserName }, testInfo) => {
+  test.setTimeout(150_000)
+  expect(browserName).toBe('chromium')
+  const baseURL = testInfo.project.use.baseURL
+  if (typeof baseURL !== 'string') throw new Error('Playwright baseURL is required.')
+  const profilePath = testInfo.outputPath('canvas-node-name-browser-profile')
+  const outputRoot = resolve(testInfo.outputDir)
+  const resolvedProfile = resolve(profilePath)
+  if (!resolvedProfile.startsWith(`${outputRoot}${sep}`)) throw new Error('Unsafe test profile path.')
+
+  let context: BrowserContext | null = null
+  try {
+    context = await chromium.launchPersistentContext(profilePath, {
+      channel: 'chromium',
+      headless: true,
+      viewport: { width: 1920, height: 1080 },
+    })
+    const page = await openHarnessPage(context, baseURL)
+    await page.evaluate(async ({ canvasId, textId, stickyId }) => {
+      const harness = (window as unknown as HarnessWindow).__taskPersistenceHarness
+      await harness.createCanvas({ id: canvasId, title: 'Node Name Foundation', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 100 })
+      await harness.createTextNode({ id: textId, canvasId, content: { type: 'text', text: '' }, x: 320, y: 220, createdAtMs: 110 })
+      await harness.createCanvasNode({ id: stickyId, canvasId, type: 'sticky', content: { type: 'sticky', text: '' }, x: 820, y: 300, createdAtMs: 120 })
+      await harness.shutdown()
+    }, { canvasId: NAME_CANVAS_ID, textId: NAME_TEXT_ID, stickyId: NAME_STICKY_ID })
+
+    await page.goto(`${baseURL}/canvas/${NAME_CANVAS_ID}`)
+    await expect(page.getByRole('heading', { name: 'Node Name Foundation' })).toBeVisible()
+    const textNode = page.locator(`.react-flow__node[data-id="${NAME_TEXT_ID}"]`)
+    const stickyNode = page.locator(`.react-flow__node[data-id="${NAME_STICKY_ID}"]`)
+    const viewport = page.locator('.react-flow__viewport')
+    await expect(textNode.getByText('未命名节点')).toBeVisible()
+    await expect(stickyNode.getByText('未命名节点')).toBeVisible()
+    await expect(textNode.getByText('TEXT')).toBeVisible()
+    await expect(stickyNode.getByText('STICKY')).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('01-node-name-unnamed.png') })
+
+    await textNode.click({ position: { x: 90, y: 18 } })
+    await expect(textNode).toHaveClass(/selected/)
+    const viewportBeforeNameTyping = await viewport.getAttribute('style')
+    await page.keyboard.press('F2')
+    const textNameInput = textNode.getByRole('textbox', { name: '节点名称' })
+    await expect(textNameInput).toBeVisible()
+    await textNameInput.fill('WASD test')
+    expect(await viewport.getAttribute('style')).toBe(viewportBeforeNameTyping)
+    await textNameInput.press('Escape')
+    await expect(textNode.getByText('未命名节点')).toBeVisible()
+
+    await page.keyboard.press('F2')
+    await textNode.getByRole('textbox', { name: '节点名称' }).fill('产品构思')
+    await textNode.getByRole('textbox', { name: '节点名称' }).press('Enter')
+    await expect(textNode.getByText('产品构思')).toBeVisible()
+    await expect(page.getByRole('status')).toContainText('节点名称已保存')
+    await page.screenshot({ path: testInfo.outputPath('02-text-node-name.png') })
+
+    await stickyNode.getByText('未命名节点').dblclick()
+    const stickyNameInput = stickyNode.getByRole('textbox', { name: '节点名称' })
+    await stickyNameInput.fill('灵感记录')
+    await page.getByRole('heading', { name: 'Node Name Foundation' }).click()
+    await expect(stickyNode.getByText('灵感记录')).toBeVisible()
+    await expect(page.getByRole('status')).toContainText('节点名称已保存')
+    await page.screenshot({ path: testInfo.outputPath('03-sticky-node-name.png') })
+
+    await textNode.getByText('产品构思').dblclick()
+    await expect(textNode.getByRole('textbox', { name: '节点名称' })).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('04-node-name-inline-edit.png') })
+    await textNode.getByRole('textbox', { name: '节点名称' }).press('Escape')
+
+    const textContent = textNode.getByRole('textbox', { name: '文字节点内容' })
+    const stickyContent = stickyNode.getByRole('textbox', { name: '便签节点内容' })
+    await textContent.fill('正文与名称独立')
+    await textContent.press('Tab')
+    await stickyContent.fill('便签正文保持独立')
+    await stickyContent.press('Tab')
+    await expect(textNode.getByText('产品构思')).toBeVisible()
+    await expect(stickyNode.getByText('灵感记录')).toBeVisible()
+
+    const source = textNode.getByLabel('从此节点创建连线')
+    const target = stickyNode.getByLabel('连接到此节点')
+    const sourceBox = await source.boundingBox()
+    const targetBox = await target.boundingBox()
+    if (sourceBox === null || targetBox === null) throw new Error('Node handles are not visible.')
+    await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, { steps: 12 })
+    await page.mouse.up()
+    await expect(page.locator('.react-flow__edge')).toHaveCount(1)
+    await page.screenshot({ path: testInfo.outputPath('06-text-sticky-edge.png') })
+
+    await textNode.click({ position: { x: 70, y: 18 } })
+    await stickyNode.click({ modifiers: ['Control'], position: { x: 70, y: 18 } })
+    await expect(textNode).toHaveClass(/selected/)
+    await expect(stickyNode).toHaveClass(/selected/)
+    await page.screenshot({ path: testInfo.outputPath('05-text-sticky-multi-select.png') })
+
+    const textBefore = await textNode.boundingBox()
+    const stickyBefore = await stickyNode.boundingBox()
+    if (textBefore === null || stickyBefore === null) throw new Error('Named nodes are not visible.')
+    await page.mouse.move(textBefore.x + 80, textBefore.y + 18)
+    await page.mouse.down()
+    await page.mouse.move(textBefore.x + 180, textBefore.y + 88, { steps: 12 })
+    await page.mouse.up()
+    await expect(page.getByRole('status')).toContainText('已移动 2 个节点')
+    const persistedTextPosition = await textNode.evaluate((element) => (element as HTMLElement).style.transform)
+    const persistedStickyPosition = await stickyNode.evaluate((element) => (element as HTMLElement).style.transform)
+
+    await page.reload()
+    await expect(page.getByRole('heading', { name: 'Node Name Foundation' })).toBeVisible()
+    const restoredText = page.locator(`.react-flow__node[data-id="${NAME_TEXT_ID}"]`)
+    const restoredSticky = page.locator(`.react-flow__node[data-id="${NAME_STICKY_ID}"]`)
+    await expect(restoredText.getByText('产品构思')).toBeVisible()
+    await expect(restoredSticky.getByText('灵感记录')).toBeVisible()
+    await expect(restoredText.getByRole('textbox', { name: '文字节点内容' })).toHaveValue('正文与名称独立')
+    await expect(restoredSticky.getByRole('textbox', { name: '便签节点内容' })).toHaveValue('便签正文保持独立')
+    await expect.poll(() => restoredText.evaluate((element) => (element as HTMLElement).style.transform)).toBe(persistedTextPosition)
+    await expect.poll(() => restoredSticky.evaluate((element) => (element as HTMLElement).style.transform)).toBe(persistedStickyPosition)
+    await expect(page.locator('.react-flow__edge')).toHaveCount(1)
+    await page.screenshot({ path: testInfo.outputPath('07-node-name-restart.png') })
     await page.goto('about:blank')
   } finally {
     await context?.close()

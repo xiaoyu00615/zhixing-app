@@ -27,6 +27,9 @@ vi.mock('@xyflow/react', () => {
     readonly data: {
       readonly text: string
       readonly onCommit: (id: string, text: string) => void
+      readonly nodeName: string
+      readonly renameRequest?: number
+      readonly onRename: (id: string, nodeName: string) => Promise<boolean>
     }
     readonly selected?: boolean
   }
@@ -80,14 +83,17 @@ vi.mock('@xyflow/react', () => {
         data-zoom-on-scroll={String(zoomOnScroll)}
       >
         {nodes.map((node) => (
-          <textarea
-            aria-label={`测试文字节点 ${node.id}`}
-            data-position={`${node.position.x},${node.position.y}`}
-            data-selected={node.selected === true ? 'true' : 'false'}
-            defaultValue={node.data.text}
-            key={`${node.id}-${node.data.text}`}
-            onBlur={(event) => node.data.onCommit(node.id, event.currentTarget.value)}
-          />
+          <div data-rename-request={node.data.renameRequest ?? 0} data-testid={`测试节点 ${node.id}`} key={`${node.id}-${node.data.text}`}>
+            <span aria-label={`测试节点名称 ${node.id}`}>{node.data.nodeName}</span>
+            <textarea
+              aria-label={`测试文字节点 ${node.id}`}
+              data-position={`${node.position.x},${node.position.y}`}
+              data-selected={node.selected === true ? 'true' : 'false'}
+              defaultValue={node.data.text}
+              onBlur={(event) => node.data.onCommit(node.id, event.currentTarget.value)}
+            />
+            <button type="button" onClick={() => void node.data.onRename(node.id, '新名称')}>模拟重命名 {node.id}</button>
+          </div>
         ))}
         {nodes[0] !== undefined && (
           <button type="button" onClick={() => {
@@ -178,8 +184,8 @@ const EDGE_ID = '00000000-0000-4000-8000-000000000605'
 
 function fixture() {
   const canvas: Canvas = { id: CANVAS_ID, title: '产品构思', viewport: { x: 45, y: -30, zoom: 1.2 }, createdAtMs: 10, updatedAtMs: 10 }
-  const node: CanvasNode = { id: NODE_ID, canvasId: CANVAS_ID, type: 'text', content: { type: 'text', text: '初始文字' }, x: 20, y: 30, createdAtMs: 10, updatedAtMs: 10 }
-  const targetNode: CanvasNode = { ...node, id: TARGET_NODE_ID, content: { type: 'text', text: '目标文字' }, x: 420, y: 80 }
+  const node: CanvasNode = { id: NODE_ID, canvasId: CANVAS_ID, type: 'text', nodeName: '', content: { type: 'text', text: '初始文字' }, x: 20, y: 30, createdAtMs: 10, updatedAtMs: 10 }
+  const targetNode: CanvasNode = { id: TARGET_NODE_ID, canvasId: CANVAS_ID, type: 'sticky', nodeName: '灵感记录', content: { type: 'sticky', text: '目标文字' }, x: 420, y: 80, createdAtMs: 11, updatedAtMs: 11 }
   const createdNode: CanvasNode = { ...node, id: CREATED_NODE_ID, content: { type: 'text', text: '' }, x: 300, y: 200 }
   const edge: CanvasEdge = { id: EDGE_ID, canvasId: CANVAS_ID, sourceNodeId: NODE_ID, targetNodeId: TARGET_NODE_ID, relationType: 'default', direction: 'forward', lineStyle: 'solid', createdAtMs: 10, updatedAtMs: 10, deletedAtMs: null }
   const openCanvasMock = vi.fn<CanvasService['openCanvas']>(() => Promise.resolve({ canvas, nodes: [node, targetNode], edges: [edge] }))
@@ -187,6 +193,7 @@ function fixture() {
   const editTextNodeMock = vi.fn<CanvasService['editTextNode']>((id, text) => Promise.resolve({ ...node, id, content: { type: 'text', text }, updatedAtMs: 20 }))
   const createCanvasNodeMock = vi.fn<CanvasService['createCanvasNode']>((_canvasId, type, content, position) => Promise.resolve({ ...createdNode, type, content, ...position } as CanvasNode))
   const updateCanvasNodeContentMock = vi.fn<CanvasService['updateCanvasNodeContent']>((id, type, content) => Promise.resolve({ ...node, id, type, content } as CanvasNode))
+  const renameCanvasNodeMock = vi.fn<CanvasService['renameCanvasNode']>((_canvasId, id, nodeName) => Promise.resolve({ ...node, id, nodeName, updatedAtMs: 20 }))
   const moveCanvasNodeMock = vi.fn<CanvasService['moveCanvasNode']>((id, x, y) => Promise.resolve({ ...node, id, x, y, updatedAtMs: 20 }))
   const moveCanvasNodesMock = vi.fn<CanvasService['moveCanvasNodes']>((_, moves) => Promise.resolve(moves.map((move) => ({ ...node, id: move.nodeId, x: move.x, y: move.y, updatedAtMs: 20 }))))
   const updateViewportMock = vi.fn<CanvasService['updateViewport']>((id, viewport) => Promise.resolve({ ...canvas, id, viewport, updatedAtMs: 20 }))
@@ -200,6 +207,7 @@ function fixture() {
     createCanvasNode: createCanvasNodeMock,
     createTextNode: createTextNodeMock, listCanvasNodes: vi.fn(),
     updateCanvasNodeContent: updateCanvasNodeContentMock,
+    renameCanvasNode: renameCanvasNodeMock,
     editTextNode: editTextNodeMock, moveCanvasNode: moveCanvasNodeMock,
     moveCanvasNodes: moveCanvasNodesMock,
     createCanvasEdge: createCanvasEdgeMock, listCanvasEdges: vi.fn(),
@@ -208,7 +216,7 @@ function fixture() {
     deleteCanvasEdge: deleteCanvasEdgeMock,
   }
   const openRuntime: OpenCanvasRuntime = vi.fn(() => Promise.resolve({ service, dispose: vi.fn() }))
-  return { canvas, service, openRuntime, openCanvasMock, createTextNodeMock, editTextNodeMock, createCanvasNodeMock, updateCanvasNodeContentMock, moveCanvasNodeMock, moveCanvasNodesMock, updateViewportMock, createCanvasEdgeMock, updateCanvasEdgeDirectionMock, updateCanvasEdgeLineStyleMock, deleteCanvasEdgeMock }
+  return { canvas, service, openRuntime, openCanvasMock, createTextNodeMock, editTextNodeMock, createCanvasNodeMock, updateCanvasNodeContentMock, renameCanvasNodeMock, moveCanvasNodeMock, moveCanvasNodesMock, updateViewportMock, createCanvasEdgeMock, updateCanvasEdgeDirectionMock, updateCanvasEdgeLineStyleMock, deleteCanvasEdgeMock }
 }
 
 function renderEditor(openRuntime: OpenCanvasRuntime) {
@@ -264,6 +272,22 @@ describe('CanvasEditorPage', () => {
     expect(createCanvasNodeMock).toHaveBeenCalledWith(CANVAS_ID, 'sticky', { type: 'sticky', text: '' }, { x: 300, y: 200 })
   })
 
+  test('renames through CanvasService and rolls UI state back on persistence failure', async () => {
+    const { openRuntime, renameCanvasNodeMock } = fixture()
+    renderEditor(openRuntime)
+    await screen.findByRole('heading', { name: '产品构思' })
+    await userEvent.click(screen.getByRole('button', { name: `模拟重命名 ${NODE_ID}` }))
+    await waitFor(() => expect(renameCanvasNodeMock).toHaveBeenCalledWith(CANVAS_ID, NODE_ID, '新名称'))
+    expect(screen.getByLabelText(`测试节点名称 ${NODE_ID}`)).toHaveTextContent('新名称')
+    expect(screen.getByRole('status')).toHaveTextContent('节点名称已保存')
+
+    renameCanvasNodeMock.mockRejectedValueOnce(new Error('private'))
+    await userEvent.click(screen.getByRole('button', { name: `模拟重命名 ${TARGET_NODE_ID}` }))
+    await waitFor(() => expect(renameCanvasNodeMock).toHaveBeenCalledWith(CANVAS_ID, TARGET_NODE_ID, '新名称'))
+    expect(screen.getByLabelText(`测试节点名称 ${TARGET_NODE_ID}`)).toHaveTextContent('灵感记录')
+    expect(screen.getByRole('status')).toHaveTextContent('节点名称保存失败，已恢复原名称。')
+  })
+
   test('uses React Flow selection for single, additive, box, and blank-clear behavior', async () => {
     const { openRuntime } = fixture()
     renderEditor(openRuntime)
@@ -292,6 +316,32 @@ describe('CanvasEditorPage', () => {
     await userEvent.click(screen.getByRole('button', { name: '模拟框选' }))
     expect(screen.getByLabelText(`测试文字节点 ${NODE_ID}`)).toHaveAttribute('data-selected', 'true')
     expect(screen.getByLabelText(`测试文字节点 ${TARGET_NODE_ID}`)).toHaveAttribute('data-selected', 'true')
+  })
+
+  test('starts F2 rename only for exactly one selected non-editable node', async () => {
+    const { openRuntime } = fixture()
+    renderEditor(openRuntime)
+    await screen.findByRole('heading', { name: '产品构思' })
+    const firstNode = screen.getByTestId(`测试节点 ${NODE_ID}`)
+    const secondNode = screen.getByTestId(`测试节点 ${TARGET_NODE_ID}`)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2' }))
+    expect(firstNode).toHaveAttribute('data-rename-request', '0')
+
+    await userEvent.click(screen.getByRole('button', { name: '模拟单选' }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2' }))
+    await waitFor(() => expect(firstNode).toHaveAttribute('data-rename-request', '1'))
+
+    await userEvent.click(screen.getByRole('button', { name: '模拟框选' }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2' }))
+    expect(firstNode).toHaveAttribute('data-rename-request', '1')
+    expect(secondNode).toHaveAttribute('data-rename-request', '0')
+
+    await userEvent.click(screen.getByRole('button', { name: '模拟单选' }))
+    const editable = screen.getByLabelText(`测试文字节点 ${NODE_ID}`)
+    editable.focus()
+    editable.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
+    expect(firstNode).toHaveAttribute('data-rename-request', '1')
   })
 
   test('moves on the first WASD frame without relying on keyboard repeat', async () => {

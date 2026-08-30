@@ -32,6 +32,7 @@ import {
   isCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
+  isPersistedCanvasNodeName,
   isStickyNodeContent,
   isTextNodeContent,
 } from '@/canvas/model'
@@ -44,6 +45,7 @@ import type {
   MoveCanvasNodeInput,
   MoveCanvasNodesInput,
   RenameCanvasInput,
+  RenameCanvasNodeInput,
   UpdateCanvasViewportInput,
   UpdateCanvasEdgeDirectionInput,
   UpdateCanvasEdgeLineStyleInput,
@@ -190,6 +192,11 @@ export type TaskWorkerRequest =
       readonly requestId: number
       readonly type: 'canvas.node.updateContent'
       readonly input: UpdateCanvasNodeContentInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.node.rename'
+      readonly input: RenameCanvasNodeInput
     }
   | { readonly requestId: number; readonly type: 'canvas.node.updateText'; readonly input: UpdateTextNodeInput }
   | {
@@ -620,6 +627,16 @@ export function parseTaskWorkerRequest(
             requestId: value.requestId,
             type: value.type,
             input: value.input as unknown as UpdateCanvasNodeContentInput,
+          }
+        : null
+    case 'canvas.node.rename':
+      return isCanvasUpdateBase(value.input) &&
+        isCanonicalCanvasId(value.input.canvasId) &&
+        isPersistedCanvasNodeName(value.input.nodeName)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input as unknown as RenameCanvasNodeInput,
           }
         : null
     case 'canvas.node.updateText':

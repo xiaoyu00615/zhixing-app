@@ -7,8 +7,9 @@ use crate::canvas::{
     CanvasDbService, CanvasEdgeDirection, CanvasEdgeLineStyle, CanvasEdgeRecord, CanvasError,
     CanvasNodeContent, CanvasNodePositionMove, CanvasNodeRecord, CanvasRecord, CanvasViewport,
     CreateCanvasEdgeInput, CreateCanvasInput, CreateCanvasNodeInput, DeleteCanvasEdgeInput,
-    MoveCanvasNodeInput, MoveCanvasNodesInput, RenameCanvasInput, UpdateCanvasEdgeDirectionInput,
-    UpdateCanvasEdgeLineStyleInput, UpdateCanvasNodeContentInput, UpdateCanvasViewportInput,
+    MoveCanvasNodeInput, MoveCanvasNodesInput, RenameCanvasInput, RenameCanvasNodeInput,
+    UpdateCanvasEdgeDirectionInput, UpdateCanvasEdgeLineStyleInput, UpdateCanvasNodeContentInput,
+    UpdateCanvasViewportInput,
 };
 use crate::project::{
     CreateProjectInput, ProjectDbService, ProjectError, ProjectRecord, RenameProjectInput,
@@ -748,6 +749,15 @@ pub(crate) struct UpdateCanvasNodeContentDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct RenameCanvasNodeDto {
+    canvas_id: String,
+    id: String,
+    node_name: String,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct MoveCanvasNodeDto {
     id: String,
     x: f64,
@@ -778,6 +788,7 @@ pub(crate) struct CanvasNodeDto {
     canvas_id: String,
     #[serde(rename = "type")]
     node_type: String,
+    node_name: String,
     content: CanvasNodeContent,
     x: f64,
     y: f64,
@@ -791,6 +802,7 @@ impl From<CanvasNodeRecord> for CanvasNodeDto {
             id: node.id,
             canvas_id: node.canvas_id,
             node_type: node.node_type,
+            node_name: node.node_name,
             content: node.content,
             x: node.x,
             y: node.y,
@@ -1027,6 +1039,26 @@ pub(crate) fn canvas_node_update_content(
             id: input.id,
             node_type: input.node_type,
             content: input.content,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(CanvasNodeDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_node_rename(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: RenameCanvasNodeDto,
+) -> Result<CanvasNodeDto, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::rename_node(
+        &connection,
+        RenameCanvasNodeInput {
+            canvas_id: input.canvas_id,
+            id: input.id,
+            node_name: input.node_name,
             updated_at_ms: input.updated_at_ms,
         },
     )
@@ -1273,6 +1305,7 @@ mod tests {
             id: "00000000-0000-4000-8000-000000000602".into(),
             canvas_id: "00000000-0000-4000-8000-000000000601".into(),
             node_type: "text".into(),
+            node_name: "Product idea".into(),
             content: CanvasNodeContent::Text {
                 text: "Idea".into(),
             },
@@ -1287,6 +1320,7 @@ mod tests {
                 "id": "00000000-0000-4000-8000-000000000602",
                 "canvasId": "00000000-0000-4000-8000-000000000601",
                 "type": "text",
+                "nodeName": "Product idea",
                 "content": { "type": "text", "text": "Idea" },
                 "x": 50.0,
                 "y": 80.0,

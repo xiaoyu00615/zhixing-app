@@ -16,8 +16,8 @@ describe('Canvas node registry', () => {
   })
 
   test('maps unknown nodes to a safe placeholder without exposing raw data', () => {
-    const flowNode = toCanvasFlowNode({ id: '1', canvasId: '2', type: 'unknown', originalType: 'future', content: { type: 'unknown', raw: { secret: 'opaque' } }, x: 1, y: 2, createdAtMs: 0, updatedAtMs: 0 }, () => undefined)
+    const flowNode = toCanvasFlowNode({ id: '1', canvasId: '2', type: 'unknown', originalType: 'future', nodeName: 'Future node', content: { type: 'unknown', raw: { secret: 'opaque' } }, x: 1, y: 2, createdAtMs: 0, updatedAtMs: 0 }, () => undefined, () => Promise.resolve(false))
     expect(flowNode.type).toBe('unsupportedCanvas')
-    expect(flowNode.data).toEqual({ originalType: 'future' })
+    expect(flowNode.data).toEqual({ originalType: 'future', nodeName: 'Future node' })
   })
 })

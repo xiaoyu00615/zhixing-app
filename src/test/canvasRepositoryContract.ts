@@ -16,6 +16,7 @@ import {
   type MoveCanvasNodeInput,
   type MoveCanvasNodesInput,
   type RenameCanvasInput,
+  type RenameCanvasNodeInput,
   type UpdateCanvasViewportInput,
   type UpdateCanvasEdgeDirectionInput,
   type UpdateCanvasEdgeLineStyleInput,
@@ -66,14 +67,14 @@ export class CanvasContractBackend implements CanvasRepository {
 
   async createTextNode(input: CreateTextNodeInput): Promise<CanvasNode> {
     await this.getCanvas(input.canvasId)
-    const node: CanvasNode = { ...input, type: 'text', updatedAtMs: input.createdAtMs }
+    const node: CanvasNode = { ...input, type: 'text', nodeName: '', updatedAtMs: input.createdAtMs }
     this.nodes.set(node.id, node)
     return node
   }
 
   async createCanvasNode(input: import('@/canvas/repository').CreateCanvasNodeInput): Promise<CanvasNode> {
     await this.getCanvas(input.canvasId)
-    const node = { ...input, updatedAtMs: input.createdAtMs } as CanvasNode
+    const node = { ...input, nodeName: '', updatedAtMs: input.createdAtMs } as CanvasNode
     this.nodes.set(node.id, node)
     return node
   }
@@ -97,6 +98,16 @@ export class CanvasContractBackend implements CanvasRepository {
     if (node === undefined) return Promise.reject(new CanvasRepositoryError('NOT_FOUND', 'updateCanvasNodeContent'))
     if (node.type === 'unknown' || node.type !== input.type) return Promise.reject(new CanvasRepositoryError('PERSISTENCE_FAILED', 'updateCanvasNodeContent'))
     const updated = { ...node, content: input.content, updatedAtMs: input.updatedAtMs } as CanvasNode
+    this.nodes.set(input.id, updated)
+    return Promise.resolve(updated)
+  }
+
+  renameCanvasNode(input: RenameCanvasNodeInput): Promise<CanvasNode> {
+    const node = this.nodes.get(input.id)
+    if (node === undefined || node.canvasId !== input.canvasId || node.type === 'unknown') {
+      return Promise.reject(new CanvasRepositoryError('NOT_FOUND', 'renameCanvasNode'))
+    }
+    const updated = { ...node, nodeName: input.nodeName, updatedAtMs: input.updatedAtMs }
     this.nodes.set(input.id, updated)
     return Promise.resolve(updated)
   }
@@ -281,6 +292,18 @@ export function defineCanvasRepositoryContract(
       await expect(repository.updateCanvasNodeContent({ id: CONTRACT_NODE_ID, type: 'sticky', content: { type: 'sticky', text: 'Updated' }, updatedAtMs: 30 })).resolves.toMatchObject({ content: { type: 'sticky', text: 'Updated' } })
       await expect(repository.moveCanvasNode({ id: CONTRACT_NODE_ID, x: -10, y: 45, updatedAtMs: 40 })).resolves.toMatchObject({ type: 'sticky', x: -10, y: 45 })
       await expect(repository.listCanvasNodes(CONTRACT_CANVAS_ID)).resolves.toEqual([expect.objectContaining({ type: 'sticky' })])
+    })
+
+    test('renames Text and Sticky nodes without changing content or position', async () => {
+      const { repository } = createFixture()
+      await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Canvas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+      await repository.createCanvasNode({ id: CONTRACT_NODE_ID, canvasId: CONTRACT_CANVAS_ID, type: 'text', content: { type: 'text', text: 'Text body' }, x: 12, y: 24, createdAtMs: 20 })
+      await repository.createCanvasNode({ id: CONTRACT_TARGET_NODE_ID, canvasId: CONTRACT_CANVAS_ID, type: 'sticky', content: { type: 'sticky', text: 'Sticky body' }, x: 36, y: 48, createdAtMs: 21 })
+
+      await expect(repository.renameCanvasNode({ canvasId: CONTRACT_CANVAS_ID, id: CONTRACT_NODE_ID, nodeName: '产品构思', updatedAtMs: 30 })).resolves.toMatchObject({ nodeName: '产品构思', content: { type: 'text', text: 'Text body' }, x: 12, y: 24, updatedAtMs: 30 })
+      await expect(repository.renameCanvasNode({ canvasId: CONTRACT_CANVAS_ID, id: CONTRACT_TARGET_NODE_ID, nodeName: '', updatedAtMs: 31 })).resolves.toMatchObject({ nodeName: '', content: { type: 'sticky', text: 'Sticky body' }, x: 36, y: 48, updatedAtMs: 31 })
+      await expect(repository.renameCanvasNode({ canvasId: '00000000-0000-4000-8000-000000000699', id: CONTRACT_NODE_ID, nodeName: 'Other', updatedAtMs: 32 })).rejects.toMatchObject({ code: 'NOT_FOUND', operation: 'renameCanvasNode' })
+      await expect(repository.renameCanvasNode({ canvasId: CONTRACT_CANVAS_ID, id: '00000000-0000-4000-8000-000000000699', nodeName: 'Missing', updatedAtMs: 32 })).rejects.toMatchObject({ code: 'NOT_FOUND', operation: 'renameCanvasNode' })
     })
 
     test('moves multiple nodes atomically within one Canvas', async () => {

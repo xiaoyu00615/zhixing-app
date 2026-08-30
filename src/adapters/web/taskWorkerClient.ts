@@ -24,6 +24,7 @@ import type {
   MoveCanvasNodeInput,
   MoveCanvasNodesInput,
   RenameCanvasInput,
+  RenameCanvasNodeInput,
   UpdateCanvasViewportInput,
   UpdateCanvasEdgeDirectionInput,
   UpdateCanvasEdgeLineStyleInput,
@@ -313,6 +314,14 @@ export class TaskWorkerClient {
     return this.send((requestId) => ({
       requestId,
       type: 'canvas.node.updateContent',
+      input,
+    }))
+  }
+
+  renameCanvasNode(input: RenameCanvasNodeInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.node.rename',
       input,
     }))
   }

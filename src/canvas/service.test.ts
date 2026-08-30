@@ -26,6 +26,7 @@ function fixture(): {
   updateCanvasEdgeLineStyleMock: ReturnType<typeof vi.fn>
   deleteCanvasEdgeMock: ReturnType<typeof vi.fn>
   moveCanvasNodesMock: ReturnType<typeof vi.fn>
+  renameCanvasNodeMock: ReturnType<typeof vi.fn>
 } {
   const canvas: Canvas = {
     id: CANVAS_ID,
@@ -38,6 +39,7 @@ function fixture(): {
     id: NODE_ID,
     canvasId: CANVAS_ID,
     type: 'text',
+    nodeName: '',
     content: { type: 'text', text: 'Text' },
     x: 20,
     y: 30,
@@ -69,6 +71,7 @@ function fixture(): {
     Promise.resolve({ ...edge, ...input }),
   )
   const moveCanvasNodesMock = vi.fn(() => Promise.resolve([node]))
+  const renameCanvasNodeMock = vi.fn((input) => Promise.resolve({ ...node, ...input }))
   return {
     canvas,
     node,
@@ -83,6 +86,7 @@ function fixture(): {
       listCanvasNodes: vi.fn(() => Promise.resolve([node])),
       updateTextNode: vi.fn(() => Promise.resolve(node)),
       updateCanvasNodeContent: vi.fn(() => Promise.resolve(node)),
+      renameCanvasNode: renameCanvasNodeMock,
       moveCanvasNode: vi.fn(() => Promise.resolve(node)),
       moveCanvasNodes: moveCanvasNodesMock,
       createCanvasEdge: createCanvasEdgeMock,
@@ -98,6 +102,7 @@ function fixture(): {
     updateCanvasEdgeLineStyleMock,
     deleteCanvasEdgeMock,
     moveCanvasNodesMock,
+    renameCanvasNodeMock,
   }
 }
 
@@ -156,6 +161,33 @@ describe('CanvasService', () => {
       nodes: [node],
       edges: [expect.objectContaining({ id: EDGE_ID })],
     })
+  })
+
+  test('normalizes node names and enforces a 120 Unicode code point boundary', async () => {
+    const { repository, renameCanvasNodeMock } = fixture()
+    const service = createCanvasService({ repository, nowMs: () => 75 })
+
+    for (const name of ['', 'A', '中'.repeat(119), '中'.repeat(120), '😀'.repeat(120)]) {
+      await expect(service.renameCanvasNode(CANVAS_ID, NODE_ID, `  ${name}  `)).resolves.toMatchObject({ nodeName: name })
+    }
+    expect(renameCanvasNodeMock).toHaveBeenLastCalledWith({
+      canvasId: CANVAS_ID,
+      id: NODE_ID,
+      nodeName: '😀'.repeat(120),
+      updatedAtMs: 75,
+    })
+    await expect(service.renameCanvasNode(CANVAS_ID, NODE_ID, '中'.repeat(121))).rejects.toMatchObject({ code: 'VALIDATION', field: 'nodeName' })
+    await expect(service.renameCanvasNode(CANVAS_ID, NODE_ID, '😀'.repeat(121))).rejects.toMatchObject({ code: 'VALIDATION', field: 'nodeName' })
+    await expect(service.renameCanvasNode(CANVAS_ID, NODE_ID, null as never)).rejects.toMatchObject({ code: 'VALIDATION', field: 'nodeName' })
+  })
+
+  test('maps node rename failures to safe application errors', async () => {
+    const { repository } = fixture()
+    const service = createCanvasService({ repository })
+    repository.renameCanvasNode = vi.fn(() => Promise.reject(new CanvasRepositoryError('NOT_FOUND', 'renameCanvasNode')))
+    await expect(service.renameCanvasNode(CANVAS_ID, NODE_ID, 'Name')).rejects.toMatchObject({ code: 'NOT_FOUND', message: 'Canvas resource not found.' })
+    repository.renameCanvasNode = vi.fn(() => Promise.reject(new Error('private SQL')))
+    await expect(service.renameCanvasNode(CANVAS_ID, NODE_ID, 'Name')).rejects.toMatchObject({ code: 'UNAVAILABLE', message: 'Canvas service is unavailable.' })
   })
 
   test('validates and timestamps one atomic multi-node move operation', async () => {

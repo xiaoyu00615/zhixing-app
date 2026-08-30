@@ -7,6 +7,7 @@ import {
   isCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
+  isPersistedCanvasNodeName,
   isTextNodeContent,
   isStickyNodeContent,
   parseCanvasNodeContentJson,
@@ -67,5 +68,16 @@ describe('Canvas domain validation', () => {
     expect(isCanvasEdgeLineStyle('dashed')).toBe(true)
     expect(isCanvasEdgeLineStyle('dotted')).toBe(true)
     expect(isCanvasEdgeLineStyle('animated')).toBe(false)
+  })
+
+  test('validates persisted node names by trimmed Unicode code points', () => {
+    expect(isPersistedCanvasNodeName('')).toBe(true)
+    expect(isPersistedCanvasNodeName('A')).toBe(true)
+    expect(isPersistedCanvasNodeName('中'.repeat(119))).toBe(true)
+    expect(isPersistedCanvasNodeName('中'.repeat(120))).toBe(true)
+    expect(isPersistedCanvasNodeName('中'.repeat(121))).toBe(false)
+    expect(isPersistedCanvasNodeName('😀'.repeat(120))).toBe(true)
+    expect(isPersistedCanvasNodeName('😀'.repeat(121))).toBe(false)
+    expect(isPersistedCanvasNodeName(' untrimmed ')).toBe(false)
   })
 })

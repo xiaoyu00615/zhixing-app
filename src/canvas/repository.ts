@@ -46,6 +46,13 @@ export interface UpdateCanvasNodeContentInput {
   readonly updatedAtMs: number
 }
 
+export interface RenameCanvasNodeInput {
+  readonly canvasId: string
+  readonly id: string
+  readonly nodeName: string
+  readonly updatedAtMs: number
+}
+
 export interface CreateTextNodeInput extends Omit<CreateCanvasNodeInput, 'type' | 'content'> {
   readonly content: import('@/canvas/model').TextNodeContent
 }
@@ -112,6 +119,7 @@ export interface CanvasRepository {
   createTextNode(input: CreateTextNodeInput): Promise<CanvasNode>
   listCanvasNodes(canvasId: string): Promise<readonly CanvasNode[]>
   updateCanvasNodeContent(input: UpdateCanvasNodeContentInput): Promise<CanvasNode>
+  renameCanvasNode(input: RenameCanvasNodeInput): Promise<CanvasNode>
   updateTextNode(input: UpdateTextNodeInput): Promise<CanvasNode>
   moveCanvasNode(input: MoveCanvasNodeInput): Promise<CanvasNode>
   moveCanvasNodes(input: MoveCanvasNodesInput): Promise<readonly CanvasNode[]>
