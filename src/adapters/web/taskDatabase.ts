@@ -38,7 +38,7 @@ import {
   isCanvasViewport,
   isNonEmptyCanvasTitle,
   parseCanvasViewportJson,
-  parseTextNodeContentJson,
+  parseCanvasNodeContentJson,
   type Canvas,
   type CanvasEdge,
   type CanvasEdgeDirection,
@@ -47,6 +47,7 @@ import {
 import type {
   CreateCanvasInput,
   CreateCanvasEdgeInput,
+  CreateCanvasNodeInput,
   CreateTextNodeInput,
   DeleteCanvasEdgeInput,
   MoveCanvasNodeInput,
@@ -55,6 +56,7 @@ import type {
   UpdateCanvasViewportInput,
   UpdateCanvasEdgeDirectionInput,
   UpdateCanvasEdgeLineStyleInput,
+  UpdateCanvasNodeContentInput,
   UpdateTextNodeInput,
 } from '@/canvas/repository'
 import {
@@ -121,11 +123,10 @@ function parseCanvasNodeRow(
     created_at_ms: createdAtMs,
     updated_at_ms: updatedAtMs,
   } = row
-  const content = parseTextNodeContentJson(contentJson)
+  const content = typeof type === 'string' ? parseCanvasNodeContentJson(type, contentJson) : null
   if (
     !isCanonicalCanvasId(id) ||
     !isCanonicalCanvasId(canvasId) ||
-    type !== 'text' ||
     content === null ||
     !isCanvasCoordinate(x) ||
     !isCanvasCoordinate(y) ||
@@ -135,7 +136,10 @@ function parseCanvasNodeRow(
   ) {
     throw new TaskDatabaseError('PERSISTENCE_FAILED')
   }
-  return { id, canvasId, type, content, x, y, createdAtMs, updatedAtMs }
+  if (type === 'text' || type === 'sticky') {
+    return { id, canvasId, type, content, x, y, createdAtMs, updatedAtMs } as CanvasNode
+  }
+  return { id, canvasId, type: 'unknown', originalType: type as string, content: content as import('@/canvas/model').UnknownNodeContent, x, y, createdAtMs, updatedAtMs }
 }
 
 function parseCanvasEdgeRow(
@@ -768,7 +772,7 @@ export class WebTaskDatabase {
     }
   }
 
-  createTextNode(input: CreateTextNodeInput): CanvasNode {
+  createCanvasNode(input: CreateCanvasNodeInput): CanvasNode {
     this.validateNodeInput(
       input.id,
       input.canvasId,
@@ -777,7 +781,7 @@ export class WebTaskDatabase {
       input.createdAtMs,
     )
     if (
-      input.content.type !== 'text' ||
+      input.content.type !== input.type ||
       typeof input.content.text !== 'string'
     ) {
       throw new TaskDatabaseError('PERSISTENCE_FAILED')
@@ -789,10 +793,11 @@ export class WebTaskDatabase {
           sql: `INSERT INTO canvas_nodes
                 (id, canvas_id, type, content_json, x, y,
                  created_at_ms, updated_at_ms)
-                VALUES (?, ?, 'text', ?, ?, ?, ?, ?)`,
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           bind: [
             input.id,
             input.canvasId,
+            input.type,
             JSON.stringify(input.content),
             input.x,
             input.y,
@@ -806,6 +811,10 @@ export class WebTaskDatabase {
       if (error instanceof TaskDatabaseError) throw error
       throw new TaskDatabaseError('PERSISTENCE_FAILED')
     }
+  }
+
+  createTextNode(input: CreateTextNodeInput): CanvasNode {
+    return this.createCanvasNode({ ...input, type: 'text' })
   }
 
   listCanvasNodes(canvasId: string): readonly CanvasNode[] {
@@ -831,20 +840,27 @@ export class WebTaskDatabase {
     }
   }
 
-  updateTextNode(input: UpdateTextNodeInput): CanvasNode {
+  updateCanvasNodeContent(input: UpdateCanvasNodeContentInput): CanvasNode {
     this.validateCanvasUpdate(input.id, input.updatedAtMs)
     if (
-      input.content.type !== 'text' ||
+      input.content.type !== input.type ||
       typeof input.content.text !== 'string'
     ) {
       throw new TaskDatabaseError('PERSISTENCE_FAILED')
     }
+    const current = this.requireCanvasNode(input.id)
+    const currentType = current.type === 'unknown' ? current.originalType : current.type
+    if (currentType !== input.type) throw new TaskDatabaseError('PERSISTENCE_FAILED')
     return this.updateCanvasNode(
       input.id,
       'content_json',
       JSON.stringify(input.content),
       input.updatedAtMs,
     )
+  }
+
+  updateTextNode(input: UpdateTextNodeInput): CanvasNode {
+    return this.updateCanvasNodeContent({ ...input, type: 'text' })
   }
 
   moveCanvasNode(input: MoveCanvasNodeInput): CanvasNode {

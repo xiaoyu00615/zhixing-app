@@ -7,12 +7,13 @@ import addTaskTagsSql from '../../../src-tauri/migrations/0004_add_task_tags.sql
 import addTaskSoftDeleteSql from '../../../src-tauri/migrations/0005_add_task_soft_delete.sql?raw'
 import addCanvasCoreSql from '../../../src-tauri/migrations/0006_add_canvas_core.sql?raw'
 import addCanvasEdgesSql from '../../../src-tauri/migrations/0007_add_canvas_edges.sql?raw'
+import addStickyCanvasNodesSql from '../../../src-tauri/migrations/0008_add_sticky_canvas_nodes.sql?raw'
 
 export interface WebMigrationDefinition {
   readonly version: number
   readonly id: string
   readonly sql: string
-  readonly highRisk: false
+  readonly highRisk: boolean
 }
 
 export interface WebMigrationHistoryRow {
@@ -85,6 +86,12 @@ export const WEB_MIGRATIONS: readonly WebMigrationDefinition[] = [
     version: 7,
     id: '0007_add_canvas_edges',
     sql: addCanvasEdgesSql,
+    highRisk: false,
+  },
+  {
+    version: 8,
+    id: '0008_add_sticky_canvas_nodes',
+    sql: addStickyCanvasNodesSql,
     highRisk: false,
   },
 ]

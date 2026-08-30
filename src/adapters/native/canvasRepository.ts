@@ -8,6 +8,7 @@ import {
   isCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
+  isStickyNodeContent,
   isTextNodeContent,
   type Canvas,
   type CanvasEdge,
@@ -19,6 +20,7 @@ import {
   type CanvasRepositoryOperation,
   type CreateCanvasInput,
   type CreateCanvasEdgeInput,
+  type CreateCanvasNodeInput,
   type CreateTextNodeInput,
   type DeleteCanvasEdgeInput,
   type MoveCanvasNodeInput,
@@ -27,6 +29,7 @@ import {
   type UpdateCanvasViewportInput,
   type UpdateCanvasEdgeDirectionInput,
   type UpdateCanvasEdgeLineStyleInput,
+  type UpdateCanvasNodeContentInput,
   type UpdateTextNodeInput,
 } from '@/canvas/repository'
 
@@ -68,8 +71,9 @@ function parseNode(
   if (
     !isCanonicalCanvasId(id) ||
     !isCanonicalCanvasId(canvasId) ||
-    type !== 'text' ||
-    !isTextNodeContent(content) ||
+    ((type === 'text' && !isTextNodeContent(content)) ||
+      (type === 'sticky' && !isStickyNodeContent(content)) ||
+      (type !== 'text' && type !== 'sticky' && typeof type !== 'string')) ||
     !isCanvasCoordinate(x) ||
     !isCanvasCoordinate(y) ||
     !isTimestamp(createdAtMs) ||
@@ -78,7 +82,10 @@ function parseNode(
   ) {
     throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
   }
-  return { id, canvasId, type, content, x, y, createdAtMs, updatedAtMs }
+  if (type === 'text' || type === 'sticky') {
+    return { id, canvasId, type, content, x, y, createdAtMs, updatedAtMs } as CanvasNode
+  }
+  return { id, canvasId, type: 'unknown', originalType: type, content: { type: 'unknown', raw: content }, x, y, createdAtMs, updatedAtMs }
 }
 
 function parseEdge(
@@ -198,11 +205,15 @@ export class NativeCanvasRepository implements CanvasRepository {
     )
   }
 
-  async createTextNode(input: CreateTextNodeInput): Promise<CanvasNode> {
+  async createCanvasNode(input: CreateCanvasNodeInput): Promise<CanvasNode> {
     return parseNode(
-      await invokeCanvas('canvas_node_create_text', 'createTextNode', { input }),
-      'createTextNode',
+      await invokeCanvas('canvas_node_create', 'createCanvasNode', { input }),
+      'createCanvasNode',
     )
+  }
+
+  createTextNode(input: CreateTextNodeInput): Promise<CanvasNode> {
+    return this.createCanvasNode({ ...input, type: 'text' })
   }
 
   async listCanvasNodes(canvasId: string): Promise<readonly CanvasNode[]> {
@@ -215,11 +226,16 @@ export class NativeCanvasRepository implements CanvasRepository {
     return value.map((node) => parseNode(node, 'listCanvasNodes'))
   }
 
-  async updateTextNode(input: UpdateTextNodeInput): Promise<CanvasNode> {
+  async updateCanvasNodeContent(input: UpdateCanvasNodeContentInput): Promise<CanvasNode> {
     return parseNode(
-      await invokeCanvas('canvas_node_update_text', 'updateTextNode', { input }),
-      'updateTextNode',
+      await invokeCanvas('canvas_node_update_content', 'updateCanvasNodeContent', { input }),
+      'updateCanvasNodeContent',
     )
+  }
+
+
+  updateTextNode(input: UpdateTextNodeInput): Promise<CanvasNode> {
+    return this.updateCanvasNodeContent({ ...input, type: 'text' })
   }
 
   async moveCanvasNode(input: MoveCanvasNodeInput): Promise<CanvasNode> {

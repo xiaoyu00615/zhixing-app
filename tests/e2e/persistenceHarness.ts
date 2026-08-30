@@ -23,6 +23,7 @@ import type { Canvas, CanvasEdge, CanvasNode } from '@/canvas/model'
 import type {
   CanvasRepository,
   CreateCanvasInput,
+  CreateCanvasNodeInput,
   CreateCanvasEdgeInput,
   CreateTextNodeInput,
   DeleteCanvasEdgeInput,
@@ -32,6 +33,7 @@ import type {
   UpdateCanvasEdgeDirectionInput,
   UpdateCanvasEdgeLineStyleInput,
   UpdateCanvasViewportInput,
+  UpdateCanvasNodeContentInput,
   UpdateTextNodeInput,
 } from '@/canvas/repository'
 
@@ -68,8 +70,10 @@ interface PersistenceHarness {
   renameCanvas(input: RenameCanvasInput): Promise<Canvas>
   updateCanvasViewport(input: UpdateCanvasViewportInput): Promise<Canvas>
   createTextNode(input: CreateTextNodeInput): Promise<CanvasNode>
+  createCanvasNode(input: CreateCanvasNodeInput): Promise<CanvasNode>
   listCanvasNodes(canvasId: string): Promise<readonly CanvasNode[]>
   updateTextNode(input: UpdateTextNodeInput): Promise<CanvasNode>
+  updateCanvasNodeContent(input: UpdateCanvasNodeContentInput): Promise<CanvasNode>
   moveCanvasNode(input: MoveCanvasNodeInput): Promise<CanvasNode>
   moveCanvasNodes(input: MoveCanvasNodesInput): Promise<readonly CanvasNode[]>
   createCanvasEdge(input: CreateCanvasEdgeInput): Promise<CanvasEdge>
@@ -191,11 +195,17 @@ window.__taskPersistenceHarness = {
   async createTextNode(input) {
     return (await requireCanvasRepository()).createTextNode(input)
   },
+  async createCanvasNode(input) {
+    return (await requireCanvasRepository()).createCanvasNode(input)
+  },
   async listCanvasNodes(canvasId) {
     return (await requireCanvasRepository()).listCanvasNodes(canvasId)
   },
   async updateTextNode(input) {
     return (await requireCanvasRepository()).updateTextNode(input)
+  },
+  async updateCanvasNodeContent(input) {
+    return (await requireCanvasRepository()).updateCanvasNodeContent(input)
   },
   async moveCanvasNode(input) {
     return (await requireCanvasRepository()).moveCanvasNode(input)

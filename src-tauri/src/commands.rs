@@ -6,9 +6,9 @@ use tauri::Manager;
 use crate::canvas::{
     CanvasDbService, CanvasEdgeDirection, CanvasEdgeLineStyle, CanvasEdgeRecord, CanvasError,
     CanvasNodeContent, CanvasNodePositionMove, CanvasNodeRecord, CanvasRecord, CanvasViewport,
-    CreateCanvasEdgeInput, CreateCanvasInput, CreateTextNodeInput, DeleteCanvasEdgeInput,
+    CreateCanvasEdgeInput, CreateCanvasInput, CreateCanvasNodeInput, DeleteCanvasEdgeInput,
     MoveCanvasNodeInput, MoveCanvasNodesInput, RenameCanvasInput, UpdateCanvasEdgeDirectionInput,
-    UpdateCanvasEdgeLineStyleInput, UpdateCanvasViewportInput, UpdateTextNodeInput,
+    UpdateCanvasEdgeLineStyleInput, UpdateCanvasNodeContentInput, UpdateCanvasViewportInput,
 };
 use crate::project::{
     CreateProjectInput, ProjectDbService, ProjectError, ProjectRecord, RenameProjectInput,
@@ -725,9 +725,11 @@ impl From<CanvasRecord> for CanvasDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CreateTextNodeDto {
+pub(crate) struct CreateCanvasNodeDto {
     id: String,
     canvas_id: String,
+    #[serde(rename = "type")]
+    node_type: String,
     content: CanvasNodeContent,
     x: f64,
     y: f64,
@@ -736,8 +738,10 @@ pub(crate) struct CreateTextNodeDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct UpdateTextNodeDto {
+pub(crate) struct UpdateCanvasNodeContentDto {
     id: String,
+    #[serde(rename = "type")]
+    node_type: String,
     content: CanvasNodeContent,
     updated_at_ms: i64,
 }
@@ -976,17 +980,18 @@ pub(crate) fn canvas_update_viewport(
 }
 
 #[tauri::command]
-pub(crate) fn canvas_node_create_text(
+pub(crate) fn canvas_node_create(
     app: tauri::AppHandle,
     runtime_status: tauri::State<'_, RuntimeStatus>,
-    input: CreateTextNodeDto,
+    input: CreateCanvasNodeDto,
 ) -> Result<CanvasNodeDto, CanvasCommandErrorDto> {
     let connection = canvas_connection(&app, &runtime_status)?;
-    CanvasDbService::create_text_node(
+    CanvasDbService::create_node(
         &connection,
-        CreateTextNodeInput {
+        CreateCanvasNodeInput {
             id: input.id,
             canvas_id: input.canvas_id,
+            node_type: input.node_type,
             content: input.content,
             x: input.x,
             y: input.y,
@@ -1010,16 +1015,17 @@ pub(crate) fn canvas_node_list(
 }
 
 #[tauri::command]
-pub(crate) fn canvas_node_update_text(
+pub(crate) fn canvas_node_update_content(
     app: tauri::AppHandle,
     runtime_status: tauri::State<'_, RuntimeStatus>,
-    input: UpdateTextNodeDto,
+    input: UpdateCanvasNodeContentDto,
 ) -> Result<CanvasNodeDto, CanvasCommandErrorDto> {
     let connection = canvas_connection(&app, &runtime_status)?;
-    CanvasDbService::update_text_node(
+    CanvasDbService::update_node_content(
         &connection,
-        UpdateTextNodeInput {
+        UpdateCanvasNodeContentInput {
             id: input.id,
+            node_type: input.node_type,
             content: input.content,
             updated_at_ms: input.updated_at_ms,
         },
@@ -1267,7 +1273,9 @@ mod tests {
             id: "00000000-0000-4000-8000-000000000602".into(),
             canvas_id: "00000000-0000-4000-8000-000000000601".into(),
             node_type: "text".into(),
-            content: CanvasNodeContent::Text { text: "Idea".into() },
+            content: CanvasNodeContent::Text {
+                text: "Idea".into(),
+            },
             x: 50.0,
             y: 80.0,
             created_at_ms: 30,

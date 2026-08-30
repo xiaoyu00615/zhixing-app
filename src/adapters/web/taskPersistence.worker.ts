@@ -223,11 +223,14 @@ async function handleRequest(value: unknown): Promise<void> {
           state.database.updateCanvasViewport(request.input),
         )
         return
-      case 'canvas.node.createText':
+      case 'canvas.node.create':
         success(
           request.requestId,
-          state.database.createTextNode(request.input),
+          state.database.createCanvasNode(request.input),
         )
+        return
+      case 'canvas.node.createText':
+        success(request.requestId, state.database.createTextNode(request.input))
         return
       case 'canvas.node.list':
         success(
@@ -235,11 +238,14 @@ async function handleRequest(value: unknown): Promise<void> {
           state.database.listCanvasNodes(request.canvasId),
         )
         return
-      case 'canvas.node.updateText':
+      case 'canvas.node.updateContent':
         success(
           request.requestId,
-          state.database.updateTextNode(request.input),
+          state.database.updateCanvasNodeContent(request.input),
         )
+        return
+      case 'canvas.node.updateText':
+        success(request.requestId, state.database.updateTextNode(request.input))
         return
       case 'canvas.node.move':
         success(

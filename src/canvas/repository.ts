@@ -6,7 +6,8 @@ import type {
   CanvasEdgeRelationType,
   CanvasNode,
   CanvasViewport,
-  TextNodeContent,
+  RegisteredCanvasNodeContent,
+  RegisteredCanvasNodeType,
 } from '@/canvas/model'
 
 export interface CreateCanvasInput {
@@ -28,19 +29,29 @@ export interface UpdateCanvasViewportInput {
   readonly updatedAtMs: number
 }
 
-export interface CreateTextNodeInput {
+export interface CreateCanvasNodeInput {
   readonly id: string
   readonly canvasId: string
-  readonly content: TextNodeContent
+  readonly type: RegisteredCanvasNodeType
+  readonly content: RegisteredCanvasNodeContent
   readonly x: number
   readonly y: number
   readonly createdAtMs: number
 }
 
-export interface UpdateTextNodeInput {
+export interface UpdateCanvasNodeContentInput {
   readonly id: string
-  readonly content: TextNodeContent
+  readonly type: RegisteredCanvasNodeType
+  readonly content: RegisteredCanvasNodeContent
   readonly updatedAtMs: number
+}
+
+export interface CreateTextNodeInput extends Omit<CreateCanvasNodeInput, 'type' | 'content'> {
+  readonly content: import('@/canvas/model').TextNodeContent
+}
+
+export interface UpdateTextNodeInput extends Omit<UpdateCanvasNodeContentInput, 'type' | 'content'> {
+  readonly content: import('@/canvas/model').TextNodeContent
 }
 
 export interface MoveCanvasNodeInput {
@@ -97,8 +108,10 @@ export interface CanvasRepository {
   renameCanvas(input: RenameCanvasInput): Promise<Canvas>
   getCanvas(id: string): Promise<Canvas>
   updateCanvasViewport(input: UpdateCanvasViewportInput): Promise<Canvas>
+  createCanvasNode(input: CreateCanvasNodeInput): Promise<CanvasNode>
   createTextNode(input: CreateTextNodeInput): Promise<CanvasNode>
   listCanvasNodes(canvasId: string): Promise<readonly CanvasNode[]>
+  updateCanvasNodeContent(input: UpdateCanvasNodeContentInput): Promise<CanvasNode>
   updateTextNode(input: UpdateTextNodeInput): Promise<CanvasNode>
   moveCanvasNode(input: MoveCanvasNodeInput): Promise<CanvasNode>
   moveCanvasNodes(input: MoveCanvasNodesInput): Promise<readonly CanvasNode[]>

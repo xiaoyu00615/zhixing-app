@@ -8,6 +8,8 @@ import {
   isCanvasViewport,
   isNonEmptyCanvasTitle,
   isTextNodeContent,
+  isStickyNodeContent,
+  parseCanvasNodeContentJson,
   parseCanvasViewportJson,
   parseTextNodeContentJson,
 } from '@/canvas/model'
@@ -39,6 +41,13 @@ describe('Canvas domain validation', () => {
       { type: 'text', text: 'Hello' },
     )
     expect(parseTextNodeContentJson('{"type":"image","text":"Hello"}')).toBeNull()
+  })
+
+  test('keeps sticky payload typed and unknown payload opaque', () => {
+    expect(isStickyNodeContent({ type: 'sticky', text: '便签' })).toBe(true)
+    expect(isStickyNodeContent({ type: 'sticky', text: '便签', color: 'yellow' })).toBe(false)
+    expect(parseCanvasNodeContentJson('sticky', '{"type":"sticky","text":"便签"}')).toEqual({ type: 'sticky', text: '便签' })
+    expect(parseCanvasNodeContentJson('future', '{"type":"future","value":1}')).toEqual({ type: 'unknown', raw: { type: 'future', value: 1 } })
   })
 
   test('requires finite world coordinates', () => {

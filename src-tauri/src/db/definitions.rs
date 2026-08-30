@@ -16,6 +16,8 @@ const ADD_TASK_SOFT_DELETE_SQL: &str =
     include_str!("../../migrations/0005_add_task_soft_delete.sql");
 const ADD_CANVAS_CORE_SQL: &str = include_str!("../../migrations/0006_add_canvas_core.sql");
 const ADD_CANVAS_EDGES_SQL: &str = include_str!("../../migrations/0007_add_canvas_edges.sql");
+const ADD_STICKY_CANVAS_NODES_SQL: &str =
+    include_str!("../../migrations/0008_add_sticky_canvas_nodes.sql");
 
 pub const MIGRATIONS: &[MigrationDefinition] = &[
     MigrationDefinition {
@@ -59,5 +61,11 @@ pub const MIGRATIONS: &[MigrationDefinition] = &[
         id: "0007_add_canvas_edges",
         sql_up: ADD_CANVAS_EDGES_SQL,
         high_risk: false,
+    },
+    MigrationDefinition {
+        version: 8,
+        id: "0008_add_sticky_canvas_nodes",
+        sql_up: ADD_STICKY_CANVAS_NODES_SQL,
+        high_risk: true,
     },
 ];

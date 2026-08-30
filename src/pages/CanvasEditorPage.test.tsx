@@ -185,6 +185,8 @@ function fixture() {
   const openCanvasMock = vi.fn<CanvasService['openCanvas']>(() => Promise.resolve({ canvas, nodes: [node, targetNode], edges: [edge] }))
   const createTextNodeMock = vi.fn<CanvasService['createTextNode']>(() => Promise.resolve(createdNode))
   const editTextNodeMock = vi.fn<CanvasService['editTextNode']>((id, text) => Promise.resolve({ ...node, id, content: { type: 'text', text }, updatedAtMs: 20 }))
+  const createCanvasNodeMock = vi.fn<CanvasService['createCanvasNode']>((_canvasId, type, content, position) => Promise.resolve({ ...createdNode, type, content, ...position } as CanvasNode))
+  const updateCanvasNodeContentMock = vi.fn<CanvasService['updateCanvasNodeContent']>((id, type, content) => Promise.resolve({ ...node, id, type, content } as CanvasNode))
   const moveCanvasNodeMock = vi.fn<CanvasService['moveCanvasNode']>((id, x, y) => Promise.resolve({ ...node, id, x, y, updatedAtMs: 20 }))
   const moveCanvasNodesMock = vi.fn<CanvasService['moveCanvasNodes']>((_, moves) => Promise.resolve(moves.map((move) => ({ ...node, id: move.nodeId, x: move.x, y: move.y, updatedAtMs: 20 }))))
   const updateViewportMock = vi.fn<CanvasService['updateViewport']>((id, viewport) => Promise.resolve({ ...canvas, id, viewport, updatedAtMs: 20 }))
@@ -195,7 +197,9 @@ function fixture() {
   const service: CanvasService = {
     createCanvas: vi.fn(), listCanvases: vi.fn(), renameCanvas: vi.fn(),
     openCanvas: openCanvasMock, updateViewport: updateViewportMock,
+    createCanvasNode: createCanvasNodeMock,
     createTextNode: createTextNodeMock, listCanvasNodes: vi.fn(),
+    updateCanvasNodeContent: updateCanvasNodeContentMock,
     editTextNode: editTextNodeMock, moveCanvasNode: moveCanvasNodeMock,
     moveCanvasNodes: moveCanvasNodesMock,
     createCanvasEdge: createCanvasEdgeMock, listCanvasEdges: vi.fn(),
@@ -204,7 +208,7 @@ function fixture() {
     deleteCanvasEdge: deleteCanvasEdgeMock,
   }
   const openRuntime: OpenCanvasRuntime = vi.fn(() => Promise.resolve({ service, dispose: vi.fn() }))
-  return { canvas, service, openRuntime, openCanvasMock, createTextNodeMock, editTextNodeMock, moveCanvasNodeMock, moveCanvasNodesMock, updateViewportMock, createCanvasEdgeMock, updateCanvasEdgeDirectionMock, updateCanvasEdgeLineStyleMock, deleteCanvasEdgeMock }
+  return { canvas, service, openRuntime, openCanvasMock, createTextNodeMock, editTextNodeMock, createCanvasNodeMock, updateCanvasNodeContentMock, moveCanvasNodeMock, moveCanvasNodesMock, updateViewportMock, createCanvasEdgeMock, updateCanvasEdgeDirectionMock, updateCanvasEdgeLineStyleMock, deleteCanvasEdgeMock }
 }
 
 function renderEditor(openRuntime: OpenCanvasRuntime) {
@@ -236,20 +240,28 @@ describe('CanvasEditorPage', () => {
   })
 
   test('creates and edits text, saves drag-stop position, and saves move-end viewport', async () => {
-    const { openRuntime, createTextNodeMock, editTextNodeMock, moveCanvasNodeMock, updateViewportMock } = fixture()
+    const { openRuntime, createCanvasNodeMock, updateCanvasNodeContentMock, moveCanvasNodeMock, updateViewportMock } = fixture()
     renderEditor(openRuntime)
     await screen.findByRole('heading', { name: '产品构思' })
     await userEvent.click(screen.getByRole('button', { name: '文字节点' }))
-    expect(createTextNodeMock).toHaveBeenCalledWith(CANVAS_ID, '', { x: 300, y: 200 })
+    expect(createCanvasNodeMock).toHaveBeenCalledWith(CANVAS_ID, 'text', { type: 'text', text: '' }, { x: 300, y: 200 })
     const input = screen.getByLabelText(`测试文字节点 ${NODE_ID}`)
     await userEvent.clear(input)
     await userEvent.type(input, '编辑后的文字')
     await userEvent.tab()
-    await waitFor(() => expect(editTextNodeMock).toHaveBeenCalledWith(NODE_ID, '编辑后的文字'))
+    await waitFor(() => expect(updateCanvasNodeContentMock).toHaveBeenCalledWith(NODE_ID, 'text', { type: 'text', text: '编辑后的文字' }))
     await userEvent.click(screen.getByRole('button', { name: '模拟拖动' }))
     await waitFor(() => expect(moveCanvasNodeMock).toHaveBeenCalledWith(NODE_ID, 123, 456))
     await userEvent.click(screen.getByRole('button', { name: '模拟视口' }))
     await waitFor(() => expect(updateViewportMock).toHaveBeenCalledWith(CANVAS_ID, { x: 10, y: 20, zoom: 1.5 }))
+  })
+
+  test('creates Sticky through the registered node capability', async () => {
+    const { openRuntime, createCanvasNodeMock } = fixture()
+    renderEditor(openRuntime)
+    await screen.findByRole('heading', { name: '产品构思' })
+    await userEvent.click(screen.getByRole('button', { name: '便签节点' }))
+    expect(createCanvasNodeMock).toHaveBeenCalledWith(CANVAS_ID, 'sticky', { type: 'sticky', text: '' }, { x: 300, y: 200 })
   })
 
   test('uses React Flow selection for single, additive, box, and blank-clear behavior', async () => {

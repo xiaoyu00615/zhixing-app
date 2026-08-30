@@ -955,6 +955,7 @@ mod tests {
                 (5, "0005_add_task_soft_delete".to_string()),
                 (6, "0006_add_canvas_core".to_string()),
                 (7, "0007_add_canvas_edges".to_string()),
+                (8, "0008_add_sticky_canvas_nodes".to_string()),
             ]
         );
 
@@ -1049,7 +1050,7 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(history, [1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(history, [1, 2, 3, 4, 5, 6, 7, 8]);
 
         let foreign_keys: Vec<(String, String, String)> = connection
             .prepare("PRAGMA foreign_key_list('tasks')")

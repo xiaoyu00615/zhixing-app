@@ -19,16 +19,17 @@ import { ArrowLeft, Plus, RotateCcw } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 
-import { TextCanvasNode, type TextFlowNode } from '@/components/canvas/TextCanvasNode'
 import { CanvasEdgeToolbar } from '@/components/canvas/CanvasEdgeToolbar'
 import { Button } from '@/components/ui/button'
 import type { Canvas, CanvasEdge, CanvasNode } from '@/canvas/model'
+import type { RegisteredCanvasNodeType } from '@/canvas/model'
+import { canvasNodeRegistry, toCanvasFlowNode, type CanvasFlowNode } from '@/canvas/nodeRegistry'
 import { openCanvasRuntime } from '@/canvas/runtime'
 import type { OpenCanvasRuntime } from '@/canvas/runtime.types'
 import type { CanvasService } from '@/canvas/service'
 import { PATHS } from '@/routes/paths'
 
-const NODE_TYPES: NodeTypes = { textCanvas: TextCanvasNode }
+const NODE_TYPES: NodeTypes = canvasNodeRegistry.nodeTypes
 const CAMERA_PAN_SPEED_PX_PER_SECOND = 600
 const CAMERA_PAN_KEYS = new Set(['w', 'a', 's', 'd'])
 
@@ -72,11 +73,11 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
     getViewport,
     screenToFlowPosition,
     setViewport,
-  } = useReactFlow<TextFlowNode>()
+  } = useReactFlow<CanvasFlowNode>()
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
   const [attempt, setAttempt] = useState(0)
   const [canvas, setCanvas] = useState<Canvas | null>(null)
-  const [flowNodes, setFlowNodes] = useState<TextFlowNode[]>([])
+  const [flowNodes, setFlowNodes] = useState<CanvasFlowNode[]>([])
   const [canvasEdges, setCanvasEdges] = useState<CanvasEdge[]>([])
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
   const [edgeBusy, setEdgeBusy] = useState(false)
@@ -90,13 +91,16 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
   >(null)
   const keyboardPanActive = useRef(false)
 
-  const commitText = useCallback(async (id: string, text: string) => {
+  const commitNodeContent = useCallback(async (id: string, type: RegisteredCanvasNodeType, text: string) => {
     const currentService = serviceRef.current
     if (currentService === null) return
     try {
-      const updated = await currentService.editTextNode(id, text)
+      const content = type === 'text'
+        ? { type: 'text' as const, text }
+        : { type: 'sticky' as const, text }
+      const updated = await currentService.updateCanvasNodeContent(id, type, content)
       setFlowNodes((nodes) => nodes.map((node) => node.id === id
-        ? { ...node, data: { ...node.data, text: updated.content.text } }
+        ? { ...node, data: { ...node.data, text: updated.type === 'unknown' ? text : updated.content.text } }
         : node))
       setFeedback('文字已保存')
     } catch {
@@ -117,15 +121,9 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
         serviceRef.current = runtime.service
         setService(runtime.service)
         setCanvas(workspace.canvas)
-        setFlowNodes(workspace.nodes.map((node: CanvasNode) => ({
-          id: node.id,
-          type: 'textCanvas',
-          position: { x: node.x, y: node.y },
-          data: {
-            text: node.content.text,
-            onCommit: (id, text) => void commitText(id, text),
-          },
-        })))
+        setFlowNodes(workspace.nodes.map((node: CanvasNode) =>
+          toCanvasFlowNode(node, (id, type, text) => void commitNodeContent(id, type, text)),
+        ))
         setCanvasEdges([...workspace.edges])
         setPhase('ready')
       } catch {
@@ -134,7 +132,7 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
       }
     })()
     return () => { active = false; void runtime?.dispose() }
-  }, [attempt, canvasId, commitText, openRuntime])
+  }, [attempt, canvasId, commitNodeContent, openRuntime])
 
   const persistViewport = useCallback(async (viewport: Viewport) => {
     latestViewport.current = viewport
@@ -290,27 +288,20 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
     void navigate(PATHS.CANVAS)
   }
 
-  async function addTextNode(): Promise<void> {
+  async function addNode(type: RegisteredCanvasNodeType): Promise<void> {
     if (service === null || canvas === null) return
     const position = screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
     try {
-      const created = await service.createTextNode(canvas.id, '', position)
-      setFlowNodes((nodes) => [...nodes, {
-        id: created.id,
-        type: 'textCanvas',
-        position: { x: created.x, y: created.y },
-        data: {
-          text: created.content.text,
-          onCommit: (id, text) => void commitText(id, text),
-        },
-      }])
-      setFeedback('已添加文字节点')
+      const entry = canvasNodeRegistry.byType.get(type)!
+      const created = await service.createCanvasNode(canvas.id, type, entry.createDefaultData(), position)
+      setFlowNodes((nodes) => [...nodes, toCanvasFlowNode(created, (id, nodeType, text) => void commitNodeContent(id, nodeType, text))])
+      setFeedback(`已添加${entry.displayName}`)
     } catch {
-      setFeedback('文字节点创建失败，请重试。')
+      setFeedback('节点创建失败，请重试。')
     }
   }
 
-  const beginNodeDrag: OnNodeDrag<TextFlowNode> = useCallback(
+  const beginNodeDrag: OnNodeDrag<CanvasFlowNode> = useCallback(
     (_event, node, draggedNodes) => {
       const gestureNodes = draggedNodes.length > 0 ? draggedNodes : [node]
       dragStartPositions.current = new Map(
@@ -320,7 +311,7 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
     [],
   )
 
-  const finishNodeDrag: OnNodeDrag<TextFlowNode> = useCallback((
+  const finishNodeDrag: OnNodeDrag<CanvasFlowNode> = useCallback((
     _event,
     node,
     draggedNodes,
@@ -469,16 +460,16 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
     <div className="relative -m-6 h-[calc(100vh-3.5rem)] min-h-[620px] overflow-hidden bg-[#f6f5f1]">
       <div className="absolute inset-x-0 top-0 z-10 flex h-16 items-center justify-between border-b border-border/75 bg-surface/92 px-5 shadow-sm backdrop-blur-sm">
         <div className="flex min-w-0 items-center gap-3"><Button size="icon-sm" variant="ghost" aria-label="返回画布列表" onClick={() => void leaveCanvas()}><ArrowLeft /></Button><div className="min-w-0"><h2 className="truncate text-base font-semibold">{canvas.title}</h2><p className="text-[11px] text-foreground-tertiary">文字画布 · 自动保存</p></div></div>
-        <Button size="sm" onClick={() => void addTextNode()}><Plus />文字节点</Button>
+        <div className="flex items-center gap-2"><Button size="sm" variant="outline" onClick={() => void addNode('text')}><Plus />文字节点</Button><Button size="sm" onClick={() => void addNode('sticky')}><Plus />便签节点</Button></div>
       </div>
-      <ReactFlow<TextFlowNode>
+      <ReactFlow<CanvasFlowNode>
         className="pt-16"
         nodes={flowNodes}
         edges={canvasEdges.map((edge) =>
           toFlowEdge(edge, edge.id === selectedEdgeId),
         )}
         nodeTypes={NODE_TYPES}
-        onNodesChange={(changes: NodeChange<TextFlowNode>[]) => setFlowNodes((nodes) => applyNodeChanges(changes, nodes))}
+        onNodesChange={(changes: NodeChange<CanvasFlowNode>[]) => setFlowNodes((nodes) => applyNodeChanges(changes, nodes))}
         onNodeDragStart={beginNodeDrag}
         onNodeDragStop={finishNodeDrag}
         onConnect={(connection) => void connectNodes(connection)}
@@ -523,7 +514,7 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
           />
         )
       })()}
-      {flowNodes.length === 0 && <div className="pointer-events-none absolute inset-0 flex items-center justify-center pt-16"><div className="rounded-2xl border border-border/80 bg-surface/90 px-8 py-6 text-center shadow-sm"><p className="font-medium">这张画布还是空的</p><p className="mt-1 text-sm text-foreground-secondary">点击右上角添加第一个文字节点</p></div></div>}
+      {flowNodes.length === 0 && <div className="pointer-events-none absolute inset-0 flex items-center justify-center pt-16"><div className="rounded-2xl border border-border/80 bg-surface/90 px-8 py-6 text-center shadow-sm"><p className="font-medium">这张画布还是空的</p><p className="mt-1 text-sm text-foreground-secondary">点击右上角添加第一个节点</p></div></div>}
       {feedback !== null && <div className="absolute bottom-5 left-1/2 z-10 -translate-x-1/2 rounded-full bg-foreground px-4 py-2 text-xs text-background shadow-lg" role="status">{feedback}</div>}
     </div>
   )

@@ -3,7 +3,7 @@
 use std::{collections::HashSet, path::Path};
 
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension, Row};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
@@ -33,11 +33,62 @@ pub(crate) struct CanvasRecord {
     pub(crate) updated_at_ms: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CanvasNodeContent {
-    #[serde(rename = "text")]
     Text { text: String },
+    Sticky { text: String },
+    Unknown(Value),
+}
+
+impl CanvasNodeContent {
+    fn node_type(&self) -> &'static str {
+        match self {
+            Self::Text { .. } => "text",
+            Self::Sticky { .. } => "sticky",
+            Self::Unknown(_) => "",
+        }
+    }
+}
+
+impl Serialize for CanvasNodeContent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Text { text } => {
+                serde_json::json!({ "type": "text", "text": text }).serialize(serializer)
+            }
+            Self::Sticky { text } => {
+                serde_json::json!({ "type": "sticky", "text": text }).serialize(serializer)
+            }
+            Self::Unknown(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CanvasNodeContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let object = value.as_object();
+        if let Some(object) = object {
+            if object.len() == 2 {
+                if let (Some(Value::String(node_type)), Some(Value::String(text))) =
+                    (object.get("type"), object.get("text"))
+                {
+                    return Ok(match node_type.as_str() {
+                        "text" => Self::Text { text: text.clone() },
+                        "sticky" => Self::Sticky { text: text.clone() },
+                        _ => Self::Unknown(value),
+                    });
+                }
+            }
+        }
+        Ok(Self::Unknown(value))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -139,6 +190,24 @@ pub(crate) struct UpdateCanvasViewportInput {
     pub(crate) updated_at_ms: i64,
 }
 
+pub(crate) struct CreateCanvasNodeInput {
+    pub(crate) id: String,
+    pub(crate) canvas_id: String,
+    pub(crate) node_type: String,
+    pub(crate) content: CanvasNodeContent,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) created_at_ms: i64,
+}
+
+pub(crate) struct UpdateCanvasNodeContentInput {
+    pub(crate) id: String,
+    pub(crate) node_type: String,
+    pub(crate) content: CanvasNodeContent,
+    pub(crate) updated_at_ms: i64,
+}
+
+#[cfg(test)]
 pub(crate) struct CreateTextNodeInput {
     pub(crate) id: String,
     pub(crate) canvas_id: String,
@@ -148,6 +217,7 @@ pub(crate) struct CreateTextNodeInput {
     pub(crate) created_at_ms: i64,
 }
 
+#[cfg(test)]
 pub(crate) struct UpdateTextNodeInput {
     pub(crate) id: String,
     pub(crate) content: CanvasNodeContent,
@@ -307,13 +377,22 @@ fn content_json(content: &CanvasNodeContent) -> Result<String, CanvasError> {
     serde_json::to_string(content).map_err(|_| CanvasError::PersistenceFailed)
 }
 
-fn parse_content(source: &str) -> Result<CanvasNodeContent, CanvasError> {
+fn parse_content(node_type: &str, source: &str) -> Result<CanvasNodeContent, CanvasError> {
     let value: Value = serde_json::from_str(source).map_err(|_| CanvasError::PersistenceFailed)?;
+    if !matches!(node_type, "text" | "sticky") {
+        return Ok(CanvasNodeContent::Unknown(value));
+    }
     let object = value.as_object().ok_or(CanvasError::PersistenceFailed)?;
-    if object.len() != 2 || object.get("type") != Some(&Value::String("text".into())) {
+    if object.len() != 2 || object.get("type") != Some(&Value::String(node_type.into())) {
         return Err(CanvasError::PersistenceFailed);
     }
-    serde_json::from_value(value).map_err(|_| CanvasError::PersistenceFailed)
+    let content: CanvasNodeContent =
+        serde_json::from_value(value).map_err(|_| CanvasError::PersistenceFailed)?;
+    if content.node_type() == node_type {
+        Ok(content)
+    } else {
+        Err(CanvasError::PersistenceFailed)
+    }
 }
 
 fn canvas_from_row(row: &Row<'_>) -> rusqlite::Result<(String, String, String, i64, i64)> {
@@ -368,14 +447,15 @@ fn validate_node(
     validate_position(x, y)?;
     validate_timestamp(created_at_ms)?;
     validate_timestamp(updated_at_ms)?;
-    if node_type != "text" || updated_at_ms < created_at_ms {
+    if !matches!(node_type.as_str(), "text" | "sticky") || updated_at_ms < created_at_ms {
         return Err(CanvasError::PersistenceFailed);
     }
+    let content = parse_content(&node_type, &content_source)?;
     Ok(CanvasNodeRecord {
         id,
         canvas_id,
         node_type,
-        content: parse_content(&content_source)?,
+        content,
         x,
         y,
         created_at_ms,
@@ -465,6 +545,42 @@ fn map_edge_write_error(error: rusqlite::Error) -> CanvasError {
 pub(crate) struct CanvasDbService;
 
 impl CanvasDbService {
+    #[cfg(test)]
+    pub(crate) fn create_text_node(
+        connection: &Connection,
+        input: CreateTextNodeInput,
+    ) -> Result<CanvasNodeRecord, CanvasError> {
+        let node_type = input.content.node_type().to_string();
+        Self::create_node(
+            connection,
+            CreateCanvasNodeInput {
+                id: input.id,
+                canvas_id: input.canvas_id,
+                node_type,
+                content: input.content,
+                x: input.x,
+                y: input.y,
+                created_at_ms: input.created_at_ms,
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn update_text_node(
+        connection: &Connection,
+        input: UpdateTextNodeInput,
+    ) -> Result<CanvasNodeRecord, CanvasError> {
+        let node_type = input.content.node_type().to_string();
+        Self::update_node_content(
+            connection,
+            UpdateCanvasNodeContentInput {
+                id: input.id,
+                node_type,
+                content: input.content,
+                updated_at_ms: input.updated_at_ms,
+            },
+        )
+    }
     pub(crate) fn open_existing(app_config_dir: &Path) -> Result<Connection, CanvasError> {
         let bootstrap_path = BootstrapService::bootstrap_path(app_config_dir);
         let loaded = match BootstrapService::load(&bootstrap_path) {
@@ -568,14 +684,17 @@ impl CanvasDbService {
         Self::get_canvas(connection, &input.id)
     }
 
-    pub(crate) fn create_text_node(
+    pub(crate) fn create_node(
         connection: &Connection,
-        input: CreateTextNodeInput,
+        input: CreateCanvasNodeInput,
     ) -> Result<CanvasNodeRecord, CanvasError> {
         validate_id(&input.id)?;
         validate_id(&input.canvas_id)?;
         validate_position(input.x, input.y)?;
         validate_timestamp(input.created_at_ms)?;
+        if input.node_type != input.content.node_type() {
+            return Err(CanvasError::PersistenceFailed);
+        }
         if !connection
             .query_row(
                 "SELECT 1 FROM canvases WHERE id = ?1",
@@ -593,10 +712,11 @@ impl CanvasDbService {
             .execute(
                 "INSERT INTO canvas_nodes(\
                     id, canvas_id, type, content_json, x, y, created_at_ms, updated_at_ms\
-                 ) VALUES(?1, ?2, 'text', ?3, ?4, ?5, ?6, ?6)",
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
                 params![
                     input.id,
                     input.canvas_id,
+                    input.node_type,
                     content,
                     input.x,
                     input.y,
@@ -626,18 +746,21 @@ impl CanvasDbService {
         nodes
     }
 
-    pub(crate) fn update_text_node(
+    pub(crate) fn update_node_content(
         connection: &Connection,
-        input: UpdateTextNodeInput,
+        input: UpdateCanvasNodeContentInput,
     ) -> Result<CanvasNodeRecord, CanvasError> {
         validate_id(&input.id)?;
         validate_timestamp(input.updated_at_ms)?;
+        if input.node_type != input.content.node_type() {
+            return Err(CanvasError::PersistenceFailed);
+        }
         let content = content_json(&input.content)?;
         let changed = connection
             .execute(
                 "UPDATE canvas_nodes SET content_json = ?1, updated_at_ms = ?2 \
-                 WHERE id = ?3 AND type = 'text'",
-                params![content, input.updated_at_ms, input.id],
+                 WHERE id = ?3 AND type = ?4",
+                params![content, input.updated_at_ms, input.id, input.node_type],
             )
             .map_err(|_| CanvasError::PersistenceFailed)?;
         if changed != 1 {
@@ -891,7 +1014,7 @@ mod tests {
 
     use super::*;
     use crate::db::definitions::MIGRATIONS;
-    use crate::db::migration::MigrationRunner;
+    use crate::db::migration::{MigrationDefinition, MigrationRunner};
     use crate::db::policy::{open_configured_connection, open_existing_configured_connection};
     use crate::db::snapshot::SqliteBackupSnapshot;
 
@@ -974,9 +1097,10 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(history.len(), 7);
+        assert_eq!(history.len(), 8);
         assert_eq!(history[5], (6, "0006_add_canvas_core".into()));
         assert_eq!(history[6], (7, "0007_add_canvas_edges".into()));
+        assert_eq!(history[7], (8, "0008_add_sticky_canvas_nodes".into()));
         for table in ["canvases", "canvas_nodes", "canvas_edges"] {
             let exists: i64 = connection
                 .query_row(
@@ -1051,6 +1175,259 @@ mod tests {
             ),
         )
         .is_ok());
+    }
+
+    #[test]
+    fn migration_eight_preserves_existing_text_nodes_and_edges() {
+        let sandbox = tempdir().unwrap();
+        let database_dir = sandbox.path().join("database");
+        let backup_dir = sandbox.path().join("backup");
+        fs::create_dir_all(&database_dir).unwrap();
+        fs::create_dir_all(&backup_dir).unwrap();
+        let database_path = database_dir.join("zhixing.db");
+        let mut connection = open_configured_connection(&database_path).unwrap();
+        MigrationRunner::new(&MIGRATIONS[..7], SqliteBackupSnapshot)
+            .run(&mut connection, &backup_dir)
+            .unwrap();
+        create_canvas(&connection);
+        create_node(&connection, NODE_ID, CANVAS_ID, "Existing");
+        create_node(&connection, TARGET_NODE_ID, CANVAS_ID, "Target");
+        CanvasDbService::update_text_node(
+            &connection,
+            UpdateTextNodeInput {
+                id: NODE_ID.into(),
+                content: CanvasNodeContent::Text {
+                    text: "Existing updated".into(),
+                },
+                updated_at_ms: 41,
+            },
+        )
+        .unwrap();
+        CanvasDbService::move_node(
+            &connection,
+            MoveCanvasNodeInput {
+                id: NODE_ID.into(),
+                x: -44.5,
+                y: 208.25,
+                updated_at_ms: 42,
+            },
+        )
+        .unwrap();
+        CanvasDbService::update_viewport(
+            &connection,
+            UpdateCanvasViewportInput {
+                id: CANVAS_ID.into(),
+                viewport: CanvasViewport {
+                    x: 75.0,
+                    y: -30.0,
+                    zoom: 1.25,
+                },
+                updated_at_ms: 43,
+            },
+        )
+        .unwrap();
+        CanvasDbService::create_edge(
+            &connection,
+            edge_input(
+                EDGE_ID,
+                NODE_ID,
+                TARGET_NODE_ID,
+                CanvasEdgeDirection::Forward,
+            ),
+        )
+        .unwrap();
+        CanvasDbService::update_edge_direction(
+            &connection,
+            UpdateCanvasEdgeDirectionInput {
+                id: EDGE_ID.into(),
+                direction: CanvasEdgeDirection::Bidirectional,
+                updated_at_ms: 44,
+            },
+        )
+        .unwrap();
+        CanvasDbService::update_edge_line_style(
+            &connection,
+            UpdateCanvasEdgeLineStyleInput {
+                id: EDGE_ID.into(),
+                line_style: CanvasEdgeLineStyle::Dotted,
+                updated_at_ms: 45,
+            },
+        )
+        .unwrap();
+
+        MigrationRunner::new(MIGRATIONS, SqliteBackupSnapshot)
+            .run(&mut connection, &backup_dir)
+            .unwrap();
+
+        let nodes = CanvasDbService::list_nodes(&connection, CANVAS_ID).unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(
+            nodes[0].content,
+            CanvasNodeContent::Text {
+                text: "Existing updated".into()
+            }
+        );
+        assert_eq!(
+            (
+                nodes[0].x,
+                nodes[0].y,
+                nodes[0].created_at_ms,
+                nodes[0].updated_at_ms
+            ),
+            (-44.5, 208.25, 20, 42)
+        );
+        assert_eq!(
+            CanvasDbService::get_canvas(&connection, CANVAS_ID)
+                .unwrap()
+                .viewport,
+            CanvasViewport {
+                x: 75.0,
+                y: -30.0,
+                zoom: 1.25
+            }
+        );
+        let edges = CanvasDbService::list_edges(&connection, CANVAS_ID).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(
+            (
+                &edges[0].source_node_id,
+                &edges[0].target_node_id,
+                &edges[0].relation_type
+            ),
+            (
+                &NODE_ID.to_string(),
+                &TARGET_NODE_ID.to_string(),
+                &"default".to_string()
+            )
+        );
+        assert_eq!(
+            (
+                edges[0].direction,
+                edges[0].line_style,
+                edges[0].deleted_at_ms
+            ),
+            (
+                CanvasEdgeDirection::Bidirectional,
+                CanvasEdgeLineStyle::Dotted,
+                None
+            )
+        );
+        assert!(connection
+            .query_row("PRAGMA foreign_key_check", [], |_| Ok(()))
+            .optional()
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+
+        CanvasDbService::create_text_node(
+            &connection,
+            CreateTextNodeInput {
+                id: "00000000-0000-4000-8000-000000000615".into(),
+                canvas_id: CANVAS_ID.into(),
+                content: CanvasNodeContent::Sticky {
+                    text: "After upgrade".into(),
+                },
+                x: 300.0,
+                y: 140.0,
+                created_at_ms: 50,
+            },
+        )
+        .unwrap();
+        drop(connection);
+        let reopened = open_existing_configured_connection(&database_path).unwrap();
+        let reopened_nodes = CanvasDbService::list_nodes(&reopened, CANVAS_ID).unwrap();
+        assert_eq!(reopened_nodes.len(), 3);
+        assert!(reopened_nodes.iter().any(|node| node.content
+            == CanvasNodeContent::Sticky {
+                text: "After upgrade".into()
+            }));
+        assert_eq!(
+            CanvasDbService::list_edges(&reopened, CANVAS_ID)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn migration_eight_failure_rolls_back_the_entire_table_rebuild() {
+        let sandbox = tempdir().unwrap();
+        let database_dir = sandbox.path().join("database");
+        let backup_dir = sandbox.path().join("backup");
+        fs::create_dir_all(&database_dir).unwrap();
+        fs::create_dir_all(&backup_dir).unwrap();
+        let database_path = database_dir.join("zhixing.db");
+        let mut connection = open_configured_connection(&database_path).unwrap();
+        MigrationRunner::new(&MIGRATIONS[..7], SqliteBackupSnapshot)
+            .run(&mut connection, &backup_dir)
+            .unwrap();
+        create_canvas(&connection);
+        create_node(&connection, NODE_ID, CANVAS_ID, "Existing");
+        create_node(&connection, TARGET_NODE_ID, CANVAS_ID, "Target");
+        CanvasDbService::create_edge(
+            &connection,
+            edge_input(
+                EDGE_ID,
+                NODE_ID,
+                TARGET_NODE_ID,
+                CanvasEdgeDirection::Forward,
+            ),
+        )
+        .unwrap();
+        let mut definitions = MIGRATIONS[..7].to_vec();
+        definitions.push(MigrationDefinition { version: 8, id: "0008_broken_rebuild", sql_up: "ALTER TABLE canvas_edges RENAME TO canvas_edges_v7; ALTER TABLE canvas_nodes RENAME TO canvas_nodes_v6; SELECT * FROM missing_table;", high_risk: true });
+        assert!(MigrationRunner::new(&definitions, SqliteBackupSnapshot)
+            .run(&mut connection, &backup_dir)
+            .is_err());
+        for table in ["canvas_nodes", "canvas_edges"] {
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                        [table],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                1
+            );
+        }
+        for temporary in ["canvas_nodes_v6", "canvas_edges_v7"] {
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                        [temporary],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            CanvasDbService::list_nodes(&connection, CANVAS_ID)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            CanvasDbService::list_edges(&connection, CANVAS_ID)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
     }
 
     #[test]
@@ -1600,6 +1977,45 @@ mod tests {
                 updated_at_ms: 50,
                 deleted_at_ms: None,
             }]
+        );
+    }
+
+    #[test]
+    fn sticky_node_is_typed_persisted_and_schema_rejects_unregistered_types() {
+        let (_sandbox, database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let sticky = CanvasDbService::create_text_node(
+            &connection,
+            CreateTextNodeInput {
+                id: NODE_ID.into(),
+                canvas_id: CANVAS_ID.into(),
+                content: CanvasNodeContent::Sticky {
+                    text: "Remember".into(),
+                },
+                x: 24.0,
+                y: -12.0,
+                created_at_ms: 20,
+            },
+        )
+        .unwrap();
+        assert_eq!(sticky.node_type, "sticky");
+        assert_eq!(
+            sticky.content,
+            CanvasNodeContent::Sticky {
+                text: "Remember".into()
+            }
+        );
+        assert!(connection.execute(
+            "INSERT INTO canvas_nodes(id, canvas_id, type, content_json, x, y, created_at_ms, updated_at_ms) VALUES(?1, ?2, 'image', '{\"type\":\"image\"}', 0, 0, 30, 30)",
+            params![TARGET_NODE_ID, CANVAS_ID],
+        ).is_err());
+        drop(connection);
+        let reopened = open_existing_configured_connection(&database_path).unwrap();
+        assert_eq!(
+            CanvasDbService::list_nodes(&reopened, CANVAS_ID).unwrap()[0].content,
+            CanvasNodeContent::Sticky {
+                text: "Remember".into()
+            }
         );
     }
 }

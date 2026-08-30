@@ -71,6 +71,13 @@ export class CanvasContractBackend implements CanvasRepository {
     return node
   }
 
+  async createCanvasNode(input: import('@/canvas/repository').CreateCanvasNodeInput): Promise<CanvasNode> {
+    await this.getCanvas(input.canvasId)
+    const node = { ...input, updatedAtMs: input.createdAtMs } as CanvasNode
+    this.nodes.set(node.id, node)
+    return node
+  }
+
   async listCanvasNodes(canvasId: string): Promise<readonly CanvasNode[]> {
     await this.getCanvas(canvasId)
     return [...this.nodes.values()].filter((node) => node.canvasId === canvasId)
@@ -79,7 +86,17 @@ export class CanvasContractBackend implements CanvasRepository {
   updateTextNode(input: UpdateTextNodeInput): Promise<CanvasNode> {
     const node = this.nodes.get(input.id)
     if (node === undefined) return Promise.reject(new CanvasRepositoryError('NOT_FOUND', 'updateTextNode'))
-    const updated = { ...node, content: input.content, updatedAtMs: input.updatedAtMs }
+    if (node.type !== 'text') return Promise.reject(new CanvasRepositoryError('PERSISTENCE_FAILED', 'updateTextNode'))
+    const updated: CanvasNode = { ...node, content: input.content, updatedAtMs: input.updatedAtMs }
+    this.nodes.set(input.id, updated)
+    return Promise.resolve(updated)
+  }
+
+  updateCanvasNodeContent(input: import('@/canvas/repository').UpdateCanvasNodeContentInput): Promise<CanvasNode> {
+    const node = this.nodes.get(input.id)
+    if (node === undefined) return Promise.reject(new CanvasRepositoryError('NOT_FOUND', 'updateCanvasNodeContent'))
+    if (node.type === 'unknown' || node.type !== input.type) return Promise.reject(new CanvasRepositoryError('PERSISTENCE_FAILED', 'updateCanvasNodeContent'))
+    const updated = { ...node, content: input.content, updatedAtMs: input.updatedAtMs } as CanvasNode
     this.nodes.set(input.id, updated)
     return Promise.resolve(updated)
   }
@@ -256,6 +273,16 @@ export function defineCanvasRepositoryContract(
       await expect(repository.listCanvasNodes(CONTRACT_CANVAS_ID)).resolves.toEqual([expect.objectContaining({ id: CONTRACT_NODE_ID })])
     })
 
+    test('creates, edits, moves, and lists sticky nodes with the same contract', async () => {
+      const { repository } = createFixture()
+      await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Canvas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+      const sticky = await repository.createCanvasNode({ id: CONTRACT_NODE_ID, canvasId: CONTRACT_CANVAS_ID, type: 'sticky', content: { type: 'sticky', text: 'Remember' }, x: 12, y: 24, createdAtMs: 20 })
+      expect(sticky).toMatchObject({ type: 'sticky', content: { type: 'sticky', text: 'Remember' } })
+      await expect(repository.updateCanvasNodeContent({ id: CONTRACT_NODE_ID, type: 'sticky', content: { type: 'sticky', text: 'Updated' }, updatedAtMs: 30 })).resolves.toMatchObject({ content: { type: 'sticky', text: 'Updated' } })
+      await expect(repository.moveCanvasNode({ id: CONTRACT_NODE_ID, x: -10, y: 45, updatedAtMs: 40 })).resolves.toMatchObject({ type: 'sticky', x: -10, y: 45 })
+      await expect(repository.listCanvasNodes(CONTRACT_CANVAS_ID)).resolves.toEqual([expect.objectContaining({ type: 'sticky' })])
+    })
+
     test('moves multiple nodes atomically within one Canvas', async () => {
       const { repository } = createFixture()
       await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
@@ -311,6 +338,20 @@ export function defineCanvasRepositoryContract(
       await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toEqual([])
       await expect(repository.deleteCanvasEdge({ id: CONTRACT_EDGE_ID, deletedAtMs: 70, updatedAtMs: 70 })).rejects.toMatchObject({ code: 'NOT_FOUND' })
       await expect(repository.createCanvasEdge({ id: '00000000-0000-4000-8000-000000000615', canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_TARGET_NODE_ID, relationType: 'default', direction: 'forward', lineStyle: 'dotted', createdAtMs: 80 })).resolves.toMatchObject({ lineStyle: 'dotted' })
+    })
+
+    test('connects text and sticky nodes in every supported pairing', async () => {
+      const { repository } = createFixture()
+      const secondStickyId = '00000000-0000-4000-8000-000000000616'
+      await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+      await repository.createCanvasNode({ id: CONTRACT_NODE_ID, canvasId: CONTRACT_CANVAS_ID, type: 'text', content: { type: 'text', text: 'Text' }, x: 1, y: 2, createdAtMs: 20 })
+      await repository.createCanvasNode({ id: CONTRACT_TARGET_NODE_ID, canvasId: CONTRACT_CANVAS_ID, type: 'sticky', content: { type: 'sticky', text: 'Sticky A' }, x: 3, y: 4, createdAtMs: 21 })
+      await repository.createCanvasNode({ id: secondStickyId, canvasId: CONTRACT_CANVAS_ID, type: 'sticky', content: { type: 'sticky', text: 'Sticky B' }, x: 5, y: 6, createdAtMs: 22 })
+
+      await expect(repository.createCanvasEdge({ id: CONTRACT_EDGE_ID, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_TARGET_NODE_ID, relationType: 'default', direction: 'forward', lineStyle: 'solid', createdAtMs: 30 })).resolves.toMatchObject({ sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_TARGET_NODE_ID })
+      await expect(repository.createCanvasEdge({ id: CONTRACT_REVERSE_EDGE_ID, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_TARGET_NODE_ID, targetNodeId: CONTRACT_NODE_ID, relationType: 'default', direction: 'forward', lineStyle: 'dashed', createdAtMs: 31 })).resolves.toMatchObject({ sourceNodeId: CONTRACT_TARGET_NODE_ID, targetNodeId: CONTRACT_NODE_ID })
+      await expect(repository.createCanvasEdge({ id: '00000000-0000-4000-8000-000000000617', canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_TARGET_NODE_ID, targetNodeId: secondStickyId, relationType: 'default', direction: 'forward', lineStyle: 'dotted', createdAtMs: 32 })).resolves.toMatchObject({ sourceNodeId: CONTRACT_TARGET_NODE_ID, targetNodeId: secondStickyId })
+      await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toHaveLength(3)
     })
 
     test('enforces directed and symmetric duplicate semantics', async () => {

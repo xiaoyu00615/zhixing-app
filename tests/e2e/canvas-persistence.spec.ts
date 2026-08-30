@@ -11,8 +11,10 @@ interface CanvasHarness {
   renameCanvas(input: object): Promise<unknown>
   updateCanvasViewport(input: object): Promise<unknown>
   createTextNode(input: object): Promise<unknown>
+  createCanvasNode(input: object): Promise<unknown>
   listCanvasNodes(canvasId: string): Promise<readonly Record<string, unknown>[]>
   updateTextNode(input: object): Promise<unknown>
+  updateCanvasNodeContent(input: object): Promise<unknown>
   moveCanvasNode(input: object): Promise<unknown>
   moveCanvasNodes(input: object): Promise<readonly Record<string, unknown>[]>
   createCanvasEdge(input: object): Promise<Record<string, unknown>>
@@ -72,7 +74,7 @@ test('persists Canvas nodes, viewport, and configured Edge in OPFS across restar
       }
       await harness.createCanvas({ id: canvasId, title: 'Canvas Restart', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
       await harness.createTextNode({ id: nodeId, canvasId, content: { type: 'text', text: 'first' }, x: 40, y: 80, createdAtMs: 20 })
-      await harness.createTextNode({ id: targetNodeId, canvasId, content: { type: 'text', text: 'second' }, x: 460, y: 180, createdAtMs: 21 })
+      await harness.createCanvasNode({ id: targetNodeId, canvasId, type: 'sticky', content: { type: 'sticky', text: 'second' }, x: 460, y: 180, createdAtMs: 21 })
       const created = await harness.createCanvasEdge({ id: edgeId, canvasId, sourceNodeId: nodeId, targetNodeId, relationType: 'default', direction: 'forward', lineStyle: 'solid', createdAtMs: 25 })
       if (created.direction !== 'forward' || created.lineStyle !== 'solid') throw new Error('Default Edge mismatch.')
       await expectFailure(harness.createCanvasEdge({ id: '00000000-0000-4000-8000-000000000605', canvasId, sourceNodeId: nodeId, targetNodeId, relationType: 'default', direction: 'forward', lineStyle: 'dotted', createdAtMs: 26 }), 'DUPLICATE')
@@ -92,6 +94,7 @@ test('persists Canvas nodes, viewport, and configured Edge in OPFS across restar
       await harness.updateCanvasEdgeDirection({ id: edgeId, direction: 'bidirectional', updatedAtMs: 35 })
       await harness.updateCanvasEdgeLineStyle({ id: edgeId, lineStyle: 'dashed', updatedAtMs: 36 })
       await harness.updateTextNode({ id: nodeId, content: { type: 'text', text: 'persisted text' }, updatedAtMs: 30 })
+      await harness.updateCanvasNodeContent({ id: targetNodeId, type: 'sticky', content: { type: 'sticky', text: 'persisted sticky' }, updatedAtMs: 31 })
       await harness.moveCanvasNodes({ canvasId, moves: [
         { nodeId, x: 240, y: -60 },
         { nodeId: targetNodeId, x: 560, y: 240 },
@@ -119,7 +122,7 @@ test('persists Canvas nodes, viewport, and configured Edge in OPFS across restar
     expect(restored.canvas).toMatchObject({ title: 'Canvas Restored', viewport: { x: 120, y: 48, zoom: 1.35 } })
     expect(restored.nodes).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: NODE_ID, content: { type: 'text', text: 'persisted text' }, x: 240, y: -60, updatedAtMs: 40 }),
-      expect.objectContaining({ id: TARGET_NODE_ID, x: 560, y: 240, updatedAtMs: 40 }),
+      expect.objectContaining({ id: TARGET_NODE_ID, type: 'sticky', content: { type: 'sticky', text: 'persisted sticky' }, x: 560, y: 240, updatedAtMs: 40 }),
     ]))
     expect(restored.edges).toEqual([expect.objectContaining({ id: EDGE_ID, canvasId: CANVAS_ID, sourceNodeId: NODE_ID, targetNodeId: TARGET_NODE_ID, relationType: 'default', direction: 'bidirectional', lineStyle: 'dashed', deletedAtMs: null })])
 

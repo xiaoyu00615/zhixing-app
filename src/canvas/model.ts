@@ -17,6 +17,19 @@ export interface TextNodeContent {
   readonly text: string
 }
 
+export interface StickyNodeContent {
+  readonly type: 'sticky'
+  readonly text: string
+}
+
+export interface UnknownNodeContent {
+  readonly type: 'unknown'
+  readonly raw: unknown
+}
+
+export type RegisteredCanvasNodeType = 'text' | 'sticky'
+export type RegisteredCanvasNodeContent = TextNodeContent | StickyNodeContent
+
 export interface CanvasTextNode {
   readonly id: string
   readonly canvasId: string
@@ -28,7 +41,30 @@ export interface CanvasTextNode {
   readonly updatedAtMs: number
 }
 
-export type CanvasNode = CanvasTextNode
+export interface CanvasStickyNode {
+  readonly id: string
+  readonly canvasId: string
+  readonly type: 'sticky'
+  readonly content: StickyNodeContent
+  readonly x: number
+  readonly y: number
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
+}
+
+export interface CanvasUnknownNode {
+  readonly id: string
+  readonly canvasId: string
+  readonly type: 'unknown'
+  readonly originalType: string
+  readonly content: UnknownNodeContent
+  readonly x: number
+  readonly y: number
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
+}
+
+export type CanvasNode = CanvasTextNode | CanvasStickyNode | CanvasUnknownNode
 
 export const CANVAS_EDGE_RELATION_TYPES = ['default'] as const
 export type CanvasEdgeRelationType =
@@ -138,6 +174,35 @@ export function isTextNodeContent(value: unknown): value is TextNodeContent {
   }
   const content = value as Record<string, unknown>
   return content.type === 'text' && typeof content.text === 'string'
+}
+
+export function isStickyNodeContent(value: unknown): value is StickyNodeContent {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const keys = Object.keys(value)
+  if (keys.length !== 2 || !keys.includes('type') || !keys.includes('text')) return false
+  const content = value as Record<string, unknown>
+  return content.type === 'sticky' && typeof content.text === 'string'
+}
+
+export function isRegisteredCanvasNodeContent(
+  value: unknown,
+): value is RegisteredCanvasNodeContent {
+  return isTextNodeContent(value) || isStickyNodeContent(value)
+}
+
+export function parseCanvasNodeContentJson(
+  nodeType: string,
+  value: unknown,
+): RegisteredCanvasNodeContent | UnknownNodeContent | null {
+  if (typeof value !== 'string') return null
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (nodeType === 'text') return isTextNodeContent(parsed) ? parsed : null
+    if (nodeType === 'sticky') return isStickyNodeContent(parsed) ? parsed : null
+    return { type: 'unknown', raw: parsed }
+  } catch {
+    return null
+  }
 }
 
 export function parseTextNodeContentJson(

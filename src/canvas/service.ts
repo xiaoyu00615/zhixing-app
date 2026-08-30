@@ -6,13 +6,15 @@ import {
   isCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
-  isTextNodeContent,
+  isRegisteredCanvasNodeContent,
   type Canvas,
   type CanvasEdge,
   type CanvasEdgeDirection,
   type CanvasEdgeLineStyle,
   type CanvasNode,
   type CanvasViewport,
+  type RegisteredCanvasNodeContent,
+  type RegisteredCanvasNodeType,
 } from '@/canvas/model'
 import {
   CanvasRepositoryError,
@@ -72,12 +74,19 @@ export interface CanvasService {
   renameCanvas(id: string, title: string): Promise<Canvas>
   openCanvas(id: string): Promise<CanvasWorkspace>
   updateViewport(id: string, viewport: CanvasViewport): Promise<Canvas>
-  createTextNode(
+  createCanvasNode(
     canvasId: string,
-    text: string,
+    type: RegisteredCanvasNodeType,
+    content: RegisteredCanvasNodeContent,
     position: { readonly x: number; readonly y: number },
   ): Promise<CanvasNode>
+  createTextNode(canvasId: string, text: string, position: { readonly x: number; readonly y: number }): Promise<CanvasNode>
   listCanvasNodes(canvasId: string): Promise<readonly CanvasNode[]>
+  updateCanvasNodeContent(
+    id: string,
+    type: RegisteredCanvasNodeType,
+    content: RegisteredCanvasNodeContent,
+  ): Promise<CanvasNode>
   editTextNode(id: string, text: string): Promise<CanvasNode>
   moveCanvasNode(id: string, x: number, y: number): Promise<CanvasNode>
   moveCanvasNodes(
@@ -222,17 +231,17 @@ export function createCanvasService({
         }),
       )
     },
-    async createTextNode(canvasId, text, position) {
+    async createCanvasNode(canvasId, type, content, position) {
       validateId(canvasId, 'canvasId')
       validatePosition(position.x, position.y)
-      const content = { type: 'text' as const, text }
-      if (!isTextNodeContent(content)) {
+      if (!isRegisteredCanvasNodeContent(content) || content.type !== type) {
         throw new CanvasApplicationError('VALIDATION', 'content')
       }
       return callRepository(() =>
-        repository.createTextNode({
+        repository.createCanvasNode({
           id: readGeneratedId(generateId),
           canvasId,
+          type,
           content,
           x: position.x,
           y: position.y,
@@ -240,23 +249,32 @@ export function createCanvasService({
         }),
       )
     },
+    async createTextNode(canvasId, text, position) {
+      validateId(canvasId, 'canvasId')
+      validatePosition(position.x, position.y)
+      return callRepository(() => repository.createTextNode({ id: readGeneratedId(generateId), canvasId, content: { type: 'text', text }, x: position.x, y: position.y, createdAtMs: readNowMs(nowMs) }))
+    },
     async listCanvasNodes(canvasId) {
       validateId(canvasId, 'canvasId')
       return callRepository(() => repository.listCanvasNodes(canvasId))
     },
-    async editTextNode(id, text) {
+    async updateCanvasNodeContent(id, type, content) {
       validateId(id, 'id')
-      const content = { type: 'text' as const, text }
-      if (!isTextNodeContent(content)) {
+      if (!isRegisteredCanvasNodeContent(content) || content.type !== type) {
         throw new CanvasApplicationError('VALIDATION', 'content')
       }
       return callRepository(() =>
-        repository.updateTextNode({
+        repository.updateCanvasNodeContent({
           id,
+          type,
           content,
           updatedAtMs: readNowMs(nowMs),
         }),
       )
+    },
+    async editTextNode(id, text) {
+      validateId(id, 'id')
+      return callRepository(() => repository.updateTextNode({ id, content: { type: 'text', text }, updatedAtMs: readNowMs(nowMs) }))
     },
     async moveCanvasNode(id, x, y) {
       validateId(id, 'id')

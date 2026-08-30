@@ -18,6 +18,7 @@ import type { CreateTagInput, RenameTagInput } from '@/tag/repository'
 import type {
   CreateCanvasInput,
   CreateCanvasEdgeInput,
+  CreateCanvasNodeInput,
   CreateTextNodeInput,
   DeleteCanvasEdgeInput,
   MoveCanvasNodeInput,
@@ -26,6 +27,7 @@ import type {
   UpdateCanvasViewportInput,
   UpdateCanvasEdgeDirectionInput,
   UpdateCanvasEdgeLineStyleInput,
+  UpdateCanvasNodeContentInput,
   UpdateTextNodeInput,
 } from '@/canvas/repository'
 import {
@@ -287,12 +289,16 @@ export class TaskWorkerClient {
     }))
   }
 
-  createTextNode(input: CreateTextNodeInput): Promise<unknown> {
+  createCanvasNode(input: CreateCanvasNodeInput): Promise<unknown> {
     return this.send((requestId) => ({
       requestId,
-      type: 'canvas.node.createText',
+      type: 'canvas.node.create',
       input,
     }))
+  }
+
+  createTextNode(input: CreateTextNodeInput): Promise<unknown> {
+    return this.send((requestId) => ({ requestId, type: 'canvas.node.createText', input }))
   }
 
   listCanvasNodes(canvasId: string): Promise<unknown> {
@@ -303,12 +309,16 @@ export class TaskWorkerClient {
     }))
   }
 
-  updateTextNode(input: UpdateTextNodeInput): Promise<unknown> {
+  updateCanvasNodeContent(input: UpdateCanvasNodeContentInput): Promise<unknown> {
     return this.send((requestId) => ({
       requestId,
-      type: 'canvas.node.updateText',
+      type: 'canvas.node.updateContent',
       input,
     }))
+  }
+
+  updateTextNode(input: UpdateTextNodeInput): Promise<unknown> {
+    return this.send((requestId) => ({ requestId, type: 'canvas.node.updateText', input }))
   }
 
   moveCanvasNode(input: MoveCanvasNodeInput): Promise<unknown> {

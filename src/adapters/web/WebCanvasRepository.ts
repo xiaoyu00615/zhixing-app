@@ -6,6 +6,7 @@ import {
   isCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
+  isStickyNodeContent,
   isTextNodeContent,
   type Canvas,
   type CanvasEdge,
@@ -17,6 +18,7 @@ import {
   type CanvasRepositoryOperation,
   type CreateCanvasEdgeInput,
   type CreateCanvasInput,
+  type CreateCanvasNodeInput,
   type CreateTextNodeInput,
   type MoveCanvasNodeInput,
   type MoveCanvasNodesInput,
@@ -25,6 +27,7 @@ import {
   type UpdateCanvasViewportInput,
   type UpdateCanvasEdgeDirectionInput,
   type UpdateCanvasEdgeLineStyleInput,
+  type UpdateCanvasNodeContentInput,
   type UpdateTextNodeInput,
 } from '@/canvas/repository'
 import { TaskWorkerClient, TaskWorkerClientError } from './taskWorkerClient'
@@ -66,8 +69,9 @@ function parseNode(
   if (
     !isCanonicalCanvasId(id) ||
     !isCanonicalCanvasId(canvasId) ||
-    type !== 'text' ||
-    !isTextNodeContent(content) ||
+    ((type === 'text' && !isTextNodeContent(content)) ||
+      (type === 'sticky' && !isStickyNodeContent(content)) ||
+      (type !== 'text' && type !== 'sticky' && typeof type !== 'string')) ||
     !isCanvasCoordinate(x) ||
     !isCanvasCoordinate(y) ||
     !isTimestamp(createdAtMs) ||
@@ -76,7 +80,10 @@ function parseNode(
   ) {
     throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
   }
-  return { id, canvasId, type, content, x, y, createdAtMs, updatedAtMs }
+  if (type === 'text' || type === 'sticky') {
+    return { id, canvasId, type, content, x, y, createdAtMs, updatedAtMs } as CanvasNode
+  }
+  return { id, canvasId, type: 'unknown', originalType: type, content: { type: 'unknown', raw: content }, x, y, createdAtMs, updatedAtMs }
 }
 
 function parseEdge(
@@ -239,23 +246,28 @@ export class WebCanvasRepository implements CanvasRepository {
     )
   }
 
-  async createTextNode(input: CreateTextNodeInput): Promise<CanvasNode> {
-    const operation = 'createTextNode'
+  async createCanvasNode(input: CreateCanvasNodeInput): Promise<CanvasNode> {
+    const operation = 'createCanvasNode'
     validateId(input.id, operation)
     validateId(input.canvasId, operation)
     validateTimestamp(input.createdAtMs, operation)
     if (
-      !isTextNodeContent(input.content) ||
+      input.content.type !== input.type ||
       !isCanvasCoordinate(input.x) ||
       !isCanvasCoordinate(input.y)
     ) {
       throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
     }
     try {
-      return parseNode(await this.#client.createTextNode(input), operation)
+      return parseNode(await this.#client.createCanvasNode(input), operation)
     } catch (error: unknown) {
       throw mapError(error, operation)
     }
+  }
+
+  createTextNode(input: CreateTextNodeInput): Promise<CanvasNode> {
+    const operation = 'createTextNode'
+    return this.#client.createTextNode(input).then((value) => parseNode(value, operation)).catch((error: unknown) => { throw mapError(error, operation) })
   }
 
   async listCanvasNodes(canvasId: string): Promise<readonly CanvasNode[]> {
@@ -272,18 +284,23 @@ export class WebCanvasRepository implements CanvasRepository {
     }
   }
 
-  async updateTextNode(input: UpdateTextNodeInput): Promise<CanvasNode> {
-    const operation = 'updateTextNode'
+  async updateCanvasNodeContent(input: UpdateCanvasNodeContentInput): Promise<CanvasNode> {
+    const operation = 'updateCanvasNodeContent'
     validateId(input.id, operation)
     validateTimestamp(input.updatedAtMs, operation)
-    if (!isTextNodeContent(input.content)) {
+    if (input.content.type !== input.type) {
       throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
     }
     try {
-      return parseNode(await this.#client.updateTextNode(input), operation)
+      return parseNode(await this.#client.updateCanvasNodeContent(input), operation)
     } catch (error: unknown) {
       throw mapError(error, operation)
     }
+  }
+
+  updateTextNode(input: UpdateTextNodeInput): Promise<CanvasNode> {
+    const operation = 'updateTextNode'
+    return this.#client.updateTextNode(input).then((value) => parseNode(value, operation)).catch((error: unknown) => { throw mapError(error, operation) })
   }
 
   async moveCanvasNode(input: MoveCanvasNodeInput): Promise<CanvasNode> {

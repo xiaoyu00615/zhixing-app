@@ -3,6 +3,7 @@ import { beforeEach, vi } from 'vitest'
 import { NativeCanvasRepository } from './canvasRepository'
 import type {
   CreateCanvasInput,
+  CreateCanvasNodeInput,
   CreateCanvasEdgeInput,
   CreateTextNodeInput,
   DeleteCanvasEdgeInput,
@@ -12,6 +13,7 @@ import type {
   UpdateCanvasEdgeDirectionInput,
   UpdateCanvasEdgeLineStyleInput,
   UpdateCanvasViewportInput,
+  UpdateCanvasNodeContentInput,
   UpdateTextNodeInput,
 } from '@/canvas/repository'
 import { CanvasContractBackend, defineCanvasRepositoryContract } from '@/test/canvasRepositoryContract'
@@ -32,8 +34,10 @@ defineCanvasRepositoryContract('NativeCanvasRepository', () => {
       case 'canvas_rename': return backend.renameCanvas(args?.input as RenameCanvasInput)
       case 'canvas_update_viewport': return backend.updateCanvasViewport(args?.input as UpdateCanvasViewportInput)
       case 'canvas_node_create_text': return backend.createTextNode(args?.input as CreateTextNodeInput)
+      case 'canvas_node_create': return backend.createCanvasNode(args?.input as CreateCanvasNodeInput)
       case 'canvas_node_list': return backend.listCanvasNodes((args?.input as { id: string }).id)
       case 'canvas_node_update_text': return backend.updateTextNode(args?.input as UpdateTextNodeInput)
+      case 'canvas_node_update_content': return backend.updateCanvasNodeContent(args?.input as UpdateCanvasNodeContentInput)
       case 'canvas_node_move': return backend.moveCanvasNode(args?.input as MoveCanvasNodeInput)
       case 'canvas_nodes_move': return backend.moveCanvasNodes(args?.input as MoveCanvasNodesInput)
       case 'canvas_edge_create': return backend.createCanvasEdge(args?.input as CreateCanvasEdgeInput)

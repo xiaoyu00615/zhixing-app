@@ -32,11 +32,13 @@ import {
   isCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
+  isStickyNodeContent,
   isTextNodeContent,
 } from '@/canvas/model'
 import type {
   CreateCanvasInput,
   CreateCanvasEdgeInput,
+  CreateCanvasNodeInput,
   CreateTextNodeInput,
   DeleteCanvasEdgeInput,
   MoveCanvasNodeInput,
@@ -45,6 +47,7 @@ import type {
   UpdateCanvasViewportInput,
   UpdateCanvasEdgeDirectionInput,
   UpdateCanvasEdgeLineStyleInput,
+  UpdateCanvasNodeContentInput,
   UpdateTextNodeInput,
 } from '@/canvas/repository'
 
@@ -174,9 +177,10 @@ export type TaskWorkerRequest =
     }
   | {
       readonly requestId: number
-      readonly type: 'canvas.node.createText'
-      readonly input: CreateTextNodeInput
+      readonly type: 'canvas.node.create'
+      readonly input: CreateCanvasNodeInput
     }
+  | { readonly requestId: number; readonly type: 'canvas.node.createText'; readonly input: CreateTextNodeInput }
   | {
       readonly requestId: number
       readonly type: 'canvas.node.list'
@@ -184,9 +188,10 @@ export type TaskWorkerRequest =
     }
   | {
       readonly requestId: number
-      readonly type: 'canvas.node.updateText'
-      readonly input: UpdateTextNodeInput
+      readonly type: 'canvas.node.updateContent'
+      readonly input: UpdateCanvasNodeContentInput
     }
+  | { readonly requestId: number; readonly type: 'canvas.node.updateText'; readonly input: UpdateTextNodeInput }
   | {
       readonly requestId: number
       readonly type: 'canvas.node.move'
@@ -362,12 +367,13 @@ function isCanvasUpdateBase(value: unknown): value is Record<string, unknown> & 
   )
 }
 
-function isCreateTextNodeInput(value: unknown): value is CreateTextNodeInput {
+function isCreateCanvasNodeInput(value: unknown): value is CreateCanvasNodeInput {
   return (
     isRecord(value) &&
     isCanonicalCanvasId(value.id) &&
     isCanonicalCanvasId(value.canvasId) &&
-    isTextNodeContent(value.content) &&
+    (isTextNodeContent(value.content) || isStickyNodeContent(value.content)) &&
+    value.type === value.content.type &&
     isCanvasCoordinate(value.x) &&
     isCanvasCoordinate(value.y) &&
     isCanvasTimestamp(value.createdAtMs)
@@ -590,9 +596,13 @@ export function parseTaskWorkerRequest(
             input: value.input as unknown as UpdateCanvasViewportInput,
           }
         : null
-    case 'canvas.node.createText':
-      return isCreateTextNodeInput(value.input)
+    case 'canvas.node.create':
+      return isCreateCanvasNodeInput(value.input)
         ? { requestId: value.requestId, type: value.type, input: value.input }
+        : null
+    case 'canvas.node.createText':
+      return isRecord(value.input) && isCreateCanvasNodeInput({ ...value.input, type: 'text' })
+        ? { requestId: value.requestId, type: value.type, input: value.input as unknown as CreateTextNodeInput }
         : null
     case 'canvas.node.list':
       return isCanonicalCanvasId(value.canvasId)
@@ -602,14 +612,19 @@ export function parseTaskWorkerRequest(
             canvasId: value.canvasId,
           }
         : null
-    case 'canvas.node.updateText':
+    case 'canvas.node.updateContent':
       return isCanvasUpdateBase(value.input) &&
-        isTextNodeContent(value.input.content)
+        (isTextNodeContent(value.input.content) || isStickyNodeContent(value.input.content)) &&
+        value.input.type === value.input.content.type
         ? {
             requestId: value.requestId,
             type: value.type,
-            input: value.input as unknown as UpdateTextNodeInput,
+            input: value.input as unknown as UpdateCanvasNodeContentInput,
           }
+        : null
+    case 'canvas.node.updateText':
+      return isCanvasUpdateBase(value.input) && isTextNodeContent(value.input.content)
+        ? { requestId: value.requestId, type: value.type, input: value.input as unknown as UpdateTextNodeInput }
         : null
     case 'canvas.node.move':
       return isCanvasUpdateBase(value.input) &&
