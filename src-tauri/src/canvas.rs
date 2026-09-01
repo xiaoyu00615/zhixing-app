@@ -17,7 +17,7 @@ const CANVAS_NODE_NAME_MAX_LENGTH: usize = 120;
 const CANVAS_COLUMNS: &str = "id, title, viewport_json, created_at_ms, updated_at_ms";
 const NODE_COLUMNS: &str =
     "id, canvas_id, type, node_name, content_json, x, y, created_at_ms, updated_at_ms";
-const EDGE_COLUMNS: &str = "id, canvas_id, source_node_id, target_node_id, relation_type, direction, line_style, created_at_ms, updated_at_ms, deleted_at_ms";
+const EDGE_COLUMNS: &str = "id, canvas_id, source_node_id, target_node_id, relation_type, direction, line_style, membership_position, created_at_ms, updated_at_ms, deleted_at_ms";
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub(crate) struct CanvasViewport {
@@ -39,6 +39,7 @@ pub(crate) struct CanvasRecord {
 pub(crate) enum CanvasNodeContent {
     Text { text: String },
     Sticky { text: String },
+    NodeBox,
     Unknown(Value),
 }
 
@@ -47,6 +48,7 @@ impl CanvasNodeContent {
         match self {
             Self::Text { .. } => "text",
             Self::Sticky { .. } => "sticky",
+            Self::NodeBox => "node_box",
             Self::Unknown(_) => "",
         }
     }
@@ -64,6 +66,7 @@ impl Serialize for CanvasNodeContent {
             Self::Sticky { text } => {
                 serde_json::json!({ "type": "sticky", "text": text }).serialize(serializer)
             }
+            Self::NodeBox => serde_json::json!({ "type": "node_box" }).serialize(serializer),
             Self::Unknown(value) => value.serialize(serializer),
         }
     }
@@ -77,6 +80,9 @@ impl<'de> Deserialize<'de> for CanvasNodeContent {
         let value = Value::deserialize(deserializer)?;
         let object = value.as_object();
         if let Some(object) = object {
+            if object.len() == 1 && object.get("type") == Some(&Value::String("node_box".into())) {
+                return Ok(Self::NodeBox);
+            }
             if object.len() == 2 {
                 if let (Some(Value::String(node_type)), Some(Value::String(text))) =
                     (object.get("type"), object.get("text"))
@@ -169,6 +175,7 @@ pub(crate) struct CanvasEdgeRecord {
     pub(crate) relation_type: String,
     pub(crate) direction: CanvasEdgeDirection,
     pub(crate) line_style: CanvasEdgeLineStyle,
+    pub(crate) membership_position: Option<i64>,
     pub(crate) created_at_ms: i64,
     pub(crate) updated_at_ms: i64,
     pub(crate) deleted_at_ms: Option<i64>,
@@ -264,6 +271,15 @@ pub(crate) struct CreateCanvasEdgeInput {
     pub(crate) created_at_ms: i64,
 }
 
+pub(crate) struct AddCanvasNodeBoxMemberInput {
+    pub(crate) id: String,
+    pub(crate) canvas_id: String,
+    pub(crate) source_node_id: String,
+    pub(crate) target_node_id: String,
+    pub(crate) relation_type: String,
+    pub(crate) created_at_ms: i64,
+}
+
 pub(crate) struct UpdateCanvasEdgeDirectionInput {
     pub(crate) id: String,
     pub(crate) direction: CanvasEdgeDirection,
@@ -356,6 +372,18 @@ fn validate_relation_type(relation_type: &str) -> Result<(), CanvasError> {
     }
 }
 
+fn is_membership_relation_type(relation_type: &str) -> bool {
+    matches!(relation_type, "ordered_box_member" | "unordered_box_member")
+}
+
+fn validate_membership_relation_type(relation_type: &str) -> Result<(), CanvasError> {
+    if is_membership_relation_type(relation_type) {
+        Ok(())
+    } else {
+        Err(CanvasError::PersistenceFailed)
+    }
+}
+
 fn validate_persisted_relation_type(relation_type: &str) -> Result<(), CanvasError> {
     if !relation_type.is_empty() && relation_type.trim() == relation_type {
         Ok(())
@@ -413,11 +441,13 @@ fn content_json(content: &CanvasNodeContent) -> Result<String, CanvasError> {
 
 fn parse_content(node_type: &str, source: &str) -> Result<CanvasNodeContent, CanvasError> {
     let value: Value = serde_json::from_str(source).map_err(|_| CanvasError::PersistenceFailed)?;
-    if !matches!(node_type, "text" | "sticky") {
+    if !matches!(node_type, "text" | "sticky" | "node_box") {
         return Ok(CanvasNodeContent::Unknown(value));
     }
     let object = value.as_object().ok_or(CanvasError::PersistenceFailed)?;
-    if object.len() != 2 || object.get("type") != Some(&Value::String(node_type.into())) {
+    let expected_len = if node_type == "node_box" { 1 } else { 2 };
+    if object.len() != expected_len || object.get("type") != Some(&Value::String(node_type.into()))
+    {
         return Err(CanvasError::PersistenceFailed);
     }
     let content: CanvasNodeContent =
@@ -484,7 +514,9 @@ fn validate_node(
     validate_position(x, y)?;
     validate_timestamp(created_at_ms)?;
     validate_timestamp(updated_at_ms)?;
-    if !matches!(node_type.as_str(), "text" | "sticky") || updated_at_ms < created_at_ms {
+    if !matches!(node_type.as_str(), "text" | "sticky" | "node_box")
+        || updated_at_ms < created_at_ms
+    {
         return Err(CanvasError::PersistenceFailed);
     }
     let content = parse_content(&node_type, &content_source)?;
@@ -509,6 +541,7 @@ type EdgeRow = (
     String,
     String,
     String,
+    Option<i64>,
     i64,
     i64,
     Option<i64>,
@@ -526,6 +559,7 @@ fn edge_from_row(row: &Row<'_>) -> rusqlite::Result<EdgeRow> {
         row.get(7)?,
         row.get(8)?,
         row.get(9)?,
+        row.get(10)?,
     ))
 }
 
@@ -538,6 +572,7 @@ fn validate_edge(raw: EdgeRow) -> Result<CanvasEdgeRecord, CanvasError> {
         relation_type,
         direction,
         line_style,
+        membership_position,
         created_at_ms,
         updated_at_ms,
         deleted_at_ms,
@@ -555,6 +590,16 @@ fn validate_edge(raw: EdgeRow) -> Result<CanvasEdgeRecord, CanvasError> {
     if source_node_id == target_node_id || updated_at_ms < created_at_ms {
         return Err(CanvasError::PersistenceFailed);
     }
+    if is_membership_relation_type(&relation_type) {
+        if membership_position.is_none_or(|position| position < 0)
+            || direction != "forward"
+            || line_style != "solid"
+        {
+            return Err(CanvasError::PersistenceFailed);
+        }
+    } else if membership_position.is_some() {
+        return Err(CanvasError::PersistenceFailed);
+    }
     Ok(CanvasEdgeRecord {
         id,
         canvas_id,
@@ -563,6 +608,7 @@ fn validate_edge(raw: EdgeRow) -> Result<CanvasEdgeRecord, CanvasError> {
         relation_type,
         direction: CanvasEdgeDirection::parse(&direction)?,
         line_style: CanvasEdgeLineStyle::parse(&line_style)?,
+        membership_position,
         created_at_ms,
         updated_at_ms,
         deleted_at_ms,
@@ -749,8 +795,8 @@ impl CanvasDbService {
         connection
             .execute(
                 "INSERT INTO canvas_nodes(\
-                    id, canvas_id, type, content_json, x, y, created_at_ms, updated_at_ms\
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                    id, canvas_id, type, node_name, content_json, x, y, created_at_ms, updated_at_ms\
+                 ) VALUES(?1, ?2, ?3, '', ?4, ?5, ?6, ?7, ?7)",
                 params![
                     input.id,
                     input.canvas_id,
@@ -818,7 +864,7 @@ impl CanvasDbService {
         let changed = connection
             .execute(
                 "UPDATE canvas_nodes SET node_name = ?1, updated_at_ms = ?2 \
-                 WHERE canvas_id = ?3 AND id = ?4 AND type IN ('text', 'sticky')",
+                 WHERE canvas_id = ?3 AND id = ?4 AND type IN ('text', 'sticky', 'node_box')",
                 params![
                     input.node_name,
                     input.updated_at_ms,
@@ -926,8 +972,8 @@ impl CanvasDbService {
             .execute(
                 "INSERT INTO canvas_edges(\
                     id, canvas_id, source_node_id, target_node_id, relation_type, direction, \
-                    line_style, created_at_ms, updated_at_ms, deleted_at_ms\
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, NULL)",
+                    line_style, membership_position, created_at_ms, updated_at_ms, deleted_at_ms\
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?8, NULL)",
                 params![
                     input.id,
                     input.canvas_id,
@@ -941,6 +987,80 @@ impl CanvasDbService {
             )
             .map_err(map_edge_write_error)?;
         Self::get_active_edge(connection, &input.id)
+    }
+
+    pub(crate) fn add_node_box_member(
+        connection: &Connection,
+        input: AddCanvasNodeBoxMemberInput,
+    ) -> Result<CanvasEdgeRecord, CanvasError> {
+        validate_id(&input.id)?;
+        validate_id(&input.canvas_id)?;
+        validate_id(&input.source_node_id)?;
+        validate_id(&input.target_node_id)?;
+        validate_membership_relation_type(&input.relation_type)?;
+        validate_timestamp(input.created_at_ms)?;
+        if input.source_node_id == input.target_node_id {
+            return Err(CanvasError::PersistenceFailed);
+        }
+
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|_| CanvasError::PersistenceFailed)?;
+        Self::get_canvas(&transaction, &input.canvas_id)?;
+        let source =
+            Self::get_node_in_canvas(&transaction, &input.canvas_id, &input.source_node_id)?;
+        let target =
+            Self::get_node_in_canvas(&transaction, &input.canvas_id, &input.target_node_id)?;
+        if source.node_type == "node_box" || target.node_type != "node_box" {
+            return Err(CanvasError::PersistenceFailed);
+        }
+        let duplicate = transaction
+            .query_row(
+                "SELECT EXISTS(\
+                    SELECT 1 FROM canvas_edges \
+                    WHERE canvas_id = ?1 AND source_node_id = ?2 AND target_node_id = ?3 \
+                      AND relation_type IN ('ordered_box_member', 'unordered_box_member') \
+                      AND deleted_at_ms IS NULL\
+                 )",
+                params![input.canvas_id, input.source_node_id, input.target_node_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|_| CanvasError::PersistenceFailed)?;
+        if duplicate {
+            return Err(CanvasError::Duplicate);
+        }
+        let membership_position = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(membership_position), -1) + 1 \
+                 FROM canvas_edges \
+                 WHERE canvas_id = ?1 AND target_node_id = ?2 AND relation_type = ?3 \
+                   AND deleted_at_ms IS NULL",
+                params![input.canvas_id, input.target_node_id, input.relation_type],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|_| CanvasError::PersistenceFailed)?;
+        transaction
+            .execute(
+                "INSERT INTO canvas_edges(\
+                    id, canvas_id, source_node_id, target_node_id, relation_type, direction, \
+                    line_style, membership_position, created_at_ms, updated_at_ms, deleted_at_ms\
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, 'forward', 'solid', ?6, ?7, ?7, NULL)",
+                params![
+                    input.id,
+                    input.canvas_id,
+                    input.source_node_id,
+                    input.target_node_id,
+                    input.relation_type,
+                    membership_position,
+                    input.created_at_ms,
+                ],
+            )
+            .map_err(map_edge_write_error)?;
+        let created = Self::get_active_edge(&transaction, &input.id)?;
+        transaction
+            .commit()
+            .map_err(|_| CanvasError::PersistenceFailed)?;
+        Ok(created)
     }
 
     pub(crate) fn list_edges(
@@ -969,7 +1089,10 @@ impl CanvasDbService {
     ) -> Result<CanvasEdgeRecord, CanvasError> {
         validate_id(&input.id)?;
         validate_timestamp(input.updated_at_ms)?;
-        Self::get_active_edge(connection, &input.id)?;
+        let current = Self::get_active_edge(connection, &input.id)?;
+        if is_membership_relation_type(&current.relation_type) {
+            return Err(CanvasError::PersistenceFailed);
+        }
         connection
             .execute(
                 "UPDATE canvas_edges SET direction = ?1, updated_at_ms = ?2 \
@@ -986,6 +1109,10 @@ impl CanvasDbService {
     ) -> Result<CanvasEdgeRecord, CanvasError> {
         validate_id(&input.id)?;
         validate_timestamp(input.updated_at_ms)?;
+        let current = Self::get_active_edge(connection, &input.id)?;
+        if is_membership_relation_type(&current.relation_type) {
+            return Err(CanvasError::PersistenceFailed);
+        }
         let changed = connection
             .execute(
                 "UPDATE canvas_edges SET line_style = ?1, updated_at_ms = ?2 \
@@ -1075,6 +1202,18 @@ impl CanvasDbService {
             .optional()
             .map_err(|_| CanvasError::PersistenceFailed)?
             .ok_or(CanvasError::NotFound)
+    }
+
+    fn get_node_in_canvas(
+        connection: &Connection,
+        canvas_id: &str,
+        node_id: &str,
+    ) -> Result<CanvasNodeRecord, CanvasError> {
+        let node = Self::get_node(connection, node_id)?;
+        if node.canvas_id != canvas_id {
+            return Err(CanvasError::NotFound);
+        }
+        Ok(node)
     }
 
     fn get_active_edge(connection: &Connection, id: &str) -> Result<CanvasEdgeRecord, CanvasError> {
@@ -1186,11 +1325,12 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(history.len(), 9);
+        assert_eq!(history.len(), 10);
         assert_eq!(history[5], (6, "0006_add_canvas_core".into()));
         assert_eq!(history[6], (7, "0007_add_canvas_edges".into()));
         assert_eq!(history[7], (8, "0008_add_sticky_canvas_nodes".into()));
         assert_eq!(history[8], (9, "0009_add_canvas_node_name".into()));
+        assert_eq!(history[9], (10, "0010_add_canvas_node_boxes".into()));
         for table in ["canvases", "canvas_nodes", "canvas_edges"] {
             let exists: i64 = connection
                 .query_row(
@@ -1218,6 +1358,7 @@ mod tests {
                 "relation_type",
                 "direction",
                 "line_style",
+                "membership_position",
                 "created_at_ms",
                 "updated_at_ms",
                 "deleted_at_ms",
@@ -1307,34 +1448,10 @@ mod tests {
             },
         )
         .unwrap();
-        CanvasDbService::create_edge(
-            &connection,
-            edge_input(
-                EDGE_ID,
-                NODE_ID,
-                TARGET_NODE_ID,
-                CanvasEdgeDirection::Forward,
-            ),
-        )
-        .unwrap();
-        CanvasDbService::update_edge_direction(
-            &connection,
-            UpdateCanvasEdgeDirectionInput {
-                id: EDGE_ID.into(),
-                direction: CanvasEdgeDirection::Bidirectional,
-                updated_at_ms: 44,
-            },
-        )
-        .unwrap();
-        CanvasDbService::update_edge_line_style(
-            &connection,
-            UpdateCanvasEdgeLineStyleInput {
-                id: EDGE_ID.into(),
-                line_style: CanvasEdgeLineStyle::Dotted,
-                updated_at_ms: 45,
-            },
-        )
-        .unwrap();
+        connection.execute(
+            "INSERT INTO canvas_edges(id, canvas_id, source_node_id, target_node_id, relation_type, direction, line_style, created_at_ms, updated_at_ms, deleted_at_ms) VALUES(?1, ?2, ?3, ?4, 'default', 'bidirectional', 'dotted', 30, 45, NULL)",
+            params![EDGE_ID, CANVAS_ID, NODE_ID, TARGET_NODE_ID],
+        ).unwrap();
 
         MigrationRunner::new(MIGRATIONS, SqliteBackupSnapshot)
             .run(&mut connection, &backup_dir)
@@ -1412,7 +1529,7 @@ mod tests {
                 .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),
-            9
+            10
         );
 
         CanvasDbService::create_text_node(
@@ -1460,16 +1577,10 @@ mod tests {
         create_canvas(&connection);
         create_node(&connection, NODE_ID, CANVAS_ID, "Existing");
         create_node(&connection, TARGET_NODE_ID, CANVAS_ID, "Target");
-        CanvasDbService::create_edge(
-            &connection,
-            edge_input(
-                EDGE_ID,
-                NODE_ID,
-                TARGET_NODE_ID,
-                CanvasEdgeDirection::Forward,
-            ),
-        )
-        .unwrap();
+        connection.execute(
+            "INSERT INTO canvas_edges(id, canvas_id, source_node_id, target_node_id, relation_type, direction, line_style, created_at_ms, updated_at_ms, deleted_at_ms) VALUES(?1, ?2, ?3, ?4, 'default', 'forward', 'solid', 30, 30, NULL)",
+            params![EDGE_ID, CANVAS_ID, NODE_ID, TARGET_NODE_ID],
+        ).unwrap();
         let mut definitions = MIGRATIONS[..7].to_vec();
         definitions.push(MigrationDefinition { version: 8, id: "0008_broken_rebuild", sql_up: "ALTER TABLE canvas_edges RENAME TO canvas_edges_v7; ALTER TABLE canvas_nodes RENAME TO canvas_nodes_v6; SELECT * FROM missing_table;", high_risk: true });
         assert!(MigrationRunner::new(&definitions, SqliteBackupSnapshot)
@@ -1510,9 +1621,13 @@ mod tests {
             2
         );
         assert_eq!(
-            CanvasDbService::list_edges(&connection, CANVAS_ID)
-                .unwrap()
-                .len(),
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM canvas_edges WHERE canvas_id = ?1",
+                    [CANVAS_ID],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
             1
         );
         assert_eq!(
@@ -1559,16 +1674,10 @@ mod tests {
                 rusqlite::params![TARGET_NODE_ID, CANVAS_ID],
             )
             .unwrap();
-        CanvasDbService::create_edge(
-            &connection,
-            edge_input(
-                EDGE_ID,
-                NODE_ID,
-                TARGET_NODE_ID,
-                CanvasEdgeDirection::Forward,
-            ),
-        )
-        .unwrap();
+        connection.execute(
+            "INSERT INTO canvas_edges(id, canvas_id, source_node_id, target_node_id, relation_type, direction, line_style, created_at_ms, updated_at_ms, deleted_at_ms) VALUES(?1, ?2, ?3, ?4, 'default', 'forward', 'solid', 30, 30, NULL)",
+            params![EDGE_ID, CANVAS_ID, NODE_ID, TARGET_NODE_ID],
+        ).unwrap();
         let checksums_before: Vec<(i64, String)> = connection
             .prepare("SELECT version, checksum_sha256 FROM schema_migrations ORDER BY version")
             .unwrap()
@@ -1649,6 +1758,284 @@ mod tests {
                 .unwrap(),
             "0009_add_canvas_node_name"
         );
+    }
+
+    #[test]
+    fn migration_ten_snapshots_and_preserves_exact_v9_canvas_data() {
+        let sandbox = tempdir().unwrap();
+        let database_dir = sandbox.path().join("database");
+        let backup_dir = sandbox.path().join("backup");
+        fs::create_dir_all(&database_dir).unwrap();
+        fs::create_dir_all(&backup_dir).unwrap();
+        let database_path = database_dir.join("zhixing.db");
+        let mut connection = open_configured_connection(&database_path).unwrap();
+        MigrationRunner::new(&MIGRATIONS[..9], SqliteBackupSnapshot)
+            .run(&mut connection, &backup_dir)
+            .unwrap();
+
+        create_canvas(&connection);
+        CanvasDbService::update_viewport(
+            &connection,
+            UpdateCanvasViewportInput {
+                id: CANVAS_ID.into(),
+                viewport: CanvasViewport {
+                    x: 91.5,
+                    y: -47.25,
+                    zoom: 1.35,
+                },
+                updated_at_ms: 15,
+            },
+        )
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO canvas_nodes(
+                id, canvas_id, type, node_name, content_json, x, y,
+                created_at_ms, updated_at_ms
+             ) VALUES(?1, ?2, 'text', 'Main concept',
+                      json_object('type', 'text', 'text', 'Body A'),
+                      -12.5, 48.25, 20, 41)",
+                params![NODE_ID, CANVAS_ID],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO canvas_nodes(
+                id, canvas_id, type, node_name, content_json, x, y,
+                created_at_ms, updated_at_ms
+             ) VALUES(?1, ?2, 'sticky', 'Reference',
+                      json_object('type', 'sticky', 'text', 'Body B'),
+                      300.75, -90.5, 21, 42)",
+                params![TARGET_NODE_ID, CANVAS_ID],
+            )
+            .unwrap();
+
+        let hierarchy_id = "00000000-0000-4000-8000-000000000605";
+        let peer_id = "00000000-0000-4000-8000-000000000606";
+        let unknown_id = "00000000-0000-4000-8000-000000000607";
+        for (id, relation_type, direction, line_style, created, updated, deleted) in [
+            (EDGE_ID, "default", "forward", "solid", 50_i64, 50_i64, None),
+            (
+                hierarchy_id,
+                "hierarchy",
+                "bidirectional",
+                "dashed",
+                51,
+                61,
+                None,
+            ),
+            (peer_id, "peer", "none", "dotted", 52, 62, None),
+            (
+                unknown_id,
+                "future_relation",
+                "bidirectional",
+                "dotted",
+                53,
+                73,
+                Some(73_i64),
+            ),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO canvas_edges(
+                    id, canvas_id, source_node_id, target_node_id, relation_type,
+                    direction, line_style, created_at_ms, updated_at_ms, deleted_at_ms
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        id,
+                        CANVAS_ID,
+                        NODE_ID,
+                        TARGET_NODE_ID,
+                        relation_type,
+                        direction,
+                        line_style,
+                        created,
+                        updated,
+                        deleted
+                    ],
+                )
+                .unwrap();
+        }
+        let history_before: Vec<(i64, String, String)> = connection
+            .prepare("SELECT version, id, checksum_sha256 FROM schema_migrations ORDER BY version")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        MigrationRunner::new(MIGRATIONS, SqliteBackupSnapshot)
+            .run(&mut connection, &backup_dir)
+            .unwrap();
+
+        let snapshot_path = fs::read_dir(&backup_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension().and_then(|extension| extension.to_str()) == Some("db")
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.contains("_v10_0010_add_canvas_node_boxes_"))
+            })
+            .expect("Migration 10 must create a safety snapshot");
+        let snapshot = Connection::open(snapshot_path).unwrap();
+        assert_eq!(
+            snapshot
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            9
+        );
+        assert_eq!(
+            snapshot
+                .query_row(
+                    "SELECT node_name FROM canvas_nodes WHERE id = ?1",
+                    [NODE_ID],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "Main concept"
+        );
+        assert_eq!(
+            snapshot.query_row("SELECT COUNT(*) FROM pragma_table_info('canvas_edges') WHERE name = 'membership_position'", [], |row| row.get::<_, i64>(0)).unwrap(),
+            0
+        );
+
+        let history_after: Vec<(i64, String, String)> = connection
+            .prepare("SELECT version, id, checksum_sha256 FROM schema_migrations WHERE version <= 9 ORDER BY version")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(history_after, history_before);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            10
+        );
+        assert_eq!(
+            CanvasDbService::get_canvas(&connection, CANVAS_ID)
+                .unwrap()
+                .viewport,
+            CanvasViewport {
+                x: 91.5,
+                y: -47.25,
+                zoom: 1.35
+            }
+        );
+        let nodes = CanvasDbService::list_nodes(&connection, CANVAS_ID).unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.iter().any(|node| {
+            node.id == NODE_ID
+                && node.node_name == "Main concept"
+                && node.content
+                    == CanvasNodeContent::Text {
+                        text: "Body A".into(),
+                    }
+                && (node.x, node.y, node.created_at_ms, node.updated_at_ms)
+                    == (-12.5, 48.25, 20, 41)
+        }));
+        assert!(nodes.iter().any(|node| {
+            node.id == TARGET_NODE_ID
+                && node.node_name == "Reference"
+                && node.content
+                    == CanvasNodeContent::Sticky {
+                        text: "Body B".into(),
+                    }
+                && (node.x, node.y, node.created_at_ms, node.updated_at_ms)
+                    == (300.75, -90.5, 21, 42)
+        }));
+        let edges: Vec<(
+            String,
+            String,
+            String,
+            String,
+            Option<i64>,
+            i64,
+            i64,
+            Option<i64>,
+        )> = connection
+            .prepare(
+                "SELECT id, relation_type, direction, line_style, membership_position,
+                             created_at_ms, updated_at_ms, deleted_at_ms
+                      FROM canvas_edges ORDER BY created_at_ms",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            edges,
+            [
+                (
+                    EDGE_ID.into(),
+                    "default".into(),
+                    "forward".into(),
+                    "solid".into(),
+                    None,
+                    50,
+                    50,
+                    None
+                ),
+                (
+                    hierarchy_id.into(),
+                    "hierarchy".into(),
+                    "bidirectional".into(),
+                    "dashed".into(),
+                    None,
+                    51,
+                    61,
+                    None
+                ),
+                (
+                    peer_id.into(),
+                    "peer".into(),
+                    "none".into(),
+                    "dotted".into(),
+                    None,
+                    52,
+                    62,
+                    None
+                ),
+                (
+                    unknown_id.into(),
+                    "future_relation".into(),
+                    "bidirectional".into(),
+                    "dotted".into(),
+                    None,
+                    53,
+                    73,
+                    Some(73)
+                ),
+            ]
+        );
+        assert_eq!(
+            connection.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('canvas_nodes_v9', 'canvas_edges_v9')", [], |row| row.get::<_, i64>(0)).unwrap(),
+            0
+        );
+        assert!(connection
+            .query_row("PRAGMA foreign_key_check", [], |_| Ok(()))
+            .optional()
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -2372,6 +2759,7 @@ mod tests {
                 relation_type: "default".into(),
                 direction: CanvasEdgeDirection::Bidirectional,
                 line_style: CanvasEdgeLineStyle::Dashed,
+                membership_position: None,
                 created_at_ms: 30,
                 updated_at_ms: 50,
                 deleted_at_ms: None,
@@ -2560,5 +2948,429 @@ mod tests {
                 && edge.direction == CanvasEdgeDirection::Bidirectional
                 && edge.line_style == CanvasEdgeLineStyle::Dotted
         }));
+    }
+
+    #[test]
+    fn node_box_membership_is_atomic_ordered_and_preserved_after_restart() {
+        let (_sandbox, database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        create_node(&connection, NODE_ID, CANVAS_ID, "Alpha");
+        create_node(&connection, TARGET_NODE_ID, CANVAS_ID, "Beta");
+        let third_node_id = "00000000-0000-4000-8000-000000000606";
+        create_node(&connection, third_node_id, CANVAS_ID, "Gamma");
+        let unordered_node_id = "00000000-0000-4000-8000-000000000611";
+        create_node(&connection, unordered_node_id, CANVAS_ID, "Delta");
+        let box_id = "00000000-0000-4000-8000-000000000607";
+        CanvasDbService::create_node(
+            &connection,
+            CreateCanvasNodeInput {
+                id: box_id.into(),
+                canvas_id: CANVAS_ID.into(),
+                node_type: "node_box".into(),
+                content: CanvasNodeContent::NodeBox,
+                x: 360.0,
+                y: 100.0,
+                created_at_ms: 40,
+            },
+        )
+        .unwrap();
+
+        let first = CanvasDbService::add_node_box_member(
+            &connection,
+            AddCanvasNodeBoxMemberInput {
+                id: EDGE_ID.into(),
+                canvas_id: CANVAS_ID.into(),
+                source_node_id: NODE_ID.into(),
+                target_node_id: box_id.into(),
+                relation_type: "ordered_box_member".into(),
+                created_at_ms: 50,
+            },
+        )
+        .unwrap();
+        let second_id = "00000000-0000-4000-8000-000000000608";
+        let second = CanvasDbService::add_node_box_member(
+            &connection,
+            AddCanvasNodeBoxMemberInput {
+                id: second_id.into(),
+                canvas_id: CANVAS_ID.into(),
+                source_node_id: TARGET_NODE_ID.into(),
+                target_node_id: box_id.into(),
+                relation_type: "ordered_box_member".into(),
+                created_at_ms: 51,
+            },
+        )
+        .unwrap();
+        assert_eq!(first.membership_position, Some(0));
+        assert_eq!(second.membership_position, Some(1));
+        assert_eq!(second.direction, CanvasEdgeDirection::Forward);
+        assert_eq!(second.line_style, CanvasEdgeLineStyle::Solid);
+        let unordered_id = "00000000-0000-4000-8000-000000000612";
+        let unordered = CanvasDbService::add_node_box_member(
+            &connection,
+            AddCanvasNodeBoxMemberInput {
+                id: unordered_id.into(),
+                canvas_id: CANVAS_ID.into(),
+                source_node_id: unordered_node_id.into(),
+                target_node_id: box_id.into(),
+                relation_type: "unordered_box_member".into(),
+                created_at_ms: 52,
+            },
+        )
+        .unwrap();
+        assert_eq!(unordered.membership_position, Some(0));
+        assert_eq!(
+            CanvasDbService::add_node_box_member(
+                &connection,
+                AddCanvasNodeBoxMemberInput {
+                    id: "00000000-0000-4000-8000-000000000609".into(),
+                    canvas_id: CANVAS_ID.into(),
+                    source_node_id: NODE_ID.into(),
+                    target_node_id: box_id.into(),
+                    relation_type: "unordered_box_member".into(),
+                    created_at_ms: 53,
+                },
+            ),
+            Err(CanvasError::Duplicate)
+        );
+
+        CanvasDbService::delete_edge(
+            &connection,
+            DeleteCanvasEdgeInput {
+                id: EDGE_ID.into(),
+                deleted_at_ms: 60,
+                updated_at_ms: 60,
+            },
+        )
+        .unwrap();
+        let readded_id = "00000000-0000-4000-8000-000000000613";
+        let readded = CanvasDbService::add_node_box_member(
+            &connection,
+            AddCanvasNodeBoxMemberInput {
+                id: readded_id.into(),
+                canvas_id: CANVAS_ID.into(),
+                source_node_id: NODE_ID.into(),
+                target_node_id: box_id.into(),
+                relation_type: "unordered_box_member".into(),
+                created_at_ms: 61,
+            },
+        )
+        .unwrap();
+        assert_eq!(readded.membership_position, Some(1));
+        let third = CanvasDbService::add_node_box_member(
+            &connection,
+            AddCanvasNodeBoxMemberInput {
+                id: "00000000-0000-4000-8000-000000000610".into(),
+                canvas_id: CANVAS_ID.into(),
+                source_node_id: third_node_id.into(),
+                target_node_id: box_id.into(),
+                relation_type: "ordered_box_member".into(),
+                created_at_ms: 62,
+            },
+        )
+        .unwrap();
+        assert_eq!(third.membership_position, Some(2));
+
+        drop(connection);
+        let reopened = open_existing_configured_connection(database_path).unwrap();
+        let members = CanvasDbService::list_edges(&reopened, CANVAS_ID).unwrap();
+        assert!(members.iter().all(|edge| edge.id != EDGE_ID));
+        assert!(members
+            .iter()
+            .any(|edge| { edge.id == second_id && edge.membership_position == Some(1) }));
+        assert!(members.iter().any(|edge| {
+            edge.id == "00000000-0000-4000-8000-000000000610" && edge.membership_position == Some(2)
+        }));
+        assert!(members
+            .iter()
+            .any(|edge| { edge.id == unordered_id && edge.membership_position == Some(0) }));
+        assert!(members
+            .iter()
+            .any(|edge| { edge.id == readded_id && edge.membership_position == Some(1) }));
+    }
+
+    #[test]
+    fn node_box_membership_rejects_box_sources_and_locked_presentation_changes() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        create_node(&connection, NODE_ID, CANVAS_ID, "Member");
+        let box_id = "00000000-0000-4000-8000-000000000607";
+        CanvasDbService::create_node(
+            &connection,
+            CreateCanvasNodeInput {
+                id: box_id.into(),
+                canvas_id: CANVAS_ID.into(),
+                node_type: "node_box".into(),
+                content: CanvasNodeContent::NodeBox,
+                x: 300.0,
+                y: 100.0,
+                created_at_ms: 40,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            CanvasDbService::add_node_box_member(
+                &connection,
+                AddCanvasNodeBoxMemberInput {
+                    id: EDGE_ID.into(),
+                    canvas_id: CANVAS_ID.into(),
+                    source_node_id: box_id.into(),
+                    target_node_id: NODE_ID.into(),
+                    relation_type: "ordered_box_member".into(),
+                    created_at_ms: 50,
+                },
+            ),
+            Err(CanvasError::PersistenceFailed)
+        );
+        assert_eq!(
+            CanvasDbService::add_node_box_member(
+                &connection,
+                AddCanvasNodeBoxMemberInput {
+                    id: "00000000-0000-4000-8000-000000000609".into(),
+                    canvas_id: CANVAS_ID.into(),
+                    source_node_id: box_id.into(),
+                    target_node_id: box_id.into(),
+                    relation_type: "unordered_box_member".into(),
+                    created_at_ms: 50,
+                },
+            ),
+            Err(CanvasError::PersistenceFailed)
+        );
+        let member = CanvasDbService::add_node_box_member(
+            &connection,
+            AddCanvasNodeBoxMemberInput {
+                id: EDGE_ID.into(),
+                canvas_id: CANVAS_ID.into(),
+                source_node_id: NODE_ID.into(),
+                target_node_id: box_id.into(),
+                relation_type: "unordered_box_member".into(),
+                created_at_ms: 50,
+            },
+        )
+        .unwrap();
+        assert_eq!(member.membership_position, Some(0));
+        assert_eq!(
+            CanvasDbService::update_edge_direction(
+                &connection,
+                UpdateCanvasEdgeDirectionInput {
+                    id: EDGE_ID.into(),
+                    direction: CanvasEdgeDirection::None,
+                    updated_at_ms: 60,
+                },
+            ),
+            Err(CanvasError::PersistenceFailed)
+        );
+        assert_eq!(
+            CanvasDbService::update_edge_line_style(
+                &connection,
+                UpdateCanvasEdgeLineStyleInput {
+                    id: EDGE_ID.into(),
+                    line_style: CanvasEdgeLineStyle::Dashed,
+                    updated_at_ms: 60,
+                },
+            ),
+            Err(CanvasError::PersistenceFailed)
+        );
+        assert!(connection
+            .execute(
+                "INSERT INTO canvas_edges(id, canvas_id, source_node_id, target_node_id, relation_type, direction, line_style, membership_position, created_at_ms, updated_at_ms) VALUES(?1, ?2, ?3, ?4, 'default', 'forward', 'solid', 0, 70, 70)",
+                params!["00000000-0000-4000-8000-000000000608", CANVAS_ID, NODE_ID, box_id],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn node_box_membership_schema_enforces_fields_and_active_uniques() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let member_a = "00000000-0000-4000-8000-000000000611";
+        let member_b = "00000000-0000-4000-8000-000000000612";
+        let member_c = "00000000-0000-4000-8000-000000000613";
+        for (id, name) in [(member_a, "A"), (member_b, "B"), (member_c, "C")] {
+            create_node(&connection, id, CANVAS_ID, name);
+        }
+        let box_id = "00000000-0000-4000-8000-000000000614";
+        CanvasDbService::create_node(
+            &connection,
+            CreateCanvasNodeInput {
+                id: box_id.into(),
+                canvas_id: CANVAS_ID.into(),
+                node_type: "node_box".into(),
+                content: CanvasNodeContent::NodeBox,
+                x: 300.0,
+                y: 100.0,
+                created_at_ms: 40,
+            },
+        )
+        .unwrap();
+        let insert = |id: &str,
+                      source: &str,
+                      relation: &str,
+                      direction: &str,
+                      style: &str,
+                      position: Option<i64>| {
+            connection.execute(
+                "INSERT INTO canvas_edges(
+                    id, canvas_id, source_node_id, target_node_id, relation_type,
+                    direction, line_style, membership_position, created_at_ms,
+                    updated_at_ms, deleted_at_ms
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 50, 50, NULL)",
+                params![id, CANVAS_ID, source, box_id, relation, direction, style, position],
+            )
+        };
+
+        let ordered_a = "00000000-0000-4000-8000-000000000615";
+        insert(
+            ordered_a,
+            member_a,
+            "ordered_box_member",
+            "forward",
+            "solid",
+            Some(0),
+        )
+        .unwrap();
+        assert!(insert(
+            "00000000-0000-4000-8000-000000000616",
+            member_b,
+            "ordered_box_member",
+            "bidirectional",
+            "solid",
+            Some(1)
+        )
+        .is_err());
+        assert!(insert(
+            "00000000-0000-4000-8000-000000000617",
+            member_b,
+            "unordered_box_member",
+            "forward",
+            "dashed",
+            Some(0)
+        )
+        .is_err());
+        assert!(insert(
+            "00000000-0000-4000-8000-000000000618",
+            member_b,
+            "ordered_box_member",
+            "forward",
+            "solid",
+            None
+        )
+        .is_err());
+        assert!(insert(
+            "00000000-0000-4000-8000-000000000619",
+            member_b,
+            "ordered_box_member",
+            "forward",
+            "solid",
+            Some(-1)
+        )
+        .is_err());
+
+        insert(
+            "00000000-0000-4000-8000-000000000620",
+            member_c,
+            "unordered_box_member",
+            "forward",
+            "solid",
+            Some(0),
+        )
+        .unwrap();
+        assert!(insert(
+            "00000000-0000-4000-8000-000000000621",
+            member_a,
+            "unordered_box_member",
+            "forward",
+            "solid",
+            Some(1)
+        )
+        .is_err());
+        assert!(insert(
+            "00000000-0000-4000-8000-000000000622",
+            member_b,
+            "ordered_box_member",
+            "forward",
+            "solid",
+            Some(0)
+        )
+        .is_err());
+        assert!(insert(
+            "00000000-0000-4000-8000-000000000623",
+            member_b,
+            "default",
+            "forward",
+            "solid",
+            Some(2)
+        )
+        .is_err());
+
+        connection
+            .execute(
+                "UPDATE canvas_edges SET deleted_at_ms = 60, updated_at_ms = 60 WHERE id = ?1",
+                [ordered_a],
+            )
+            .unwrap();
+        insert(
+            "00000000-0000-4000-8000-000000000624",
+            member_b,
+            "ordered_box_member",
+            "forward",
+            "solid",
+            Some(0),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn migration_ten_failure_rolls_back_node_and_edge_table_rebuilds() {
+        let sandbox = tempdir().unwrap();
+        let database_dir = sandbox.path().join("database");
+        let backup_dir = sandbox.path().join("backup");
+        fs::create_dir_all(&database_dir).unwrap();
+        fs::create_dir_all(&backup_dir).unwrap();
+        let database_path = database_dir.join("zhixing.db");
+        let mut connection = open_configured_connection(&database_path).unwrap();
+        MigrationRunner::new(&MIGRATIONS[..9], SqliteBackupSnapshot)
+            .run(&mut connection, &backup_dir)
+            .unwrap();
+        create_canvas(&connection);
+        create_node(&connection, NODE_ID, CANVAS_ID, "Existing");
+        let mut definitions = MIGRATIONS[..9].to_vec();
+        definitions.push(MigrationDefinition {
+            version: 10,
+            id: "0010_broken_node_boxes",
+            sql_up: "ALTER TABLE canvas_edges RENAME TO canvas_edges_v9; ALTER TABLE canvas_nodes RENAME TO canvas_nodes_v9; SELECT * FROM missing_table;",
+            high_risk: true,
+        });
+        assert!(MigrationRunner::new(&definitions, SqliteBackupSnapshot)
+            .run(&mut connection, &backup_dir)
+            .is_err());
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            9
+        );
+        for table in ["canvas_nodes", "canvas_edges"] {
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                        [table],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                1
+            );
+        }
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM canvas_nodes WHERE id = ?1",
+                    [NODE_ID],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
     }
 }

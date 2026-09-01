@@ -20,6 +20,8 @@ const ADD_STICKY_CANVAS_NODES_SQL: &str =
     include_str!("../../migrations/0008_add_sticky_canvas_nodes.sql");
 const ADD_CANVAS_NODE_NAME_SQL: &str =
     include_str!("../../migrations/0009_add_canvas_node_name.sql");
+const ADD_CANVAS_NODE_BOXES_SQL: &str =
+    include_str!("../../migrations/0010_add_canvas_node_boxes.sql");
 
 pub const MIGRATIONS: &[MigrationDefinition] = &[
     MigrationDefinition {
@@ -75,5 +77,11 @@ pub const MIGRATIONS: &[MigrationDefinition] = &[
         id: "0009_add_canvas_node_name",
         sql_up: ADD_CANVAS_NODE_NAME_SQL,
         high_risk: false,
+    },
+    MigrationDefinition {
+        version: 10,
+        id: "0010_add_canvas_node_boxes",
+        sql_up: ADD_CANVAS_NODE_BOXES_SQL,
+        high_risk: true,
     },
 ];

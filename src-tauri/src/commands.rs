@@ -4,12 +4,12 @@ use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 use crate::canvas::{
-    CanvasDbService, CanvasEdgeDirection, CanvasEdgeLineStyle, CanvasEdgeRecord, CanvasError,
-    CanvasNodeContent, CanvasNodePositionMove, CanvasNodeRecord, CanvasRecord, CanvasViewport,
-    CreateCanvasEdgeInput, CreateCanvasInput, CreateCanvasNodeInput, DeleteCanvasEdgeInput,
-    MoveCanvasNodeInput, MoveCanvasNodesInput, RenameCanvasInput, RenameCanvasNodeInput,
-    UpdateCanvasEdgeDirectionInput, UpdateCanvasEdgeLineStyleInput, UpdateCanvasNodeContentInput,
-    UpdateCanvasViewportInput,
+    AddCanvasNodeBoxMemberInput, CanvasDbService, CanvasEdgeDirection, CanvasEdgeLineStyle,
+    CanvasEdgeRecord, CanvasError, CanvasNodeContent, CanvasNodePositionMove, CanvasNodeRecord,
+    CanvasRecord, CanvasViewport, CreateCanvasEdgeInput, CreateCanvasInput, CreateCanvasNodeInput,
+    DeleteCanvasEdgeInput, MoveCanvasNodeInput, MoveCanvasNodesInput, RenameCanvasInput,
+    RenameCanvasNodeInput, UpdateCanvasEdgeDirectionInput, UpdateCanvasEdgeLineStyleInput,
+    UpdateCanvasNodeContentInput, UpdateCanvasViewportInput,
 };
 use crate::project::{
     CreateProjectInput, ProjectDbService, ProjectError, ProjectRecord, RenameProjectInput,
@@ -827,6 +827,17 @@ pub(crate) struct CreateCanvasEdgeDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct AddCanvasNodeBoxMemberDto {
+    id: String,
+    canvas_id: String,
+    source_node_id: String,
+    target_node_id: String,
+    relation_type: String,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct UpdateCanvasEdgeDirectionDto {
     id: String,
     direction: CanvasEdgeDirection,
@@ -869,6 +880,7 @@ pub(crate) struct CanvasEdgeDto {
     relation_type: String,
     direction: CanvasEdgeDirection,
     line_style: CanvasEdgeLineStyle,
+    membership_position: Option<i64>,
     created_at_ms: i64,
     updated_at_ms: i64,
     deleted_at_ms: Option<i64>,
@@ -884,6 +896,7 @@ impl From<CanvasEdgeRecord> for CanvasEdgeDto {
             relation_type: edge.relation_type,
             direction: edge.direction,
             line_style: edge.line_style,
+            membership_position: edge.membership_position,
             created_at_ms: edge.created_at_ms,
             updated_at_ms: edge.updated_at_ms,
             deleted_at_ms: edge.deleted_at_ms,
@@ -1148,6 +1161,28 @@ pub(crate) fn canvas_edge_create(
 }
 
 #[tauri::command]
+pub(crate) fn canvas_node_box_add_member(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: AddCanvasNodeBoxMemberDto,
+) -> Result<CanvasEdgeDto, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::add_node_box_member(
+        &connection,
+        AddCanvasNodeBoxMemberInput {
+            id: input.id,
+            canvas_id: input.canvas_id,
+            source_node_id: input.source_node_id,
+            target_node_id: input.target_node_id,
+            relation_type: input.relation_type,
+            created_at_ms: input.created_at_ms,
+        },
+    )
+    .map(CanvasEdgeDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
 pub(crate) fn canvas_edge_list(
     app: tauri::AppHandle,
     runtime_status: tauri::State<'_, RuntimeStatus>,
@@ -1368,6 +1403,7 @@ mod tests {
             relation_type: "default".into(),
             direction: CanvasEdgeDirection::Bidirectional,
             line_style: CanvasEdgeLineStyle::Dashed,
+            membership_position: None,
             created_at_ms: 50,
             updated_at_ms: 60,
             deleted_at_ms: None,
@@ -1382,6 +1418,7 @@ mod tests {
                 "relationType": "default",
                 "direction": "bidirectional",
                 "lineStyle": "dashed",
+                "membershipPosition": null,
                 "createdAtMs": 50,
                 "updatedAtMs": 60,
                 "deletedAtMs": null

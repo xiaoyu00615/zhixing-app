@@ -5,6 +5,9 @@ import {
   isCanvasEdgeDirection,
   isCanvasEdgeLineStyle,
   isCanvasEdgeRelationType,
+  isCanvasMembershipRelationType,
+  isCanvasOrdinaryEdgeRelationType,
+  isNodeBoxContent,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
   isPersistedCanvasNodeName,
@@ -51,6 +54,12 @@ describe('Canvas domain validation', () => {
     expect(parseCanvasNodeContentJson('future', '{"type":"future","value":1}')).toEqual({ type: 'unknown', raw: { type: 'future', value: 1 } })
   })
 
+  test('accepts only the exact Node Box payload', () => {
+    expect(isNodeBoxContent({ type: 'node_box' })).toBe(true)
+    expect(isNodeBoxContent({ type: 'node_box', title: 'extra' })).toBe(false)
+    expect(parseCanvasNodeContentJson('node_box', '{"type":"node_box"}')).toEqual({ type: 'node_box' })
+  })
+
   test('requires finite world coordinates', () => {
     expect(isCanvasCoordinate(-123.5)).toBe(true)
     expect(isCanvasCoordinate(Number.NaN)).toBe(false)
@@ -61,7 +70,11 @@ describe('Canvas domain validation', () => {
     expect(isCanvasEdgeRelationType('default')).toBe(true)
     expect(isCanvasEdgeRelationType('hierarchy')).toBe(true)
     expect(isCanvasEdgeRelationType('peer')).toBe(true)
-    expect(isCanvasEdgeRelationType('ordered_box_member')).toBe(false)
+    expect(isCanvasEdgeRelationType('ordered_box_member')).toBe(true)
+    expect(isCanvasEdgeRelationType('unordered_box_member')).toBe(true)
+    expect(isCanvasMembershipRelationType('ordered_box_member')).toBe(true)
+    expect(isCanvasOrdinaryEdgeRelationType('ordered_box_member')).toBe(false)
+    expect(isCanvasOrdinaryEdgeRelationType('hierarchy')).toBe(true)
     expect(isCanvasEdgeRelationType('dependency')).toBe(false)
     expect(isCanvasEdgeDirection('forward')).toBe(true)
     expect(isCanvasEdgeDirection('bidirectional')).toBe(true)

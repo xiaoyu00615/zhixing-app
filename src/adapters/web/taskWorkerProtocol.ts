@@ -29,15 +29,18 @@ import {
   isCanvasCoordinate,
   isCanvasEdgeDirection,
   isCanvasEdgeLineStyle,
-  isCanvasEdgeRelationType,
+  isCanvasMembershipRelationType,
+  isCanvasOrdinaryEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
   isPersistedCanvasNodeName,
   isStickyNodeContent,
   isTextNodeContent,
+  isNodeBoxContent,
 } from '@/canvas/model'
 import type {
   CreateCanvasInput,
+  AddCanvasNodeBoxMemberInput,
   CreateCanvasEdgeInput,
   CreateCanvasNodeInput,
   CreateTextNodeInput,
@@ -217,6 +220,11 @@ export type TaskWorkerRequest =
     }
   | {
       readonly requestId: number
+      readonly type: 'canvas.nodeBox.addMember'
+      readonly input: AddCanvasNodeBoxMemberInput
+    }
+  | {
+      readonly requestId: number
       readonly type: 'canvas.edge.list'
       readonly canvasId: string
     }
@@ -385,7 +393,9 @@ function isCreateCanvasNodeInput(value: unknown): value is CreateCanvasNodeInput
     isRecord(value) &&
     isCanonicalCanvasId(value.id) &&
     isCanonicalCanvasId(value.canvasId) &&
-    (isTextNodeContent(value.content) || isStickyNodeContent(value.content)) &&
+    (isTextNodeContent(value.content) ||
+      isStickyNodeContent(value.content) ||
+      isNodeBoxContent(value.content)) &&
     value.type === value.content.type &&
     isCanvasCoordinate(value.x) &&
     isCanvasCoordinate(value.y) &&
@@ -403,9 +413,24 @@ function isCreateCanvasEdgeInput(
     isCanonicalCanvasId(value.sourceNodeId) &&
     isCanonicalCanvasId(value.targetNodeId) &&
     value.sourceNodeId !== value.targetNodeId &&
-    isCanvasEdgeRelationType(value.relationType) &&
+    isCanvasOrdinaryEdgeRelationType(value.relationType) &&
     isCanvasEdgeDirection(value.direction) &&
     isCanvasEdgeLineStyle(value.lineStyle) &&
+    isCanvasTimestamp(value.createdAtMs)
+  )
+}
+
+function isAddCanvasNodeBoxMemberInput(
+  value: unknown,
+): value is AddCanvasNodeBoxMemberInput {
+  return (
+    isRecord(value) &&
+    isCanonicalCanvasId(value.id) &&
+    isCanonicalCanvasId(value.canvasId) &&
+    isCanonicalCanvasId(value.sourceNodeId) &&
+    isCanonicalCanvasId(value.targetNodeId) &&
+    value.sourceNodeId !== value.targetNodeId &&
+    isCanvasMembershipRelationType(value.relationType) &&
     isCanvasTimestamp(value.createdAtMs)
   )
 }
@@ -667,6 +692,10 @@ export function parseTaskWorkerRequest(
       return isCreateCanvasEdgeInput(value.input)
         ? { requestId: value.requestId, type: value.type, input: value.input }
         : null
+    case 'canvas.nodeBox.addMember':
+      return isAddCanvasNodeBoxMemberInput(value.input)
+        ? { requestId: value.requestId, type: value.type, input: value.input }
+        : null
     case 'canvas.edge.list':
       return isCanonicalCanvasId(value.canvasId)
         ? {
@@ -695,7 +724,7 @@ export function parseTaskWorkerRequest(
         : null
     case 'canvas.edge.setRelationType':
       return isCanvasUpdateBase(value.input) &&
-        isCanvasEdgeRelationType(value.input.relationType) &&
+        isCanvasOrdinaryEdgeRelationType(value.input.relationType) &&
         isCanvasEdgeDirection(value.input.direction) &&
         isCanvasEdgeLineStyle(value.input.lineStyle)
         ? {

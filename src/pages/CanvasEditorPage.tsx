@@ -15,16 +15,16 @@ import {
   type Viewport,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { ArrowLeft, Plus, RotateCcw } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { ArrowLeft, ListOrdered, Plus, RotateCcw, Rows3 } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 
 import { CanvasEdgeToolbar } from '@/components/canvas/CanvasEdgeToolbar'
 import { Button } from '@/components/ui/button'
-import type { Canvas, CanvasEdge, CanvasNode } from '@/canvas/model'
-import type { RegisteredCanvasNodeType } from '@/canvas/model'
+import type { Canvas, CanvasEdge, CanvasMembershipRelationType, CanvasNode } from '@/canvas/model'
+import type { CanvasOrdinaryEdgeRelationType, RegisteredCanvasNodeType } from '@/canvas/model'
 import { getCanvasEdgeTypeDefinition, UNKNOWN_CANVAS_EDGE_RENDER } from '@/canvas/edgeRegistry'
-import { canvasNodeRegistry, toCanvasFlowNode, type CanvasFlowNode } from '@/canvas/nodeRegistry'
+import { canvasNodeRegistry, toCanvasFlowNode, withCanvasNodeRuntimeData, type CanvasFlowNode } from '@/canvas/nodeRegistry'
 import { openCanvasRuntime } from '@/canvas/runtime'
 import type { OpenCanvasRuntime } from '@/canvas/runtime.types'
 import type { CanvasService } from '@/canvas/service'
@@ -56,6 +56,11 @@ function toFlowEdge(edge: CanvasEdge, selected: boolean): Edge {
     selected,
     markerStart: edge.direction === 'bidirectional' ? marker : undefined,
     markerEnd: edge.direction === 'none' ? undefined : marker,
+    label: edge.relationType === 'ordered_box_member'
+      ? String((edge.membershipPosition ?? 0) + 1)
+      : edge.relationType === 'unordered_box_member'
+        ? '−'
+        : undefined,
     style: {
       stroke: selected ? render.selectedStroke : render.stroke,
       strokeWidth: selected ? 2.2 : 1.8,
@@ -96,13 +101,14 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
   const commitNodeContent = useCallback(async (id: string, type: RegisteredCanvasNodeType, text: string) => {
     const currentService = serviceRef.current
     if (currentService === null) return
+    if (type === 'node_box') return
     try {
       const content = type === 'text'
         ? { type: 'text' as const, text }
         : { type: 'sticky' as const, text }
       const updated = await currentService.updateCanvasNodeContent(id, type, content)
       setFlowNodes((nodes) => nodes.map((node) => node.id === id
-        ? { ...node, data: { ...node.data, text: updated.type === 'unknown' ? text : updated.content.text } }
+        ? { ...node, data: { ...node.data, text: updated.type === 'text' || updated.type === 'sticky' ? updated.content.text : text } }
         : node))
       setFeedback('文字已保存')
     } catch {
@@ -486,7 +492,7 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
 
   async function changeEdgeRelationType(
     edge: CanvasEdge,
-    relationType: import('@/canvas/model').CanvasEdgeRelationType,
+    relationType: CanvasOrdinaryEdgeRelationType,
   ): Promise<void> {
     if (service === null || relationType === edge.relationType) return
     setEdgeBusy(true)
@@ -508,7 +514,7 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
     }
   }
 
-  async function removeEdge(edge: CanvasEdge): Promise<void> {
+  const removeEdge = useCallback(async (edge: CanvasEdge): Promise<void> => {
     if (service === null) return
     setEdgeBusy(true)
     try {
@@ -518,6 +524,52 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
       setFeedback('连线已删除')
     } catch {
       setFeedback('连线删除失败，请重试。')
+    } finally {
+      setEdgeBusy(false)
+    }
+  }, [service])
+
+  const removeMembership = useCallback((edgeId: string) => {
+    const edge = canvasEdges.find((item) => item.id === edgeId)
+    if (edge !== undefined) void removeEdge(edge)
+  }, [canvasEdges, removeEdge])
+
+  const displayNodes = useMemo(
+    () => withCanvasNodeRuntimeData(flowNodes, canvasEdges, removeMembership),
+    [canvasEdges, flowNodes, removeMembership],
+  )
+
+  const membershipPair = useMemo(() => {
+    const selected = flowNodes.filter((node) => node.selected)
+    if (selected.length !== 2) return null
+    const box = selected.find((node) => node.type === 'nodeBoxCanvas')
+    const member = selected.find((node) => node.type !== 'nodeBoxCanvas')
+    if (box === undefined || member === undefined || member.type === 'unsupportedCanvas') {
+      return null
+    }
+    return { memberId: member.id, boxId: box.id }
+  }, [flowNodes])
+
+  async function addMembership(
+    relationType: CanvasMembershipRelationType,
+  ): Promise<void> {
+    if (service === null || canvas === null || membershipPair === null) return
+    setEdgeBusy(true)
+    try {
+      const created = await service.addNodeBoxMember(
+        canvas.id,
+        membershipPair.memberId,
+        membershipPair.boxId,
+        relationType,
+      )
+      setCanvasEdges((edges) => [...edges, created])
+      setFeedback(relationType === 'ordered_box_member' ? '已加入有序成员' : '已加入无序成员')
+    } catch (error: unknown) {
+      setFeedback(
+        error instanceof Error && 'code' in error && error.code === 'CONFLICT'
+          ? '该节点已经属于此节点盒。'
+          : '成员添加失败，请重试。',
+      )
     } finally {
       setEdgeBusy(false)
     }
@@ -532,11 +584,11 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
     <div className="relative -m-6 h-[calc(100vh-3.5rem)] min-h-[620px] overflow-hidden bg-[#f6f5f1]">
       <div className="absolute inset-x-0 top-0 z-10 flex h-16 items-center justify-between border-b border-border/75 bg-surface/92 px-5 shadow-sm backdrop-blur-sm">
         <div className="flex min-w-0 items-center gap-3"><Button size="icon-sm" variant="ghost" aria-label="返回画布列表" onClick={() => void leaveCanvas()}><ArrowLeft /></Button><div className="min-w-0"><h2 className="truncate text-base font-semibold">{canvas.title}</h2><p className="text-[11px] text-foreground-tertiary">文字画布 · 自动保存</p></div></div>
-        <div className="flex items-center gap-2"><Button size="sm" variant="outline" onClick={() => void addNode('text')}><Plus />文字节点</Button><Button size="sm" onClick={() => void addNode('sticky')}><Plus />便签节点</Button></div>
+        <div className="flex items-center gap-2"><Button size="sm" variant="outline" onClick={() => void addNode('text')}><Plus />文字节点</Button><Button size="sm" variant="outline" onClick={() => void addNode('sticky')}><Plus />便签节点</Button><Button size="sm" onClick={() => void addNode('node_box')}><Plus />节点盒</Button></div>
       </div>
       <ReactFlow<CanvasFlowNode>
         className="pt-16"
-        nodes={flowNodes}
+        nodes={displayNodes}
         edges={canvasEdges.map((edge) =>
           toFlowEdge(edge, edge.id === selectedEdgeId),
         )}
@@ -570,6 +622,13 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
         <Background color="#d4d1c8" gap={24} size={1} />
         <Controls position="bottom-right" showInteractive={false} />
       </ReactFlow>
+      {membershipPair !== null && (
+        <div className="absolute left-1/2 top-20 z-20 flex -translate-x-1/2 items-center gap-2 rounded-xl border border-border/80 bg-surface/95 p-2 shadow-lg backdrop-blur-sm" aria-label="节点盒成员操作">
+          <span className="px-1 text-xs text-foreground-secondary">将所选节点加入节点盒</span>
+          <Button disabled={edgeBusy} size="sm" variant="outline" onClick={() => void addMembership('ordered_box_member')}><ListOrdered />有序</Button>
+          <Button disabled={edgeBusy} size="sm" variant="outline" onClick={() => void addMembership('unordered_box_member')}><Rows3 />无序</Button>
+        </div>
+      )}
       {selectedEdgeId !== null && (() => {
         const selectedEdge = canvasEdges.find((edge) => edge.id === selectedEdgeId)
         return selectedEdge === undefined ? null : (

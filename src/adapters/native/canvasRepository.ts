@@ -5,6 +5,9 @@ import {
   isCanvasCoordinate,
   isCanvasEdgeDirection,
   isCanvasEdgeLineStyle,
+  isCanvasMembershipRelationType,
+  isCanvasMembershipPosition,
+  isNodeBoxContent,
   isPersistedCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
@@ -20,6 +23,7 @@ import {
   type CanvasRepository,
   type CanvasRepositoryOperation,
   type CreateCanvasInput,
+  type AddCanvasNodeBoxMemberInput,
   type CreateCanvasEdgeInput,
   type CreateCanvasNodeInput,
   type CreateTextNodeInput,
@@ -77,7 +81,8 @@ function parseNode(
     !isPersistedCanvasNodeName(nodeName) ||
     ((type === 'text' && !isTextNodeContent(content)) ||
       (type === 'sticky' && !isStickyNodeContent(content)) ||
-      (type !== 'text' && type !== 'sticky' && typeof type !== 'string')) ||
+      (type === 'node_box' && !isNodeBoxContent(content)) ||
+      (type !== 'text' && type !== 'sticky' && type !== 'node_box' && typeof type !== 'string')) ||
     !isCanvasCoordinate(x) ||
     !isCanvasCoordinate(y) ||
     !isTimestamp(createdAtMs) ||
@@ -86,7 +91,7 @@ function parseNode(
   ) {
     throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
   }
-  if (type === 'text' || type === 'sticky') {
+  if (type === 'text' || type === 'sticky' || type === 'node_box') {
     return { id, canvasId, type, nodeName, content, x, y, createdAtMs, updatedAtMs } as CanvasNode
   }
   return { id, canvasId, type: 'unknown', originalType: type, nodeName, content: { type: 'unknown', raw: content }, x, y, createdAtMs, updatedAtMs }
@@ -107,6 +112,7 @@ function parseEdge(
     relationType,
     direction,
     lineStyle,
+    membershipPosition,
     createdAtMs,
     updatedAtMs,
     deletedAtMs,
@@ -120,6 +126,10 @@ function parseEdge(
     !isPersistedCanvasEdgeRelationType(relationType) ||
     !isCanvasEdgeDirection(direction) ||
     !isCanvasEdgeLineStyle(lineStyle) ||
+    !isCanvasMembershipPosition(membershipPosition) ||
+    (isCanvasMembershipRelationType(relationType)
+      ? membershipPosition === null
+      : membershipPosition !== null) ||
     !isTimestamp(createdAtMs) ||
     !isTimestamp(updatedAtMs) ||
     updatedAtMs < createdAtMs ||
@@ -135,6 +145,7 @@ function parseEdge(
     relationType,
     direction,
     lineStyle,
+    membershipPosition,
     createdAtMs,
     updatedAtMs,
     deletedAtMs,
@@ -271,6 +282,19 @@ export class NativeCanvasRepository implements CanvasRepository {
     return parseEdge(
       await invokeCanvas('canvas_edge_create', 'createCanvasEdge', { input }),
       'createCanvasEdge',
+    )
+  }
+
+  async addCanvasNodeBoxMember(
+    input: AddCanvasNodeBoxMemberInput,
+  ): Promise<CanvasEdge> {
+    return parseEdge(
+      await invokeCanvas(
+        'canvas_node_box_add_member',
+        'addCanvasNodeBoxMember',
+        { input },
+      ),
+      'addCanvasNodeBoxMember',
     )
   }
 

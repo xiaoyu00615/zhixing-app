@@ -17,6 +17,8 @@ export interface CanvasEdgeTypeDefinition {
   readonly displayName: string
   readonly defaultDirection: CanvasEdgeDirection
   readonly defaultLineStyle: CanvasEdgeLineStyle
+  readonly ordinarySelectable: boolean
+  readonly presentationLocked: boolean
   readonly render: CanvasEdgeRenderConfig
 }
 
@@ -26,6 +28,8 @@ const definitions = [
     displayName: '普通关系',
     defaultDirection: 'forward',
     defaultLineStyle: 'solid',
+    ordinarySelectable: true,
+    presentationLocked: false,
     render: {
       stroke: '#7b8495',
       selectedStroke: 'var(--color-primary)',
@@ -37,6 +41,8 @@ const definitions = [
     displayName: '上下级',
     defaultDirection: 'forward',
     defaultLineStyle: 'solid',
+    ordinarySelectable: true,
+    presentationLocked: false,
     render: {
       stroke: '#667085',
       selectedStroke: 'var(--color-primary)',
@@ -48,10 +54,38 @@ const definitions = [
     displayName: '同级',
     defaultDirection: 'none',
     defaultLineStyle: 'solid',
+    ordinarySelectable: true,
+    presentationLocked: false,
     render: {
       stroke: '#7b8495',
       selectedStroke: 'var(--color-primary)',
       markerSize: 16,
+    },
+  },
+  {
+    relationType: 'ordered_box_member',
+    displayName: '有序成员',
+    defaultDirection: 'forward',
+    defaultLineStyle: 'solid',
+    ordinarySelectable: false,
+    presentationLocked: true,
+    render: {
+      stroke: '#8c7a59',
+      selectedStroke: 'var(--color-primary)',
+      markerSize: 14,
+    },
+  },
+  {
+    relationType: 'unordered_box_member',
+    displayName: '无序成员',
+    defaultDirection: 'forward',
+    defaultLineStyle: 'solid',
+    ordinarySelectable: false,
+    presentationLocked: true,
+    render: {
+      stroke: '#8c7a59',
+      selectedStroke: 'var(--color-primary)',
+      markerSize: 14,
     },
   },
 ] as const satisfies readonly CanvasEdgeTypeDefinition[]

@@ -3,7 +3,8 @@ import {
   isCanvasCoordinate,
   isCanvasEdgeDirection,
   isCanvasEdgeLineStyle,
-  isCanvasEdgeRelationType,
+  isCanvasMembershipRelationType,
+  isCanvasOrdinaryEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
   isRegisteredCanvasNodeContent,
@@ -13,6 +14,8 @@ import {
   type CanvasEdgeDirection,
   type CanvasEdgeLineStyle,
   type CanvasNode,
+  type CanvasMembershipRelationType,
+  type CanvasOrdinaryEdgeRelationType,
   type CanvasViewport,
   type RegisteredCanvasNodeContent,
   type RegisteredCanvasNodeType,
@@ -110,6 +113,12 @@ export interface CanvasService {
     sourceNodeId: string,
     targetNodeId: string,
   ): Promise<CanvasEdge>
+  addNodeBoxMember(
+    canvasId: string,
+    sourceNodeId: string,
+    targetNodeId: string,
+    relationType: CanvasMembershipRelationType,
+  ): Promise<CanvasEdge>
   listCanvasEdges(canvasId: string): Promise<readonly CanvasEdge[]>
   updateCanvasEdgeDirection(
     id: string,
@@ -121,7 +130,7 @@ export interface CanvasService {
   ): Promise<CanvasEdge>
   updateCanvasEdgeRelationType(
     id: string,
-    relationType: import('@/canvas/model').CanvasEdgeRelationType,
+    relationType: CanvasOrdinaryEdgeRelationType,
   ): Promise<CanvasEdge>
   deleteCanvasEdge(id: string): Promise<CanvasEdge>
 }
@@ -362,9 +371,46 @@ export function createCanvasService({
           canvasId,
           sourceNodeId,
           targetNodeId,
-          relationType: definition.relationType,
+          relationType: 'default',
           direction: definition.defaultDirection,
           lineStyle: definition.defaultLineStyle,
+          createdAtMs: readNowMs(nowMs),
+        }),
+      )
+    },
+    async addNodeBoxMember(
+      canvasId,
+      sourceNodeId,
+      targetNodeId,
+      relationType,
+    ) {
+      validateId(canvasId, 'canvasId')
+      validateId(sourceNodeId, 'sourceNodeId')
+      validateId(targetNodeId, 'targetNodeId')
+      if (
+        sourceNodeId === targetNodeId ||
+        !isCanvasMembershipRelationType(relationType)
+      ) {
+        throw new CanvasApplicationError('VALIDATION', 'relationType')
+      }
+      const nodes = await callRepository(() =>
+        repository.listCanvasNodes(canvasId),
+      )
+      const source = nodes.find((node) => node.id === sourceNodeId)
+      const target = nodes.find((node) => node.id === targetNodeId)
+      if (source === undefined || target === undefined) {
+        throw new CanvasApplicationError('NOT_FOUND')
+      }
+      if (source.type === 'node_box' || target.type !== 'node_box') {
+        throw new CanvasApplicationError('VALIDATION', 'relationType')
+      }
+      return callRepository(() =>
+        repository.addCanvasNodeBoxMember({
+          id: readGeneratedId(generateId),
+          canvasId,
+          sourceNodeId,
+          targetNodeId,
+          relationType,
           createdAtMs: readNowMs(nowMs),
         }),
       )
@@ -401,7 +447,7 @@ export function createCanvasService({
     },
     updateCanvasEdgeRelationType(id, relationType) {
       validateId(id, 'id')
-      if (!isCanvasEdgeRelationType(relationType)) {
+      if (!isCanvasOrdinaryEdgeRelationType(relationType)) {
         throw new CanvasApplicationError('VALIDATION', 'relationType')
       }
       const definition = canvasEdgeRegistry.byRelationType.get(relationType)!

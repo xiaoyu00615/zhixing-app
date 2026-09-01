@@ -22,13 +22,20 @@ export interface StickyNodeContent {
   readonly text: string
 }
 
+export interface NodeBoxContent {
+  readonly type: 'node_box'
+}
+
 export interface UnknownNodeContent {
   readonly type: 'unknown'
   readonly raw: unknown
 }
 
-export type RegisteredCanvasNodeType = 'text' | 'sticky'
-export type RegisteredCanvasNodeContent = TextNodeContent | StickyNodeContent
+export type RegisteredCanvasNodeType = 'text' | 'sticky' | 'node_box'
+export type RegisteredCanvasNodeContent =
+  | TextNodeContent
+  | StickyNodeContent
+  | NodeBoxContent
 export const CANVAS_NODE_NAME_MAX_LENGTH = 120
 
 export interface CanvasTextNode {
@@ -55,6 +62,18 @@ export interface CanvasStickyNode {
   readonly updatedAtMs: number
 }
 
+export interface CanvasNodeBoxNode {
+  readonly id: string
+  readonly canvasId: string
+  readonly type: 'node_box'
+  readonly nodeName: string
+  readonly content: NodeBoxContent
+  readonly x: number
+  readonly y: number
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
+}
+
 export interface CanvasUnknownNode {
   readonly id: string
   readonly canvasId: string
@@ -68,15 +87,36 @@ export interface CanvasUnknownNode {
   readonly updatedAtMs: number
 }
 
-export type CanvasNode = CanvasTextNode | CanvasStickyNode | CanvasUnknownNode
+export type CanvasNode =
+  | CanvasTextNode
+  | CanvasStickyNode
+  | CanvasNodeBoxNode
+  | CanvasUnknownNode
 
 export const CANVAS_EDGE_RELATION_TYPES = [
   'default',
   'hierarchy',
   'peer',
+  'ordered_box_member',
+  'unordered_box_member',
 ] as const
 export type CanvasEdgeRelationType =
   (typeof CANVAS_EDGE_RELATION_TYPES)[number]
+
+export const CANVAS_ORDINARY_EDGE_RELATION_TYPES = [
+  'default',
+  'hierarchy',
+  'peer',
+] as const
+export type CanvasOrdinaryEdgeRelationType =
+  (typeof CANVAS_ORDINARY_EDGE_RELATION_TYPES)[number]
+
+export const CANVAS_MEMBERSHIP_RELATION_TYPES = [
+  'ordered_box_member',
+  'unordered_box_member',
+] as const
+export type CanvasMembershipRelationType =
+  (typeof CANVAS_MEMBERSHIP_RELATION_TYPES)[number]
 
 declare const UNKNOWN_CANVAS_EDGE_RELATION_TYPE: unique symbol
 export type UnknownCanvasEdgeRelationType = string & {
@@ -104,6 +144,7 @@ export interface CanvasEdge {
   readonly relationType: PersistedCanvasEdgeRelationType
   readonly direction: CanvasEdgeDirection
   readonly lineStyle: CanvasEdgeLineStyle
+  readonly membershipPosition: number | null
   readonly createdAtMs: number
   readonly updatedAtMs: number
   readonly deletedAtMs: number | null
@@ -141,6 +182,28 @@ export function isCanvasEdgeRelationType(
   )
 }
 
+export function isCanvasOrdinaryEdgeRelationType(
+  value: unknown,
+): value is CanvasOrdinaryEdgeRelationType {
+  return (
+    typeof value === 'string' &&
+    CANVAS_ORDINARY_EDGE_RELATION_TYPES.includes(
+      value as CanvasOrdinaryEdgeRelationType,
+    )
+  )
+}
+
+export function isCanvasMembershipRelationType(
+  value: unknown,
+): value is CanvasMembershipRelationType {
+  return (
+    typeof value === 'string' &&
+    CANVAS_MEMBERSHIP_RELATION_TYPES.includes(
+      value as CanvasMembershipRelationType,
+    )
+  )
+}
+
 export function isPersistedCanvasEdgeRelationType(
   value: unknown,
 ): value is PersistedCanvasEdgeRelationType {
@@ -162,6 +225,15 @@ export function isCanvasEdgeLineStyle(
   return (
     typeof value === 'string' &&
     CANVAS_EDGE_LINE_STYLES.includes(value as CanvasEdgeLineStyle)
+  )
+}
+
+export function isCanvasMembershipPosition(
+  value: unknown,
+): value is number | null {
+  return (
+    value === null ||
+    (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
   )
 }
 
@@ -217,10 +289,23 @@ export function isStickyNodeContent(value: unknown): value is StickyNodeContent 
   return content.type === 'sticky' && typeof content.text === 'string'
 }
 
+export function isNodeBoxContent(value: unknown): value is NodeBoxContent {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false
+  }
+  const keys = Object.keys(value)
+  const content = value as Record<string, unknown>
+  return keys.length === 1 && keys[0] === 'type' && content.type === 'node_box'
+}
+
 export function isRegisteredCanvasNodeContent(
   value: unknown,
 ): value is RegisteredCanvasNodeContent {
-  return isTextNodeContent(value) || isStickyNodeContent(value)
+  return (
+    isTextNodeContent(value) ||
+    isStickyNodeContent(value) ||
+    isNodeBoxContent(value)
+  )
 }
 
 export function parseCanvasNodeContentJson(
@@ -232,6 +317,7 @@ export function parseCanvasNodeContentJson(
     const parsed: unknown = JSON.parse(value)
     if (nodeType === 'text') return isTextNodeContent(parsed) ? parsed : null
     if (nodeType === 'sticky') return isStickyNodeContent(parsed) ? parsed : null
+    if (nodeType === 'node_box') return isNodeBoxContent(parsed) ? parsed : null
     return { type: 'unknown', raw: parsed }
   } catch {
     return null

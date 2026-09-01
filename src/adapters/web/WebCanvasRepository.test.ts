@@ -37,6 +37,7 @@ class CanvasWorker implements TaskWorkerEndpoint {
       case 'canvas.node.move': return this.backend.moveCanvasNode(request.input)
       case 'canvas.nodes.move': return this.backend.moveCanvasNodes(request.input)
       case 'canvas.edge.create': return this.backend.createCanvasEdge(request.input)
+      case 'canvas.nodeBox.addMember': return this.backend.addCanvasNodeBoxMember(request.input)
       case 'canvas.edge.list': return this.backend.listCanvasEdges(request.canvasId)
       case 'canvas.edge.setDirection': return this.backend.updateCanvasEdgeDirection(request.input)
       case 'canvas.edge.setLineStyle': return this.backend.updateCanvasEdgeLineStyle(request.input)
@@ -72,7 +73,33 @@ test('Canvas Edge Worker messages remain capability-specific and strictly parsed
   }
   expect(parseTaskWorkerRequest(validCreate)).toEqual(validCreate)
   expect(parseTaskWorkerRequest({ ...validCreate, input: { ...validCreate.input, direction: 'reverse' } })).toBeNull()
+  expect(parseTaskWorkerRequest({
+    ...validCreate,
+    input: { ...validCreate.input, relationType: 'ordered_box_member' },
+  })).toBeNull()
   expect(parseTaskWorkerRequest({ requestId: 2, type: 'canvas.edge.execute', sql: 'DELETE' })).toBeNull()
+
+  const validMembership = {
+    requestId: 3,
+    type: 'canvas.nodeBox.addMember',
+    input: {
+      id: '00000000-0000-4000-8000-000000000607',
+      canvasId: validCreate.input.canvasId,
+      sourceNodeId: validCreate.input.sourceNodeId,
+      targetNodeId: validCreate.input.targetNodeId,
+      relationType: 'ordered_box_member',
+      createdAtMs: 11,
+    },
+  }
+  expect(parseTaskWorkerRequest(validMembership)).toEqual(validMembership)
+  expect(parseTaskWorkerRequest({
+    ...validMembership,
+    input: { ...validMembership.input, relationType: 'default' },
+  })).toBeNull()
+  expect(parseTaskWorkerRequest({
+    ...validMembership,
+    input: { ...validMembership.input, targetNodeId: validMembership.input.sourceNodeId },
+  })).toBeNull()
 
   const semanticUpdate = {
     requestId: 2,

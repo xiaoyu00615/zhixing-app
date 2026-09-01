@@ -13,6 +13,7 @@ const edge: CanvasEdge = {
   relationType: 'default',
   direction: 'forward',
   lineStyle: 'solid',
+  membershipPosition: null,
   createdAtMs: 10,
   updatedAtMs: 10,
   deletedAtMs: null,
@@ -54,6 +55,18 @@ describe('CanvasEdgeToolbar', () => {
     await userEvent.click(screen.getByRole('button', { name: '点线' }))
     expect(callbacks.onDirectionChange).toHaveBeenCalledWith('bidirectional')
     expect(callbacks.onLineStyleChange).toHaveBeenCalledWith('dotted')
+  })
+
+  test('keeps membership presentation locked and out of the ordinary selector', () => {
+    renderToolbar({
+      ...edge,
+      relationType: 'ordered_box_member',
+      membershipPosition: 0,
+    })
+    expect(screen.getByText('有序成员')).toBeInTheDocument()
+    expect(screen.getByText('成员关系的方向与线型固定，由节点盒维护。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '双向' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '点线' })).not.toBeInTheDocument()
   })
 
   test('renders unknown semantics neutrally and keeps the semantic selector read-only', () => {

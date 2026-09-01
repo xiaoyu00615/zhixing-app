@@ -8,14 +8,16 @@ import {
 import type { PersistedCanvasEdgeRelationType } from '@/canvas/model'
 
 describe('canvasEdgeRegistry', () => {
-  test('registers only the three active semantic types with their defaults', () => {
+  test('registers ordinary and locked membership semantics separately', () => {
     expect(canvasEdgeRegistry.definitions).toEqual([
       expect.objectContaining({ relationType: 'default', displayName: '普通关系', defaultDirection: 'forward', defaultLineStyle: 'solid' }),
       expect.objectContaining({ relationType: 'hierarchy', displayName: '上下级', defaultDirection: 'forward', defaultLineStyle: 'solid' }),
       expect.objectContaining({ relationType: 'peer', displayName: '同级', defaultDirection: 'none', defaultLineStyle: 'solid' }),
+      expect.objectContaining({ relationType: 'ordered_box_member', ordinarySelectable: false, presentationLocked: true }),
+      expect.objectContaining({ relationType: 'unordered_box_member', ordinarySelectable: false, presentationLocked: true }),
     ])
-    expect(canvasEdgeRegistry.byRelationType.has('ordered_box_member' as never)).toBe(false)
-    expect(canvasEdgeRegistry.byRelationType.has('unordered_box_member' as never)).toBe(false)
+    expect(canvasEdgeRegistry.byRelationType.has('ordered_box_member')).toBe(true)
+    expect(canvasEdgeRegistry.byRelationType.has('unordered_box_member')).toBe(true)
   })
 
   test('provides render metadata and a neutral unknown fallback without semantic normalization', () => {

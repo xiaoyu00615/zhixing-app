@@ -4,14 +4,14 @@ import type {
   CanvasEdge,
   CanvasEdgeDirection,
   CanvasEdgeLineStyle,
-  CanvasEdgeRelationType,
+  CanvasOrdinaryEdgeRelationType,
 } from '@/canvas/model'
 import { getCanvasEdgeTypeDefinition, canvasEdgeRegistry } from '@/canvas/edgeRegistry'
 
 interface CanvasEdgeToolbarProps {
   readonly edge: CanvasEdge
   readonly busy: boolean
-  readonly onRelationTypeChange: (relationType: CanvasEdgeRelationType) => void
+  readonly onRelationTypeChange: (relationType: CanvasOrdinaryEdgeRelationType) => void
   readonly onDirectionChange: (direction: CanvasEdgeDirection) => void
   readonly onLineStyleChange: (lineStyle: CanvasEdgeLineStyle) => void
   readonly onDelete: () => void
@@ -46,6 +46,7 @@ export function CanvasEdgeToolbar({
   onDelete,
 }: CanvasEdgeToolbarProps) {
   const definition = getCanvasEdgeTypeDefinition(edge.relationType)
+  const locked = definition?.presentationLocked === true
   return (
     <aside
       aria-label="连线设置"
@@ -70,7 +71,7 @@ export function CanvasEdgeToolbar({
         </span>
       </div>
 
-      <fieldset className="mt-4" disabled={busy || definition === null}>
+      <fieldset className="mt-4" disabled={busy || definition === null || locked}>
         <legend className="mb-2 text-xs font-medium text-foreground-secondary">
           关系类型
         </legend>
@@ -80,7 +81,7 @@ export function CanvasEdgeToolbar({
           </div>
         ) : (
           <div className="grid grid-cols-3 gap-1 rounded-xl bg-surface-secondary p-1">
-            {canvasEdgeRegistry.definitions.map((item) => (
+            {canvasEdgeRegistry.definitions.filter((item) => item.ordinarySelectable).map((item) => (
               <button
                 aria-pressed={edge.relationType === item.relationType}
                 className={`h-9 rounded-lg text-xs font-medium transition ${
@@ -99,7 +100,13 @@ export function CanvasEdgeToolbar({
         )}
       </fieldset>
 
-      <fieldset className="mt-4" disabled={busy}>
+      {locked && (
+        <p className="mt-3 rounded-xl bg-surface-secondary px-3 py-2 text-xs text-foreground-secondary">
+          成员关系的方向与线型固定，由节点盒维护。
+        </p>
+      )}
+
+      {!locked && <fieldset className="mt-4" disabled={busy}>
         <legend className="mb-2 text-xs font-medium text-foreground-secondary">
           方向
         </legend>
@@ -121,9 +128,9 @@ export function CanvasEdgeToolbar({
             </button>
           ))}
         </div>
-      </fieldset>
+      </fieldset>}
 
-      <fieldset className="mt-4" disabled={busy}>
+      {!locked && <fieldset className="mt-4" disabled={busy}>
         <legend className="mb-2 text-xs font-medium text-foreground-secondary">
           线型
         </legend>
@@ -156,7 +163,7 @@ export function CanvasEdgeToolbar({
             </button>
           ))}
         </div>
-      </fieldset>
+      </fieldset>}
 
       <div className="mt-4 border-t border-border/70 pt-3">
         <button

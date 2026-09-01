@@ -4,6 +4,24 @@ import { resolve, sep } from 'node:path'
 import { chromium, expect, test, type BrowserContext, type Page } from '@playwright/test'
 
 interface CanvasHarness {
+  auditMigrationTenRollback(): Promise<{
+    readonly failedClosed: boolean
+    readonly historyVersion: number
+    readonly originalNodeCount: number
+    readonly originalTablesPresent: boolean
+    readonly temporaryTablesPresent: boolean
+  }>
+  auditMigrationTenUpgrade(): Promise<{
+    readonly historyVersion: number
+    readonly canvasPreserved: boolean
+    readonly nodesPreserved: number
+    readonly edgesPreserved: number
+    readonly unknownEdgePreserved: boolean
+    readonly ordinaryMembershipPositionsNull: number
+    readonly membershipColumnPresent: boolean
+    readonly temporaryTablesPresent: boolean
+    readonly foreignKeyViolations: number
+  }>
   capability(): Promise<{ status: string; reason?: string }>
   createCanvas(input: object): Promise<unknown>
   listCanvases(): Promise<readonly Record<string, unknown>[]>
@@ -19,6 +37,7 @@ interface CanvasHarness {
   moveCanvasNode(input: object): Promise<unknown>
   moveCanvasNodes(input: object): Promise<readonly Record<string, unknown>[]>
   createCanvasEdge(input: object): Promise<Record<string, unknown>>
+  addCanvasNodeBoxMember(input: object): Promise<Record<string, unknown>>
   listCanvasEdges(canvasId: string): Promise<readonly Record<string, unknown>[]>
   updateCanvasEdgeRelationType(input: object): Promise<Record<string, unknown>>
   updateCanvasEdgeDirection(input: object): Promise<Record<string, unknown>>
@@ -50,6 +69,15 @@ const SEMANTIC_SECOND_STICKY_ID = '00000000-0000-4000-8000-000000000905'
 const SEMANTIC_REVERSE_EDGE_ID = '00000000-0000-4000-8000-000000000906'
 const SEMANTIC_STICKY_EDGE_ID = '00000000-0000-4000-8000-000000000907'
 const SEMANTIC_CONFLICT_EDGE_ID = '00000000-0000-4000-8000-000000000908'
+const BOX_CANVAS_ID = '00000000-0000-4000-8000-000000001001'
+const BOX_TEXT_ID = '00000000-0000-4000-8000-000000001002'
+const BOX_STICKY_ID = '00000000-0000-4000-8000-000000001003'
+const BOX_EXTRA_ID = '00000000-0000-4000-8000-000000001004'
+const BOX_NODE_ID = '00000000-0000-4000-8000-000000001005'
+const BOX_ORDERED_EDGE_ID = '00000000-0000-4000-8000-000000001006'
+const BOX_UNORDERED_EDGE_ID = '00000000-0000-4000-8000-000000001007'
+const BOX_EMPTY_ID = '00000000-0000-4000-8000-000000001008'
+const BOX_ORDINARY_EDGE_ID = '00000000-0000-4000-8000-000000001009'
 
 async function openHarnessPage(context: BrowserContext, baseURL: string): Promise<Page> {
   const page = context.pages()[0] ?? await context.newPage()
@@ -57,6 +85,56 @@ async function openHarnessPage(context: BrowserContext, baseURL: string): Promis
   await page.waitForFunction(() => '__taskPersistenceHarness' in window)
   return page
 }
+
+test('rolls a failed Web Migration 10 table rebuild back atomically', async ({ browserName }, testInfo) => {
+  expect(browserName).toBe('chromium')
+  const baseURL = testInfo.project.use.baseURL
+  if (typeof baseURL !== 'string') throw new Error('Playwright baseURL is required.')
+  const browser = await chromium.launch({ channel: 'chromium', headless: true })
+  try {
+    const page = await browser.newPage()
+    await page.goto(`${baseURL}/tests/e2e/persistence.html`)
+    await page.waitForFunction(() => '__taskPersistenceHarness' in window)
+    await expect(page.evaluate(() =>
+      (window as unknown as HarnessWindow).__taskPersistenceHarness.auditMigrationTenRollback(),
+    )).resolves.toEqual({
+      failedClosed: true,
+      historyVersion: 9,
+      originalNodeCount: 1,
+      originalTablesPresent: true,
+      temporaryTablesPresent: false,
+    })
+  } finally {
+    await browser.close()
+  }
+})
+
+test('preserves exact v9 Canvas data through Web Migration 10', async ({ browserName }, testInfo) => {
+  expect(browserName).toBe('chromium')
+  const baseURL = testInfo.project.use.baseURL
+  if (typeof baseURL !== 'string') throw new Error('Playwright baseURL is required.')
+  const browser = await chromium.launch({ channel: 'chromium', headless: true })
+  try {
+    const page = await browser.newPage()
+    await page.goto(`${baseURL}/tests/e2e/persistence.html`)
+    await page.waitForFunction(() => '__taskPersistenceHarness' in window)
+    await expect(page.evaluate(() =>
+      (window as unknown as HarnessWindow).__taskPersistenceHarness.auditMigrationTenUpgrade(),
+    )).resolves.toEqual({
+      historyVersion: 10,
+      canvasPreserved: true,
+      nodesPreserved: 2,
+      edgesPreserved: 4,
+      unknownEdgePreserved: true,
+      ordinaryMembershipPositionsNull: 4,
+      membershipColumnPresent: true,
+      temporaryTablesPresent: false,
+      foreignKeyViolations: 0,
+    })
+  } finally {
+    await browser.close()
+  }
+})
 
 test('persists Canvas nodes, viewport, and configured Edge in OPFS across restart', async ({ browserName }, testInfo) => {
   test.setTimeout(90_000)
@@ -732,6 +810,171 @@ test('configures semantic Edge types and restores them from OPFS', async ({ brow
     await expect(page.locator(`.react-flow__node[data-id="${SEMANTIC_STICKY_ID}"]`).getByText('同级便签')).toBeVisible()
     await page.screenshot({ path: testInfo.outputPath('06-peer-restart.png') })
     await page.goto('about:blank')
+  } finally {
+    await context?.close()
+    await rm(profilePath, { recursive: true, force: true })
+  }
+})
+
+test('organizes live Canvas nodes in ordered and unordered Node Box sections', async ({ browserName }, testInfo) => {
+  test.setTimeout(150_000)
+  expect(browserName).toBe('chromium')
+  const baseURL = testInfo.project.use.baseURL
+  if (typeof baseURL !== 'string') throw new Error('Playwright baseURL is required.')
+  const profilePath = testInfo.outputPath('canvas-node-box-browser-profile')
+  const outputRoot = resolve(testInfo.outputDir)
+  const resolvedProfile = resolve(profilePath)
+  if (!resolvedProfile.startsWith(`${outputRoot}${sep}`)) throw new Error('Unsafe test profile path.')
+
+  let context: BrowserContext | null = null
+  try {
+    context = await chromium.launchPersistentContext(profilePath, {
+      channel: 'chromium',
+      headless: true,
+      viewport: { width: 1920, height: 1080 },
+    })
+    let page = await openHarnessPage(context, baseURL)
+    await page.evaluate(async ({ canvasId, textId, stickyId, extraId, boxId, emptyBoxId, ordinaryEdgeId, orderedEdgeId, unorderedEdgeId }) => {
+      const harness = (window as unknown as HarnessWindow).__taskPersistenceHarness
+      await harness.createCanvas({ id: canvasId, title: 'Node Box Foundation', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 300 })
+      await harness.createCanvasNode({ id: textId, canvasId, type: 'text', content: { type: 'text', text: '核心问题' }, x: 260, y: 220, createdAtMs: 310 })
+      await harness.createCanvasNode({ id: stickyId, canvasId, type: 'sticky', content: { type: 'sticky', text: '参考材料' }, x: 260, y: 520, createdAtMs: 311 })
+      await harness.createCanvasNode({ id: extraId, canvasId, type: 'text', content: { type: 'text', text: '下一步' }, x: 760, y: 650, createdAtMs: 312 })
+      await harness.createCanvasNode({ id: boxId, canvasId, type: 'node_box', content: { type: 'node_box' }, x: 950, y: 240, createdAtMs: 313 })
+      await harness.createCanvasNode({ id: emptyBoxId, canvasId, type: 'node_box', content: { type: 'node_box' }, x: 1350, y: 240, createdAtMs: 314 })
+      await harness.renameCanvasNode({ canvasId, id: textId, nodeName: '研究问题', updatedAtMs: 320 })
+      await harness.renameCanvasNode({ canvasId, id: stickyId, nodeName: '参考资料', updatedAtMs: 321 })
+      await harness.renameCanvasNode({ canvasId, id: extraId, nodeName: '行动项', updatedAtMs: 322 })
+      await harness.renameCanvasNode({ canvasId, id: boxId, nodeName: '研究盒', updatedAtMs: 323 })
+      await harness.renameCanvasNode({ canvasId, id: emptyBoxId, nodeName: '空节点盒', updatedAtMs: 324 })
+      await harness.createCanvasEdge({ id: ordinaryEdgeId, canvasId, sourceNodeId: textId, targetNodeId: stickyId, relationType: 'default', direction: 'forward', lineStyle: 'solid', createdAtMs: 329 })
+      await harness.addCanvasNodeBoxMember({ id: orderedEdgeId, canvasId, sourceNodeId: textId, targetNodeId: boxId, relationType: 'ordered_box_member', createdAtMs: 330 })
+      await harness.addCanvasNodeBoxMember({ id: unorderedEdgeId, canvasId, sourceNodeId: stickyId, targetNodeId: boxId, relationType: 'unordered_box_member', createdAtMs: 331 })
+      await harness.shutdown()
+    }, {
+      canvasId: BOX_CANVAS_ID,
+      textId: BOX_TEXT_ID,
+      stickyId: BOX_STICKY_ID,
+      extraId: BOX_EXTRA_ID,
+      boxId: BOX_NODE_ID,
+      emptyBoxId: BOX_EMPTY_ID,
+      ordinaryEdgeId: BOX_ORDINARY_EDGE_ID,
+      orderedEdgeId: BOX_ORDERED_EDGE_ID,
+      unorderedEdgeId: BOX_UNORDERED_EDGE_ID,
+    })
+
+    await page.goto(`${baseURL}/canvas/${BOX_CANVAS_ID}`)
+    await expect(page.getByRole('heading', { name: 'Node Box Foundation' })).toBeVisible()
+    const boxNode = page.locator(`.react-flow__node[data-id="${BOX_NODE_ID}"]`)
+    const textNode = page.locator(`.react-flow__node[data-id="${BOX_TEXT_ID}"]`)
+    const stickyNode = page.locator(`.react-flow__node[data-id="${BOX_STICKY_ID}"]`)
+    const extraNode = page.locator(`.react-flow__node[data-id="${BOX_EXTRA_ID}"]`)
+    const emptyBoxNode = page.locator(`.react-flow__node[data-id="${BOX_EMPTY_ID}"]`)
+    await expect(boxNode.getByText('BOX')).toBeVisible()
+    await expect(boxNode.getByText('有序成员')).toBeVisible()
+    await expect(boxNode.getByText('无序成员')).toBeVisible()
+    await expect(boxNode.getByText('研究问题')).toBeVisible()
+    await expect(boxNode.getByText('参考资料')).toBeVisible()
+    await expect(emptyBoxNode.getByText('空节点盒')).toBeVisible()
+    await expect(emptyBoxNode.getByText('暂无成员')).toHaveCount(2)
+    await expect(page.locator('.react-flow__edge')).toHaveCount(3)
+    await page.screenshot({ path: testInfo.outputPath('01-node-box-membership.png') })
+    await page.locator(`.react-flow__edge[data-id="${BOX_ORDERED_EDGE_ID}"] .react-flow__edge-path`).click({ force: true })
+    const edgeSettings = page.getByLabel('连线设置')
+    await expect(edgeSettings.getByRole('heading', { name: '有序成员' })).toBeVisible()
+    await expect(edgeSettings.getByText('成员关系的方向与线型固定，由节点盒维护。')).toBeVisible()
+    await expect(edgeSettings.getByRole('button', { name: '双向' })).toHaveCount(0)
+    await expect(edgeSettings.getByRole('button', { name: '虚线' })).toHaveCount(0)
+    await page.screenshot({ path: testInfo.outputPath('01b-membership-edge-settings.png') })
+
+    await page.reload()
+    await expect(page.getByRole('heading', { name: 'Node Box Foundation' })).toBeVisible()
+    await expect(boxNode.getByText('研究问题')).toBeVisible()
+    await expect(boxNode.getByText('参考资料')).toBeVisible()
+    await expect(page.locator('.react-flow__edge')).toHaveCount(3)
+    await page.screenshot({ path: testInfo.outputPath('02-node-box-restart.png') })
+
+    const textBeforeBoxMove = await textNode.boundingBox()
+    const boxBeforeMove = await boxNode.boundingBox()
+    if (textBeforeBoxMove === null || boxBeforeMove === null) {
+      throw new Error('Node Box move audit nodes are not visible.')
+    }
+    await page.mouse.move(boxBeforeMove.x + 90, boxBeforeMove.y + 18)
+    await page.mouse.down()
+    await page.mouse.move(boxBeforeMove.x + 170, boxBeforeMove.y + 48, { steps: 10 })
+    await page.mouse.up()
+    await expect(page.getByRole('status')).toContainText('节点位置已保存')
+    const textAfterBoxMove = await textNode.boundingBox()
+    const boxAfterMove = await boxNode.boundingBox()
+    if (textAfterBoxMove === null || boxAfterMove === null) {
+      throw new Error('Node Box move audit nodes disappeared.')
+    }
+    expect(Math.abs(textAfterBoxMove.x - textBeforeBoxMove.x)).toBeLessThan(1)
+    expect(Math.abs(textAfterBoxMove.y - textBeforeBoxMove.y)).toBeLessThan(1)
+    expect(boxAfterMove.x - boxBeforeMove.x).toBeGreaterThan(60)
+    await page.screenshot({ path: testInfo.outputPath('02b-node-box-move-not-group.png') })
+
+    await textNode.getByText('研究问题').dblclick()
+    const nameInput = textNode.getByRole('textbox', { name: '节点名称' })
+    await nameInput.fill('更新后的研究问题')
+    await nameInput.press('Enter')
+    await expect(boxNode.getByText('更新后的研究问题')).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('03-node-box-live-rename.png') })
+
+    await boxNode.getByRole('button', { name: '移除成员 参考资料' }).click()
+    await expect(boxNode.getByText('参考资料')).not.toBeVisible()
+    await expect(stickyNode).toBeVisible()
+    await expect(page.locator('.react-flow__edge')).toHaveCount(2)
+    await page.screenshot({ path: testInfo.outputPath('04-node-box-remove.png') })
+
+    await extraNode.click({ position: { x: 90, y: 18 } })
+    await boxNode.click({ modifiers: ['Control'], position: { x: 90, y: 18 } })
+    await expect(extraNode).toHaveClass(/selected/)
+    await expect(boxNode).toHaveClass(/selected/)
+    const membershipActions = page.getByLabel('节点盒成员操作')
+    await expect(membershipActions).toBeVisible()
+    await membershipActions.getByRole('button', { name: '有序' }).click()
+    await expect(boxNode.getByText('行动项')).toBeVisible()
+    await expect(page.locator('.react-flow__edge')).toHaveCount(3)
+    await page.screenshot({ path: testInfo.outputPath('05-node-box-mixed-selection.png') })
+    await membershipActions.getByRole('button', { name: '无序' }).click()
+    await expect(page.getByRole('status')).toContainText('该节点已经属于此节点盒')
+    await expect(page.locator('.react-flow__edge')).toHaveCount(3)
+
+    const extraBefore = await extraNode.boundingBox()
+    if (extraBefore === null) throw new Error('Mixed selection is not visible.')
+    await page.mouse.move(extraBefore.x + 90, extraBefore.y + 18)
+    await page.mouse.down()
+    await page.mouse.move(extraBefore.x + 190, extraBefore.y + 88, { steps: 12 })
+    await page.mouse.up()
+    await expect(page.getByRole('status')).toContainText('已移动 2 个节点')
+
+    await page.reload()
+    await expect(page.getByRole('heading', { name: 'Node Box Foundation' })).toBeVisible()
+    const restoredBox = page.locator(`.react-flow__node[data-id="${BOX_NODE_ID}"]`)
+    await expect(restoredBox.getByText('更新后的研究问题')).toBeVisible()
+    await expect(restoredBox.getByText('行动项')).toBeVisible()
+    await expect(restoredBox.getByText('参考资料')).not.toBeVisible()
+    await expect(page.locator(`.react-flow__node[data-id="${BOX_STICKY_ID}"]`)).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('06-node-box-collective-restart.png') })
+
+    page = await openHarnessPage(context, baseURL)
+    const persisted = await page.evaluate(async (canvasId) => {
+      const harness = (window as unknown as HarnessWindow).__taskPersistenceHarness
+      return {
+        nodes: await harness.listCanvasNodes(canvasId),
+        edges: await harness.listCanvasEdges(canvasId),
+      }
+    }, BOX_CANVAS_ID)
+    expect(persisted.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: BOX_STICKY_ID }),
+      expect.objectContaining({ id: BOX_NODE_ID, type: 'node_box', content: { type: 'node_box' } }),
+    ]))
+    expect(persisted.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: BOX_ORDINARY_EDGE_ID, relationType: 'default', membershipPosition: null }),
+      expect.objectContaining({ sourceNodeId: BOX_TEXT_ID, relationType: 'ordered_box_member', membershipPosition: 0 }),
+      expect.objectContaining({ sourceNodeId: BOX_EXTRA_ID, relationType: 'ordered_box_member', membershipPosition: 1 }),
+    ]))
   } finally {
     await context?.close()
     await rm(profilePath, { recursive: true, force: true })

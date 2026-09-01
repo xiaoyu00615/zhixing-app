@@ -9,6 +9,7 @@ import type {
 import {
   CanvasRepositoryError,
   type CanvasRepository,
+  type AddCanvasNodeBoxMemberInput,
   type CreateCanvasInput,
   type CreateCanvasEdgeInput,
   type CreateTextNodeInput,
@@ -29,6 +30,7 @@ export const CONTRACT_NODE_ID = '00000000-0000-4000-8000-000000000612'
 export const CONTRACT_TARGET_NODE_ID = '00000000-0000-4000-8000-000000000613'
 export const CONTRACT_EDGE_ID = '00000000-0000-4000-8000-000000000614'
 export const CONTRACT_REVERSE_EDGE_ID = '00000000-0000-4000-8000-000000000615'
+export const CONTRACT_BOX_ID = '00000000-0000-4000-8000-000000000620'
 
 export class CanvasContractBackend implements CanvasRepository {
   readonly canvases = new Map<string, Canvas>()
@@ -169,6 +171,48 @@ export class CanvasContractBackend implements CanvasRepository {
     )
     const edge: CanvasEdge = {
       ...input,
+      membershipPosition: null,
+      updatedAtMs: input.createdAtMs,
+      deletedAtMs: null,
+    }
+    this.edges.set(edge.id, edge)
+    return edge
+  }
+
+  async addCanvasNodeBoxMember(
+    input: AddCanvasNodeBoxMemberInput,
+  ): Promise<CanvasEdge> {
+    await this.getCanvas(input.canvasId)
+    const source = this.nodes.get(input.sourceNodeId)
+    const target = this.nodes.get(input.targetNodeId)
+    if (source?.canvasId !== input.canvasId || target?.canvasId !== input.canvasId) {
+      throw new CanvasRepositoryError('NOT_FOUND', 'addCanvasNodeBoxMember')
+    }
+    if (source.type === 'node_box' || target.type !== 'node_box') {
+      throw new CanvasRepositoryError('PERSISTENCE_FAILED', 'addCanvasNodeBoxMember')
+    }
+    const active = [...this.edges.values()].filter((edge) =>
+      edge.deletedAtMs === null && edge.canvasId === input.canvasId,
+    )
+    if (active.some((edge) =>
+      edge.sourceNodeId === input.sourceNodeId &&
+      edge.targetNodeId === input.targetNodeId &&
+      (edge.relationType === 'ordered_box_member' ||
+        edge.relationType === 'unordered_box_member'),
+    )) {
+      throw new CanvasRepositoryError('DUPLICATE', 'addCanvasNodeBoxMember')
+    }
+    const positions = active
+      .filter((edge) =>
+        edge.targetNodeId === input.targetNodeId &&
+        edge.relationType === input.relationType,
+      )
+      .map((edge) => edge.membershipPosition ?? -1)
+    const edge: CanvasEdge = {
+      ...input,
+      direction: 'forward',
+      lineStyle: 'solid',
+      membershipPosition: Math.max(-1, ...positions) + 1,
       updatedAtMs: input.createdAtMs,
       deletedAtMs: null,
     }
@@ -419,6 +463,7 @@ export function defineCanvasRepositoryContract(
         relationType: 'future_relation' as CanvasEdge['relationType'],
         direction: 'bidirectional',
         lineStyle: 'dotted',
+        membershipPosition: null,
         createdAtMs: 30,
         updatedAtMs: 30,
         deletedAtMs: null,
@@ -440,6 +485,33 @@ export function defineCanvasRepositoryContract(
       await expect(repository.createCanvasEdge({ id: CONTRACT_REVERSE_EDGE_ID, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_TARGET_NODE_ID, targetNodeId: CONTRACT_NODE_ID, relationType: 'default', direction: 'forward', lineStyle: 'dashed', createdAtMs: 31 })).resolves.toMatchObject({ sourceNodeId: CONTRACT_TARGET_NODE_ID, targetNodeId: CONTRACT_NODE_ID })
       await expect(repository.createCanvasEdge({ id: '00000000-0000-4000-8000-000000000617', canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_TARGET_NODE_ID, targetNodeId: secondStickyId, relationType: 'default', direction: 'forward', lineStyle: 'dotted', createdAtMs: 32 })).resolves.toMatchObject({ sourceNodeId: CONTRACT_TARGET_NODE_ID, targetNodeId: secondStickyId })
       await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toHaveLength(3)
+    })
+
+    test('adds Node Box membership with section ordering and soft removal', async () => {
+      const { repository } = createFixture()
+      const unorderedNodeId = '00000000-0000-4000-8000-000000000621'
+      const unorderedEdgeId = '00000000-0000-4000-8000-000000000622'
+      const secondBoxId = '00000000-0000-4000-8000-000000000623'
+      const readdedEdgeId = '00000000-0000-4000-8000-000000000624'
+      await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+      await repository.createTextNode({ id: CONTRACT_NODE_ID, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: 'A' }, x: 1, y: 2, createdAtMs: 20 })
+      await repository.createCanvasNode({ id: CONTRACT_TARGET_NODE_ID, canvasId: CONTRACT_CANVAS_ID, type: 'sticky', content: { type: 'sticky', text: 'B' }, x: 3, y: 4, createdAtMs: 21 })
+      await repository.createCanvasNode({ id: unorderedNodeId, canvasId: CONTRACT_CANVAS_ID, type: 'sticky', content: { type: 'sticky', text: 'C' }, x: 4, y: 5, createdAtMs: 22 })
+      await repository.createCanvasNode({ id: CONTRACT_BOX_ID, canvasId: CONTRACT_CANVAS_ID, type: 'node_box', content: { type: 'node_box' }, x: 5, y: 6, createdAtMs: 22 })
+      await repository.createCanvasNode({ id: secondBoxId, canvasId: CONTRACT_CANVAS_ID, type: 'node_box', content: { type: 'node_box' }, x: 7, y: 8, createdAtMs: 23 })
+
+      await expect(repository.addCanvasNodeBoxMember({ id: CONTRACT_EDGE_ID, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_BOX_ID, relationType: 'ordered_box_member', createdAtMs: 30 })).resolves.toMatchObject({ relationType: 'ordered_box_member', direction: 'forward', lineStyle: 'solid', membershipPosition: 0 })
+      await expect(repository.addCanvasNodeBoxMember({ id: CONTRACT_REVERSE_EDGE_ID, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_TARGET_NODE_ID, targetNodeId: CONTRACT_BOX_ID, relationType: 'ordered_box_member', createdAtMs: 31 })).resolves.toMatchObject({ membershipPosition: 1 })
+      await expect(repository.addCanvasNodeBoxMember({ id: unorderedEdgeId, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: unorderedNodeId, targetNodeId: CONTRACT_BOX_ID, relationType: 'unordered_box_member', createdAtMs: 32 })).resolves.toMatchObject({ membershipPosition: 0 })
+      await expect(repository.addCanvasNodeBoxMember({ id: '00000000-0000-4000-8000-000000000625', canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_BOX_ID, relationType: 'unordered_box_member', createdAtMs: 33 })).rejects.toMatchObject({ code: 'DUPLICATE' })
+      await expect(repository.addCanvasNodeBoxMember({ id: '00000000-0000-4000-8000-000000000626', canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_BOX_ID, targetNodeId: secondBoxId, relationType: 'ordered_box_member', createdAtMs: 34 })).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })
+      await repository.deleteCanvasEdge({ id: CONTRACT_EDGE_ID, deletedAtMs: 40, updatedAtMs: 40 })
+      await expect(repository.addCanvasNodeBoxMember({ id: readdedEdgeId, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_BOX_ID, relationType: 'unordered_box_member', createdAtMs: 41 })).resolves.toMatchObject({ membershipPosition: 1 })
+      await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toEqual([
+        expect.objectContaining({ id: CONTRACT_REVERSE_EDGE_ID, membershipPosition: 1 }),
+        expect.objectContaining({ id: unorderedEdgeId, membershipPosition: 0 }),
+        expect.objectContaining({ id: readdedEdgeId, membershipPosition: 1 }),
+      ])
     })
 
     test('enforces directed and symmetric duplicate semantics', async () => {

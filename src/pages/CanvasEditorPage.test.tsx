@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
@@ -181,13 +181,14 @@ const NODE_ID = '00000000-0000-4000-8000-000000000602'
 const CREATED_NODE_ID = '00000000-0000-4000-8000-000000000603'
 const TARGET_NODE_ID = '00000000-0000-4000-8000-000000000604'
 const EDGE_ID = '00000000-0000-4000-8000-000000000605'
+const BOX_NODE_ID = '00000000-0000-4000-8000-000000000607'
 
 function fixture() {
   const canvas: Canvas = { id: CANVAS_ID, title: '产品构思', viewport: { x: 45, y: -30, zoom: 1.2 }, createdAtMs: 10, updatedAtMs: 10 }
   const node: CanvasNode = { id: NODE_ID, canvasId: CANVAS_ID, type: 'text', nodeName: '', content: { type: 'text', text: '初始文字' }, x: 20, y: 30, createdAtMs: 10, updatedAtMs: 10 }
   const targetNode: CanvasNode = { id: TARGET_NODE_ID, canvasId: CANVAS_ID, type: 'sticky', nodeName: '灵感记录', content: { type: 'sticky', text: '目标文字' }, x: 420, y: 80, createdAtMs: 11, updatedAtMs: 11 }
   const createdNode: CanvasNode = { ...node, id: CREATED_NODE_ID, content: { type: 'text', text: '' }, x: 300, y: 200 }
-  const edge: CanvasEdge = { id: EDGE_ID, canvasId: CANVAS_ID, sourceNodeId: NODE_ID, targetNodeId: TARGET_NODE_ID, relationType: 'default', direction: 'forward', lineStyle: 'solid', createdAtMs: 10, updatedAtMs: 10, deletedAtMs: null }
+  const edge: CanvasEdge = { id: EDGE_ID, canvasId: CANVAS_ID, sourceNodeId: NODE_ID, targetNodeId: TARGET_NODE_ID, relationType: 'default', direction: 'forward', lineStyle: 'solid', membershipPosition: null, createdAtMs: 10, updatedAtMs: 10, deletedAtMs: null }
   const openCanvasMock = vi.fn<CanvasService['openCanvas']>(() => Promise.resolve({ canvas, nodes: [node, targetNode], edges: [edge] }))
   const createTextNodeMock = vi.fn<CanvasService['createTextNode']>(() => Promise.resolve(createdNode))
   const editTextNodeMock = vi.fn<CanvasService['editTextNode']>((id, text) => Promise.resolve({ ...node, id, content: { type: 'text', text }, updatedAtMs: 20 }))
@@ -198,6 +199,14 @@ function fixture() {
   const moveCanvasNodesMock = vi.fn<CanvasService['moveCanvasNodes']>((_, moves) => Promise.resolve(moves.map((move) => ({ ...node, id: move.nodeId, x: move.x, y: move.y, updatedAtMs: 20 }))))
   const updateViewportMock = vi.fn<CanvasService['updateViewport']>((id, viewport) => Promise.resolve({ ...canvas, id, viewport, updatedAtMs: 20 }))
   const createCanvasEdgeMock = vi.fn<CanvasService['createCanvasEdge']>(() => Promise.resolve({ ...edge, id: '00000000-0000-4000-8000-000000000606' }))
+  const addNodeBoxMemberMock = vi.fn<CanvasService['addNodeBoxMember']>((_canvasId, sourceNodeId, targetNodeId, relationType) => Promise.resolve({
+    ...edge,
+    id: '00000000-0000-4000-8000-000000000608',
+    sourceNodeId,
+    targetNodeId,
+    relationType,
+    membershipPosition: 0,
+  }))
   const updateCanvasEdgeDirectionMock = vi.fn<CanvasService['updateCanvasEdgeDirection']>((id, direction) => Promise.resolve({ ...edge, id, direction, updatedAtMs: 20 }))
   const updateCanvasEdgeLineStyleMock = vi.fn<CanvasService['updateCanvasEdgeLineStyle']>((id, lineStyle) => Promise.resolve({ ...edge, id, lineStyle, updatedAtMs: 20 }))
   const updateCanvasEdgeRelationTypeMock = vi.fn<CanvasService['updateCanvasEdgeRelationType']>((id, relationType) => Promise.resolve({ ...edge, id, relationType, direction: relationType === 'peer' ? 'none' : 'forward', lineStyle: 'solid', updatedAtMs: 20 }))
@@ -212,13 +221,14 @@ function fixture() {
     editTextNode: editTextNodeMock, moveCanvasNode: moveCanvasNodeMock,
     moveCanvasNodes: moveCanvasNodesMock,
     createCanvasEdge: createCanvasEdgeMock, listCanvasEdges: vi.fn(),
+    addNodeBoxMember: addNodeBoxMemberMock,
     updateCanvasEdgeDirection: updateCanvasEdgeDirectionMock,
     updateCanvasEdgeLineStyle: updateCanvasEdgeLineStyleMock,
     updateCanvasEdgeRelationType: updateCanvasEdgeRelationTypeMock,
     deleteCanvasEdge: deleteCanvasEdgeMock,
   }
   const openRuntime: OpenCanvasRuntime = vi.fn(() => Promise.resolve({ service, dispose: vi.fn() }))
-  return { canvas, service, openRuntime, openCanvasMock, createTextNodeMock, editTextNodeMock, createCanvasNodeMock, updateCanvasNodeContentMock, renameCanvasNodeMock, moveCanvasNodeMock, moveCanvasNodesMock, updateViewportMock, createCanvasEdgeMock, updateCanvasEdgeDirectionMock, updateCanvasEdgeLineStyleMock, updateCanvasEdgeRelationTypeMock, deleteCanvasEdgeMock }
+  return { canvas, node, service, openRuntime, openCanvasMock, createTextNodeMock, editTextNodeMock, createCanvasNodeMock, updateCanvasNodeContentMock, renameCanvasNodeMock, moveCanvasNodeMock, moveCanvasNodesMock, updateViewportMock, createCanvasEdgeMock, addNodeBoxMemberMock, updateCanvasEdgeDirectionMock, updateCanvasEdgeLineStyleMock, updateCanvasEdgeRelationTypeMock, deleteCanvasEdgeMock }
 }
 
 function renderEditor(openRuntime: OpenCanvasRuntime) {
@@ -272,6 +282,42 @@ describe('CanvasEditorPage', () => {
     await screen.findByRole('heading', { name: '产品构思' })
     await userEvent.click(screen.getByRole('button', { name: '便签节点' }))
     expect(createCanvasNodeMock).toHaveBeenCalledWith(CANVAS_ID, 'sticky', { type: 'sticky', text: '' }, { x: 300, y: 200 })
+  })
+
+  test('creates Node Box through the registry and adds a selected member through the narrow capability', async () => {
+    const { canvas, node, openRuntime, openCanvasMock, createCanvasNodeMock, addNodeBoxMemberMock } = fixture()
+    const boxNode: CanvasNode = {
+      id: BOX_NODE_ID,
+      canvasId: CANVAS_ID,
+      type: 'node_box',
+      nodeName: '收集盒',
+      content: { type: 'node_box' },
+      x: 420,
+      y: 80,
+      createdAtMs: 12,
+      updatedAtMs: 12,
+    }
+    openCanvasMock.mockResolvedValueOnce({ canvas, nodes: [node, boxNode], edges: [] })
+    renderEditor(openRuntime)
+    await screen.findByRole('heading', { name: '产品构思' })
+
+    await userEvent.click(screen.getByRole('button', { name: '节点盒' }))
+    expect(createCanvasNodeMock).toHaveBeenCalledWith(
+      CANVAS_ID,
+      'node_box',
+      { type: 'node_box' },
+      { x: 300, y: 200 },
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: '模拟框选' }))
+    const membershipActions = screen.getByLabelText('节点盒成员操作')
+    await userEvent.click(within(membershipActions).getByRole('button', { name: '有序' }))
+    await waitFor(() => expect(addNodeBoxMemberMock).toHaveBeenCalledWith(
+      CANVAS_ID,
+      NODE_ID,
+      BOX_NODE_ID,
+      'ordered_box_member',
+    ))
   })
 
   test('renames through CanvasService and rolls UI state back on persistence failure', async () => {

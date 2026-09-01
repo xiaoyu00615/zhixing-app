@@ -3,7 +3,10 @@ import {
   isCanvasCoordinate,
   isCanvasEdgeDirection,
   isCanvasEdgeLineStyle,
-  isCanvasEdgeRelationType,
+  isCanvasOrdinaryEdgeRelationType,
+  isCanvasMembershipRelationType,
+  isCanvasMembershipPosition,
+  isNodeBoxContent,
   isPersistedCanvasEdgeRelationType,
   isCanvasViewport,
   isNonEmptyCanvasTitle,
@@ -17,6 +20,7 @@ import {
 import {
   CanvasRepositoryError,
   type CanvasRepository,
+  type AddCanvasNodeBoxMemberInput,
   type CanvasRepositoryOperation,
   type CreateCanvasEdgeInput,
   type CreateCanvasInput,
@@ -76,7 +80,8 @@ function parseNode(
     !isPersistedCanvasNodeName(nodeName) ||
     ((type === 'text' && !isTextNodeContent(content)) ||
       (type === 'sticky' && !isStickyNodeContent(content)) ||
-      (type !== 'text' && type !== 'sticky' && typeof type !== 'string')) ||
+      (type === 'node_box' && !isNodeBoxContent(content)) ||
+      (type !== 'text' && type !== 'sticky' && type !== 'node_box' && typeof type !== 'string')) ||
     !isCanvasCoordinate(x) ||
     !isCanvasCoordinate(y) ||
     !isTimestamp(createdAtMs) ||
@@ -85,7 +90,7 @@ function parseNode(
   ) {
     throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
   }
-  if (type === 'text' || type === 'sticky') {
+  if (type === 'text' || type === 'sticky' || type === 'node_box') {
     return { id, canvasId, type, nodeName, content, x, y, createdAtMs, updatedAtMs } as CanvasNode
   }
   return { id, canvasId, type: 'unknown', originalType: type, nodeName, content: { type: 'unknown', raw: content }, x, y, createdAtMs, updatedAtMs }
@@ -106,6 +111,7 @@ function parseEdge(
     relationType,
     direction,
     lineStyle,
+    membershipPosition,
     createdAtMs,
     updatedAtMs,
     deletedAtMs,
@@ -119,6 +125,10 @@ function parseEdge(
     !isPersistedCanvasEdgeRelationType(relationType) ||
     !isCanvasEdgeDirection(direction) ||
     !isCanvasEdgeLineStyle(lineStyle) ||
+    !isCanvasMembershipPosition(membershipPosition) ||
+    (isCanvasMembershipRelationType(relationType)
+      ? membershipPosition === null
+      : membershipPosition !== null) ||
     !isTimestamp(createdAtMs) ||
     !isTimestamp(updatedAtMs) ||
     updatedAtMs < createdAtMs ||
@@ -134,6 +144,7 @@ function parseEdge(
     relationType,
     direction,
     lineStyle,
+    membershipPosition,
     createdAtMs,
     updatedAtMs,
     deletedAtMs,
@@ -363,7 +374,7 @@ export class WebCanvasRepository implements CanvasRepository {
     validateTimestamp(input.createdAtMs, operation)
     if (
       input.sourceNodeId === input.targetNodeId ||
-      !isCanvasEdgeRelationType(input.relationType) ||
+      !isCanvasOrdinaryEdgeRelationType(input.relationType) ||
       !isCanvasEdgeDirection(input.direction) ||
       !isCanvasEdgeLineStyle(input.lineStyle)
     ) {
@@ -371,6 +382,31 @@ export class WebCanvasRepository implements CanvasRepository {
     }
     try {
       return parseEdge(await this.#client.createCanvasEdge(input), operation)
+    } catch (error: unknown) {
+      throw mapError(error, operation)
+    }
+  }
+
+  async addCanvasNodeBoxMember(
+    input: AddCanvasNodeBoxMemberInput,
+  ): Promise<CanvasEdge> {
+    const operation = 'addCanvasNodeBoxMember'
+    validateId(input.id, operation)
+    validateId(input.canvasId, operation)
+    validateId(input.sourceNodeId, operation)
+    validateId(input.targetNodeId, operation)
+    validateTimestamp(input.createdAtMs, operation)
+    if (
+      input.sourceNodeId === input.targetNodeId ||
+      !isCanvasMembershipRelationType(input.relationType)
+    ) {
+      throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+    }
+    try {
+      return parseEdge(
+        await this.#client.addCanvasNodeBoxMember(input),
+        operation,
+      )
     } catch (error: unknown) {
       throw mapError(error, operation)
     }
@@ -435,7 +471,7 @@ export class WebCanvasRepository implements CanvasRepository {
     validateId(input.id, operation)
     validateTimestamp(input.updatedAtMs, operation)
     if (
-      !isCanvasEdgeRelationType(input.relationType) ||
+      !isCanvasOrdinaryEdgeRelationType(input.relationType) ||
       !isCanvasEdgeDirection(input.direction) ||
       !isCanvasEdgeLineStyle(input.lineStyle)
     ) {

@@ -14,6 +14,7 @@ const CANVAS_ID = '00000000-0000-4000-8000-000000000601'
 const NODE_ID = '00000000-0000-4000-8000-000000000602'
 const TARGET_NODE_ID = '00000000-0000-4000-8000-000000000603'
 const EDGE_ID = '00000000-0000-4000-8000-000000000604'
+const SECOND_BOX_ID = '00000000-0000-4000-8000-000000000605'
 
 function fixture(): {
   repository: CanvasRepository
@@ -22,6 +23,7 @@ function fixture(): {
   createCanvasMock: ReturnType<typeof vi.fn>
   createTextNodeMock: ReturnType<typeof vi.fn>
   createCanvasEdgeMock: ReturnType<typeof vi.fn>
+  addCanvasNodeBoxMemberMock: ReturnType<typeof vi.fn>
   updateCanvasEdgeDirectionMock: ReturnType<typeof vi.fn>
   updateCanvasEdgeLineStyleMock: ReturnType<typeof vi.fn>
   updateCanvasEdgeRelationTypeMock: ReturnType<typeof vi.fn>
@@ -57,11 +59,17 @@ function fixture(): {
     relationType: 'default',
     direction: 'forward',
     lineStyle: 'solid',
+    membershipPosition: null,
     createdAtMs: 50,
     updatedAtMs: 50,
     deletedAtMs: null,
   }
   const createCanvasEdgeMock = vi.fn(() => Promise.resolve(edge))
+  const addCanvasNodeBoxMemberMock = vi.fn(() => Promise.resolve({
+    ...edge,
+    relationType: 'ordered_box_member' as const,
+    membershipPosition: 0,
+  }))
   const updateCanvasEdgeDirectionMock = vi.fn((input) =>
     Promise.resolve({ ...edge, ...input }),
   )
@@ -94,6 +102,7 @@ function fixture(): {
       moveCanvasNode: vi.fn(() => Promise.resolve(node)),
       moveCanvasNodes: moveCanvasNodesMock,
       createCanvasEdge: createCanvasEdgeMock,
+      addCanvasNodeBoxMember: addCanvasNodeBoxMemberMock,
       listCanvasEdges: vi.fn(() => Promise.resolve([edge])),
       updateCanvasEdgeDirection: updateCanvasEdgeDirectionMock,
       updateCanvasEdgeLineStyle: updateCanvasEdgeLineStyleMock,
@@ -103,6 +112,7 @@ function fixture(): {
     createCanvasMock,
     createTextNodeMock,
     createCanvasEdgeMock,
+    addCanvasNodeBoxMemberMock,
     updateCanvasEdgeDirectionMock,
     updateCanvasEdgeLineStyleMock,
     updateCanvasEdgeRelationTypeMock,
@@ -384,5 +394,62 @@ describe('CanvasService', () => {
     ).toThrowError(
       expect.objectContaining({ code: 'VALIDATION', field: 'relationType' }),
     )
+  })
+
+  test('validates Node Box membership and delegates one narrow atomic capability', async () => {
+    const { repository, node, addCanvasNodeBoxMemberMock } = fixture()
+    const box: CanvasNode = {
+      ...node,
+      id: TARGET_NODE_ID,
+      type: 'node_box',
+      nodeName: 'Planning',
+      content: { type: 'node_box' },
+    }
+    const secondBox: CanvasNode = { ...box, id: SECOND_BOX_ID }
+    repository.listCanvasNodes = vi.fn(() => Promise.resolve([node, box, secondBox]))
+    const service = createCanvasService({
+      repository,
+      generateId: () => EDGE_ID,
+      nowMs: () => 90,
+    })
+
+    await service.addNodeBoxMember(
+      CANVAS_ID,
+      NODE_ID,
+      TARGET_NODE_ID,
+      'ordered_box_member',
+    )
+    expect(addCanvasNodeBoxMemberMock).toHaveBeenCalledWith({
+      id: EDGE_ID,
+      canvasId: CANVAS_ID,
+      sourceNodeId: NODE_ID,
+      targetNodeId: TARGET_NODE_ID,
+      relationType: 'ordered_box_member',
+      createdAtMs: 90,
+    })
+    await expect(
+      service.addNodeBoxMember(
+        CANVAS_ID,
+        TARGET_NODE_ID,
+        TARGET_NODE_ID,
+        'ordered_box_member',
+      ),
+    ).rejects.toMatchObject({ code: 'VALIDATION' })
+    await expect(
+      service.addNodeBoxMember(
+        CANVAS_ID,
+        TARGET_NODE_ID,
+        SECOND_BOX_ID,
+        'unordered_box_member',
+      ),
+    ).rejects.toMatchObject({ code: 'VALIDATION' })
+    await expect(
+      service.addNodeBoxMember(
+        CANVAS_ID,
+        TARGET_NODE_ID,
+        NODE_ID,
+        'unordered_box_member',
+      ),
+    ).rejects.toMatchObject({ code: 'VALIDATION' })
   })
 })

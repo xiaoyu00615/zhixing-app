@@ -355,6 +355,16 @@ export class TaskWorkerClient {
     }))
   }
 
+  addCanvasNodeBoxMember(
+    input: import('@/canvas/repository').AddCanvasNodeBoxMemberInput,
+  ): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.nodeBox.addMember',
+      input,
+    }))
+  }
+
   listCanvasEdges(canvasId: string): Promise<unknown> {
     return this.send((requestId) => ({
       requestId,

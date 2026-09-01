@@ -2,6 +2,7 @@ import { beforeEach, vi } from 'vitest'
 
 import { NativeCanvasRepository } from './canvasRepository'
 import type {
+  AddCanvasNodeBoxMemberInput,
   CreateCanvasInput,
   CreateCanvasNodeInput,
   CreateCanvasEdgeInput,
@@ -44,6 +45,7 @@ defineCanvasRepositoryContract('NativeCanvasRepository', () => {
       case 'canvas_node_move': return backend.moveCanvasNode(args?.input as MoveCanvasNodeInput)
       case 'canvas_nodes_move': return backend.moveCanvasNodes(args?.input as MoveCanvasNodesInput)
       case 'canvas_edge_create': return backend.createCanvasEdge(args?.input as CreateCanvasEdgeInput)
+      case 'canvas_node_box_add_member': return backend.addCanvasNodeBoxMember(args?.input as AddCanvasNodeBoxMemberInput)
       case 'canvas_edge_list': return backend.listCanvasEdges((args?.input as { id: string }).id)
       case 'canvas_edge_set_direction': return backend.updateCanvasEdgeDirection(args?.input as UpdateCanvasEdgeDirectionInput)
       case 'canvas_edge_set_line_style': return backend.updateCanvasEdgeLineStyle(args?.input as UpdateCanvasEdgeLineStyleInput)

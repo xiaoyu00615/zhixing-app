@@ -3,7 +3,8 @@ import type {
   CanvasEdge,
   CanvasEdgeDirection,
   CanvasEdgeLineStyle,
-  CanvasEdgeRelationType,
+  CanvasMembershipRelationType,
+  CanvasOrdinaryEdgeRelationType,
   CanvasNode,
   CanvasViewport,
   RegisteredCanvasNodeContent,
@@ -85,9 +86,18 @@ export interface CreateCanvasEdgeInput {
   readonly canvasId: string
   readonly sourceNodeId: string
   readonly targetNodeId: string
-  readonly relationType: CanvasEdgeRelationType
+  readonly relationType: CanvasOrdinaryEdgeRelationType
   readonly direction: CanvasEdgeDirection
   readonly lineStyle: CanvasEdgeLineStyle
+  readonly createdAtMs: number
+}
+
+export interface AddCanvasNodeBoxMemberInput {
+  readonly id: string
+  readonly canvasId: string
+  readonly sourceNodeId: string
+  readonly targetNodeId: string
+  readonly relationType: CanvasMembershipRelationType
   readonly createdAtMs: number
 }
 
@@ -105,7 +115,7 @@ export interface UpdateCanvasEdgeLineStyleInput {
 
 export interface UpdateCanvasEdgeRelationTypeInput {
   readonly id: string
-  readonly relationType: CanvasEdgeRelationType
+  readonly relationType: CanvasOrdinaryEdgeRelationType
   readonly direction: CanvasEdgeDirection
   readonly lineStyle: CanvasEdgeLineStyle
   readonly updatedAtMs: number
@@ -132,6 +142,7 @@ export interface CanvasRepository {
   moveCanvasNode(input: MoveCanvasNodeInput): Promise<CanvasNode>
   moveCanvasNodes(input: MoveCanvasNodesInput): Promise<readonly CanvasNode[]>
   createCanvasEdge(input: CreateCanvasEdgeInput): Promise<CanvasEdge>
+  addCanvasNodeBoxMember(input: AddCanvasNodeBoxMemberInput): Promise<CanvasEdge>
   listCanvasEdges(canvasId: string): Promise<readonly CanvasEdge[]>
   updateCanvasEdgeDirection(
     input: UpdateCanvasEdgeDirectionInput,

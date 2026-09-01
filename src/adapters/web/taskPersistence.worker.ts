@@ -271,6 +271,12 @@ async function handleRequest(value: unknown): Promise<void> {
           state.database.createCanvasEdge(request.input),
         )
         return
+      case 'canvas.nodeBox.addMember':
+        success(
+          request.requestId,
+          state.database.addCanvasNodeBoxMember(request.input),
+        )
+        return
       case 'canvas.edge.list':
         success(
           request.requestId,
