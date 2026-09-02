@@ -24,7 +24,7 @@ import { Button } from '@/components/ui/button'
 import type { Canvas, CanvasEdge, CanvasMembershipRelationType, CanvasNode } from '@/canvas/model'
 import type { CanvasOrdinaryEdgeRelationType, RegisteredCanvasNodeType } from '@/canvas/model'
 import { getCanvasEdgeTypeDefinition, UNKNOWN_CANVAS_EDGE_RENDER } from '@/canvas/edgeRegistry'
-import { canvasNodeRegistry, toCanvasFlowNode, withCanvasNodeRuntimeData, type CanvasFlowNode } from '@/canvas/nodeRegistry'
+import { canvasNodeRegistry, orderedMembershipDisplayNumbers, toCanvasFlowNode, withCanvasNodeRuntimeData, type CanvasFlowNode } from '@/canvas/nodeRegistry'
 import { openCanvasRuntime } from '@/canvas/runtime'
 import type { OpenCanvasRuntime } from '@/canvas/runtime.types'
 import type { CanvasService } from '@/canvas/service'
@@ -46,7 +46,11 @@ function edgeStrokeDasharray(edge: CanvasEdge): string | undefined {
   return undefined
 }
 
-function toFlowEdge(edge: CanvasEdge, selected: boolean): Edge {
+function toFlowEdge(
+  edge: CanvasEdge,
+  selected: boolean,
+  orderedDisplayNumber?: number,
+): Edge {
   const render = getCanvasEdgeTypeDefinition(edge.relationType)?.render ?? UNKNOWN_CANVAS_EDGE_RENDER
   const marker = { type: MarkerType.ArrowClosed, width: render.markerSize, height: render.markerSize }
   return {
@@ -57,7 +61,7 @@ function toFlowEdge(edge: CanvasEdge, selected: boolean): Edge {
     markerStart: edge.direction === 'bidirectional' ? marker : undefined,
     markerEnd: edge.direction === 'none' ? undefined : marker,
     label: edge.relationType === 'ordered_box_member'
-      ? String((edge.membershipPosition ?? 0) + 1)
+      ? String(orderedDisplayNumber ?? 1)
       : edge.relationType === 'unordered_box_member'
         ? '−'
         : undefined,
@@ -534,9 +538,75 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
     if (edge !== undefined) void removeEdge(edge)
   }, [canvasEdges, removeEdge])
 
+  const reorderMemberships = useCallback((
+    nodeBoxId: string,
+    orderedMembershipEdgeIds: readonly string[],
+    unorderedMembershipEdgeIds: readonly string[],
+  ) => {
+    if (service === null || canvas === null || edgeBusy) return
+    const snapshot = canvasEdges
+    const orderedPositions = new Map(
+      orderedMembershipEdgeIds.map((edgeId, position) => [edgeId, position]),
+    )
+    const unorderedPositions = new Map(
+      unorderedMembershipEdgeIds.map((edgeId, position) => [edgeId, position]),
+    )
+    const optimistic = snapshot.map((edge) => {
+      if (edge.targetNodeId !== nodeBoxId) return edge
+      const orderedPosition = orderedPositions.get(edge.id)
+      if (orderedPosition !== undefined) {
+        return {
+          ...edge,
+          relationType: 'ordered_box_member' as const,
+          membershipPosition: orderedPosition,
+        }
+      }
+      const unorderedPosition = unorderedPositions.get(edge.id)
+      return unorderedPosition === undefined
+        ? edge
+        : {
+            ...edge,
+            relationType: 'unordered_box_member' as const,
+            membershipPosition: unorderedPosition,
+          }
+    })
+    setEdgeBusy(true)
+    setCanvasEdges(optimistic)
+    void service.reorderNodeBoxMemberships(
+      canvas.id,
+      nodeBoxId,
+      orderedMembershipEdgeIds,
+      unorderedMembershipEdgeIds,
+    ).then((updatedMemberships) => {
+      const updatedById = new Map(
+        updatedMemberships.map((edge) => [edge.id, edge]),
+      )
+      setCanvasEdges((edges) =>
+        edges.map((edge) => updatedById.get(edge.id) ?? edge),
+      )
+      setFeedback('节点盒成员顺序已保存')
+    }).catch(() => {
+      setCanvasEdges(snapshot)
+      setFeedback('成员顺序保存失败，已恢复原顺序。')
+    }).finally(() => {
+      setEdgeBusy(false)
+    })
+  }, [canvas, canvasEdges, edgeBusy, service])
+
   const displayNodes = useMemo(
-    () => withCanvasNodeRuntimeData(flowNodes, canvasEdges, removeMembership),
-    [canvasEdges, flowNodes, removeMembership],
+    () => withCanvasNodeRuntimeData(
+      flowNodes,
+      canvasEdges,
+      removeMembership,
+      reorderMemberships,
+      edgeBusy,
+    ),
+    [canvasEdges, edgeBusy, flowNodes, removeMembership, reorderMemberships],
+  )
+
+  const orderedEdgeNumbers = useMemo(
+    () => orderedMembershipDisplayNumbers(canvasEdges),
+    [canvasEdges],
   )
 
   const membershipPair = useMemo(() => {
@@ -590,7 +660,11 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
         className="pt-16"
         nodes={displayNodes}
         edges={canvasEdges.map((edge) =>
-          toFlowEdge(edge, edge.id === selectedEdgeId),
+          toFlowEdge(
+            edge,
+            edge.id === selectedEdgeId,
+            orderedEdgeNumbers.get(edge.id),
+          ),
         )}
         nodeTypes={NODE_TYPES}
         onNodesChange={(changes: NodeChange<CanvasFlowNode>[]) => setFlowNodes((nodes) => applyNodeChanges(changes, nodes))}

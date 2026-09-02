@@ -16,6 +16,7 @@ import {
   type DeleteCanvasEdgeInput,
   type MoveCanvasNodeInput,
   type MoveCanvasNodesInput,
+  type ReorderCanvasNodeBoxMembershipsInput,
   type RenameCanvasInput,
   type RenameCanvasNodeInput,
   type UpdateCanvasViewportInput,
@@ -218,6 +219,62 @@ export class CanvasContractBackend implements CanvasRepository {
     }
     this.edges.set(edge.id, edge)
     return edge
+  }
+
+  async reorderCanvasNodeBoxMemberships(
+    input: ReorderCanvasNodeBoxMembershipsInput,
+  ): Promise<readonly CanvasEdge[]> {
+    await this.getCanvas(input.canvasId)
+    const nodeBox = this.nodes.get(input.nodeBoxId)
+    if (nodeBox?.canvasId !== input.canvasId) {
+      throw new CanvasRepositoryError('NOT_FOUND', 'reorderCanvasNodeBoxMemberships')
+    }
+    if (nodeBox.type !== 'node_box') {
+      throw new CanvasRepositoryError('PERSISTENCE_FAILED', 'reorderCanvasNodeBoxMemberships')
+    }
+    const suppliedEdgeIds = [
+      ...input.orderedMembershipEdgeIds,
+      ...input.unorderedMembershipEdgeIds,
+    ]
+    const uniqueEdgeIds = new Set(suppliedEdgeIds)
+    const activeMemberships = [...this.edges.values()].filter((edge) =>
+      edge.canvasId === input.canvasId &&
+      edge.targetNodeId === input.nodeBoxId &&
+      edge.deletedAtMs === null &&
+      (edge.relationType === 'ordered_box_member' ||
+        edge.relationType === 'unordered_box_member'),
+    )
+    if (
+      uniqueEdgeIds.size !== suppliedEdgeIds.length ||
+      activeMemberships.length !== suppliedEdgeIds.length ||
+      activeMemberships.some((edge) => !uniqueEdgeIds.has(edge.id))
+    ) {
+      throw new CanvasRepositoryError('PERSISTENCE_FAILED', 'reorderCanvasNodeBoxMemberships')
+    }
+    const desired = new Map<
+      string,
+      { readonly relationType: 'ordered_box_member' | 'unordered_box_member'; readonly position: number }
+    >()
+    input.orderedMembershipEdgeIds.forEach((edgeId, position) => {
+      desired.set(edgeId, { relationType: 'ordered_box_member', position })
+    })
+    input.unorderedMembershipEdgeIds.forEach((edgeId, position) => {
+      desired.set(edgeId, { relationType: 'unordered_box_member', position })
+    })
+    const updated = activeMemberships.map((edge) => {
+      const next = desired.get(edge.id)!
+      const changed = edge.relationType !== next.relationType ||
+        edge.membershipPosition !== next.position
+      return {
+        ...edge,
+        relationType: next.relationType,
+        membershipPosition: next.position,
+        updatedAtMs: changed ? input.updatedAtMs : edge.updatedAtMs,
+      }
+    })
+    for (const edge of updated) this.edges.set(edge.id, edge)
+    const byId = new Map(updated.map((edge) => [edge.id, edge]))
+    return suppliedEdgeIds.map((edgeId) => byId.get(edgeId)!)
   }
 
   async listCanvasEdges(canvasId: string): Promise<readonly CanvasEdge[]> {
@@ -512,6 +569,116 @@ export function defineCanvasRepositoryContract(
         expect.objectContaining({ id: unorderedEdgeId, membershipPosition: 0 }),
         expect.objectContaining({ id: readdedEdgeId, membershipPosition: 1 }),
       ])
+    })
+
+    test('reorders and moves Node Box memberships with stable identity and timestamps', async () => {
+      const { repository } = createFixture()
+      const nodeB = '00000000-0000-4000-8000-000000000631'
+      const nodeC = '00000000-0000-4000-8000-000000000632'
+      const nodeD = '00000000-0000-4000-8000-000000000633'
+      const nodeE = '00000000-0000-4000-8000-000000000634'
+      const edgeA = '00000000-0000-4000-8000-000000000635'
+      const edgeB = '00000000-0000-4000-8000-000000000636'
+      const edgeC = '00000000-0000-4000-8000-000000000637'
+      const edgeD = '00000000-0000-4000-8000-000000000638'
+      const edgeE = '00000000-0000-4000-8000-000000000639'
+      await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+      for (const [id, createdAtMs] of [[CONTRACT_NODE_ID, 20], [nodeB, 21], [nodeC, 22], [nodeD, 23], [nodeE, 24]] as const) {
+        await repository.createTextNode({ id, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: id }, x: 1, y: 2, createdAtMs })
+      }
+      await repository.createCanvasNode({ id: CONTRACT_BOX_ID, canvasId: CONTRACT_CANVAS_ID, type: 'node_box', content: { type: 'node_box' }, x: 5, y: 6, createdAtMs: 25 })
+      for (const [id, sourceNodeId, relationType, createdAtMs] of [
+        [edgeA, CONTRACT_NODE_ID, 'ordered_box_member', 30],
+        [edgeB, nodeB, 'ordered_box_member', 31],
+        [edgeC, nodeC, 'ordered_box_member', 32],
+        [edgeD, nodeD, 'unordered_box_member', 33],
+        [edgeE, nodeE, 'unordered_box_member', 34],
+      ] as const) {
+        await repository.addCanvasNodeBoxMember({ id, canvasId: CONTRACT_CANVAS_ID, sourceNodeId, targetNodeId: CONTRACT_BOX_ID, relationType, createdAtMs })
+      }
+
+      await expect(repository.reorderCanvasNodeBoxMemberships({
+        canvasId: CONTRACT_CANVAS_ID,
+        nodeBoxId: CONTRACT_BOX_ID,
+        orderedMembershipEdgeIds: [edgeC, edgeA, edgeB],
+        unorderedMembershipEdgeIds: [edgeD, edgeE],
+        updatedAtMs: 40,
+      })).resolves.toEqual([
+        expect.objectContaining({ id: edgeC, membershipPosition: 0, createdAtMs: 32, updatedAtMs: 40 }),
+        expect.objectContaining({ id: edgeA, membershipPosition: 1, createdAtMs: 30, updatedAtMs: 40 }),
+        expect.objectContaining({ id: edgeB, membershipPosition: 2, createdAtMs: 31, updatedAtMs: 40 }),
+        expect.objectContaining({ id: edgeD, membershipPosition: 0, updatedAtMs: 33 }),
+        expect.objectContaining({ id: edgeE, membershipPosition: 1, updatedAtMs: 34 }),
+      ])
+      await expect(repository.reorderCanvasNodeBoxMemberships({
+        canvasId: CONTRACT_CANVAS_ID,
+        nodeBoxId: CONTRACT_BOX_ID,
+        orderedMembershipEdgeIds: [edgeC, edgeB],
+        unorderedMembershipEdgeIds: [edgeD, edgeA, edgeE],
+        updatedAtMs: 50,
+      })).resolves.toEqual([
+        expect.objectContaining({ id: edgeC, relationType: 'ordered_box_member', membershipPosition: 0 }),
+        expect.objectContaining({ id: edgeB, relationType: 'ordered_box_member', membershipPosition: 1, updatedAtMs: 50 }),
+        expect.objectContaining({ id: edgeD, relationType: 'unordered_box_member', membershipPosition: 0 }),
+        expect.objectContaining({ id: edgeA, relationType: 'unordered_box_member', membershipPosition: 1, createdAtMs: 30, updatedAtMs: 50 }),
+        expect.objectContaining({ id: edgeE, relationType: 'unordered_box_member', membershipPosition: 2, updatedAtMs: 50 }),
+      ])
+      await expect(repository.reorderCanvasNodeBoxMemberships({
+        canvasId: CONTRACT_CANVAS_ID,
+        nodeBoxId: CONTRACT_BOX_ID,
+        orderedMembershipEdgeIds: [edgeC, edgeD, edgeB],
+        unorderedMembershipEdgeIds: [edgeA, edgeE],
+        updatedAtMs: 60,
+      })).resolves.toEqual([
+        expect.objectContaining({ id: edgeC, membershipPosition: 0 }),
+        expect.objectContaining({ id: edgeD, relationType: 'ordered_box_member', membershipPosition: 1, updatedAtMs: 60 }),
+        expect.objectContaining({ id: edgeB, membershipPosition: 2, updatedAtMs: 60 }),
+        expect.objectContaining({ id: edgeA, relationType: 'unordered_box_member', membershipPosition: 0, updatedAtMs: 60 }),
+        expect.objectContaining({ id: edgeE, membershipPosition: 1, updatedAtMs: 60 }),
+      ])
+      const beforeNoOp = await repository.listCanvasEdges(CONTRACT_CANVAS_ID)
+      await repository.reorderCanvasNodeBoxMemberships({
+        canvasId: CONTRACT_CANVAS_ID,
+        nodeBoxId: CONTRACT_BOX_ID,
+        orderedMembershipEdgeIds: [edgeC, edgeD, edgeB],
+        unorderedMembershipEdgeIds: [edgeA, edgeE],
+        updatedAtMs: 70,
+      })
+      await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toEqual(beforeNoOp)
+    })
+
+    test('rejects incomplete, duplicate, ordinary, wrong-Box, and wrong-Canvas reorder sets', async () => {
+      const { repository } = createFixture()
+      const secondCanvasId = '00000000-0000-4000-8000-000000000641'
+      const secondBoxId = '00000000-0000-4000-8000-000000000642'
+      const edgeB = '00000000-0000-4000-8000-000000000643'
+      const ordinaryEdgeId = '00000000-0000-4000-8000-000000000644'
+      await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+      await repository.createCanvas({ id: secondCanvasId, title: 'Other', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 11 })
+      await repository.createTextNode({ id: CONTRACT_NODE_ID, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: 'A' }, x: 1, y: 2, createdAtMs: 20 })
+      await repository.createTextNode({ id: CONTRACT_TARGET_NODE_ID, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: 'B' }, x: 3, y: 4, createdAtMs: 21 })
+      await repository.createCanvasNode({ id: CONTRACT_BOX_ID, canvasId: CONTRACT_CANVAS_ID, type: 'node_box', content: { type: 'node_box' }, x: 5, y: 6, createdAtMs: 22 })
+      await repository.createCanvasNode({ id: secondBoxId, canvasId: CONTRACT_CANVAS_ID, type: 'node_box', content: { type: 'node_box' }, x: 7, y: 8, createdAtMs: 23 })
+      await repository.addCanvasNodeBoxMember({ id: CONTRACT_EDGE_ID, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_BOX_ID, relationType: 'ordered_box_member', createdAtMs: 30 })
+      await repository.addCanvasNodeBoxMember({ id: edgeB, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_TARGET_NODE_ID, targetNodeId: CONTRACT_BOX_ID, relationType: 'unordered_box_member', createdAtMs: 31 })
+      await repository.createCanvasEdge({ id: ordinaryEdgeId, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_TARGET_NODE_ID, relationType: 'default', direction: 'forward', lineStyle: 'solid', createdAtMs: 32 })
+
+      const base = {
+        canvasId: CONTRACT_CANVAS_ID,
+        nodeBoxId: CONTRACT_BOX_ID,
+        orderedMembershipEdgeIds: [CONTRACT_EDGE_ID],
+        unorderedMembershipEdgeIds: [edgeB],
+        updatedAtMs: 40,
+      }
+      await expect(repository.reorderCanvasNodeBoxMemberships({ ...base, unorderedMembershipEdgeIds: [] })).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })
+      await expect(repository.reorderCanvasNodeBoxMemberships({ ...base, unorderedMembershipEdgeIds: [CONTRACT_EDGE_ID] })).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })
+      await expect(repository.reorderCanvasNodeBoxMemberships({ ...base, unorderedMembershipEdgeIds: [ordinaryEdgeId] })).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })
+      await expect(repository.reorderCanvasNodeBoxMemberships({ ...base, nodeBoxId: secondBoxId })).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })
+      await expect(repository.reorderCanvasNodeBoxMemberships({ ...base, canvasId: secondCanvasId })).rejects.toMatchObject({ code: 'NOT_FOUND' })
+      await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: CONTRACT_EDGE_ID, relationType: 'ordered_box_member', membershipPosition: 0, updatedAtMs: 30 }),
+        expect.objectContaining({ id: edgeB, relationType: 'unordered_box_member', membershipPosition: 0, updatedAtMs: 31 }),
+      ]))
     })
 
     test('enforces directed and symmetric duplicate semantics', async () => {

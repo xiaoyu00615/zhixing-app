@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
-import { canvasNodeRegistry, createCanvasNodeRegistry, toCanvasFlowNode, withCanvasNodeRuntimeData } from '@/canvas/nodeRegistry'
+import { canvasNodeRegistry, createCanvasNodeRegistry, orderedMembershipDisplayNumbers, toCanvasFlowNode, withCanvasNodeRuntimeData } from '@/canvas/nodeRegistry'
 
 describe('Canvas node registry', () => {
   test('resolves Text, Sticky, and Node Box renderers and defaults', () => {
@@ -18,9 +18,35 @@ describe('Canvas node registry', () => {
       toCanvasFlowNode({ id: 'member', canvasId: 'c', type: 'text', nodeName: 'Live name', content: { type: 'text', text: '' }, x: 0, y: 0, createdAtMs: 0, updatedAtMs: 0 }, () => undefined, onRename),
       toCanvasFlowNode({ id: 'box', canvasId: 'c', type: 'node_box', nodeName: 'Box', content: { type: 'node_box' }, x: 0, y: 0, createdAtMs: 0, updatedAtMs: 0 }, () => undefined, onRename),
     ]
-    const hydrated = withCanvasNodeRuntimeData(nodes, [{ id: 'edge', canvasId: 'c', sourceNodeId: 'member', targetNodeId: 'box', relationType: 'ordered_box_member', direction: 'forward', lineStyle: 'solid', membershipPosition: 4, createdAtMs: 0, updatedAtMs: 0, deletedAtMs: null }], () => undefined)
+    const hydrated = withCanvasNodeRuntimeData(nodes, [{ id: 'edge', canvasId: 'c', sourceNodeId: 'member', targetNodeId: 'box', relationType: 'ordered_box_member', direction: 'forward', lineStyle: 'solid', membershipPosition: 4, createdAtMs: 0, updatedAtMs: 0, deletedAtMs: null }], () => undefined, () => undefined, false)
     expect(hydrated[1]?.data.orderedMembers).toEqual([{ edgeId: 'edge', nodeName: 'Live name' }])
     expect(hydrated[1]?.data.unorderedMembers).toEqual([])
+  })
+
+  test('derives continuous ordered Edge numbers per Node Box despite position gaps', () => {
+    const edge = (id: string, targetNodeId: string, membershipPosition: number) => ({
+      id,
+      canvasId: 'canvas',
+      sourceNodeId: `source-${id}`,
+      targetNodeId,
+      relationType: 'ordered_box_member' as const,
+      direction: 'forward' as const,
+      lineStyle: 'solid' as const,
+      membershipPosition,
+      createdAtMs: 0,
+      updatedAtMs: 0,
+      deletedAtMs: null,
+    })
+    const numbers = orderedMembershipDisplayNumbers([
+      edge('a', 'box-a', 0),
+      edge('c', 'box-a', 5),
+      edge('d', 'box-b', 7),
+    ])
+    expect([...numbers.entries()]).toEqual([
+      ['a', 1],
+      ['c', 2],
+      ['d', 1],
+    ])
   })
 
   test('rejects duplicate registered node types', () => {

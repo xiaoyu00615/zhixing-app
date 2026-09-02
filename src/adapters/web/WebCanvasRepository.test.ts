@@ -38,6 +38,7 @@ class CanvasWorker implements TaskWorkerEndpoint {
       case 'canvas.nodes.move': return this.backend.moveCanvasNodes(request.input)
       case 'canvas.edge.create': return this.backend.createCanvasEdge(request.input)
       case 'canvas.nodeBox.addMember': return this.backend.addCanvasNodeBoxMember(request.input)
+      case 'canvas.nodeBox.reorderMemberships': return this.backend.reorderCanvasNodeBoxMemberships(request.input)
       case 'canvas.edge.list': return this.backend.listCanvasEdges(request.canvasId)
       case 'canvas.edge.setDirection': return this.backend.updateCanvasEdgeDirection(request.input)
       case 'canvas.edge.setLineStyle': return this.backend.updateCanvasEdgeLineStyle(request.input)
@@ -99,6 +100,30 @@ test('Canvas Edge Worker messages remain capability-specific and strictly parsed
   expect(parseTaskWorkerRequest({
     ...validMembership,
     input: { ...validMembership.input, targetNodeId: validMembership.input.sourceNodeId },
+  })).toBeNull()
+
+  const validReorder = {
+    requestId: 4,
+    type: 'canvas.nodeBox.reorderMemberships',
+    input: {
+      canvasId: validCreate.input.canvasId,
+      nodeBoxId: validCreate.input.targetNodeId,
+      orderedMembershipEdgeIds: [validCreate.input.id],
+      unorderedMembershipEdgeIds: [validMembership.input.id],
+      updatedAtMs: 12,
+    },
+  }
+  expect(parseTaskWorkerRequest(validReorder)).toEqual(validReorder)
+  expect(parseTaskWorkerRequest({
+    ...validReorder,
+    input: {
+      ...validReorder.input,
+      unorderedMembershipEdgeIds: [validCreate.input.id],
+    },
+  })).toBeNull()
+  expect(parseTaskWorkerRequest({
+    ...validReorder,
+    input: { ...validReorder.input, orderedMembershipEdgeIds: ['bad'] },
   })).toBeNull()
 
   const semanticUpdate = {

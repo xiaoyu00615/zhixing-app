@@ -38,6 +38,7 @@ interface CanvasHarness {
   moveCanvasNodes(input: object): Promise<readonly Record<string, unknown>[]>
   createCanvasEdge(input: object): Promise<Record<string, unknown>>
   addCanvasNodeBoxMember(input: object): Promise<Record<string, unknown>>
+  reorderCanvasNodeBoxMemberships(input: object): Promise<readonly Record<string, unknown>[]>
   listCanvasEdges(canvasId: string): Promise<readonly Record<string, unknown>[]>
   updateCanvasEdgeRelationType(input: object): Promise<Record<string, unknown>>
   updateCanvasEdgeDirection(input: object): Promise<Record<string, unknown>>
@@ -78,6 +79,28 @@ const BOX_ORDERED_EDGE_ID = '00000000-0000-4000-8000-000000001006'
 const BOX_UNORDERED_EDGE_ID = '00000000-0000-4000-8000-000000001007'
 const BOX_EMPTY_ID = '00000000-0000-4000-8000-000000001008'
 const BOX_ORDINARY_EDGE_ID = '00000000-0000-4000-8000-000000001009'
+const REORDER_CANVAS_ID = '00000000-0000-4000-8000-000000001101'
+const REORDER_NODE_IDS = [
+  '00000000-0000-4000-8000-000000001102',
+  '00000000-0000-4000-8000-000000001103',
+  '00000000-0000-4000-8000-000000001104',
+  '00000000-0000-4000-8000-000000001105',
+  '00000000-0000-4000-8000-000000001108',
+  '00000000-0000-4000-8000-000000001109',
+] as const
+const REORDER_BOX_IDS = [
+  '00000000-0000-4000-8000-000000001106',
+  '00000000-0000-4000-8000-000000001107',
+] as const
+const REORDER_EDGE_IDS = [
+  '00000000-0000-4000-8000-000000001110',
+  '00000000-0000-4000-8000-000000001111',
+  '00000000-0000-4000-8000-000000001112',
+  '00000000-0000-4000-8000-000000001113',
+  '00000000-0000-4000-8000-000000001114',
+  '00000000-0000-4000-8000-000000001115',
+] as const
+const REORDER_ORDINARY_EDGE_ID = '00000000-0000-4000-8000-000000001116'
 
 async function openHarnessPage(context: BrowserContext, baseURL: string): Promise<Page> {
   const page = context.pages()[0] ?? await context.newPage()
@@ -975,6 +998,178 @@ test('organizes live Canvas nodes in ordered and unordered Node Box sections', a
       expect.objectContaining({ sourceNodeId: BOX_TEXT_ID, relationType: 'ordered_box_member', membershipPosition: 0 }),
       expect.objectContaining({ sourceNodeId: BOX_EXTRA_ID, relationType: 'ordered_box_member', membershipPosition: 1 }),
     ]))
+  } finally {
+    await context?.close()
+    await rm(profilePath, { recursive: true, force: true })
+  }
+})
+
+test('reorders Node Box sections atomically and restores the exact order after restart', async ({ browserName }, testInfo) => {
+  test.setTimeout(150_000)
+  expect(browserName).toBe('chromium')
+  const baseURL = testInfo.project.use.baseURL
+  if (typeof baseURL !== 'string') throw new Error('Playwright baseURL is required.')
+  const profilePath = testInfo.outputPath('canvas-node-box-reorder-profile')
+  const outputRoot = resolve(testInfo.outputDir)
+  const resolvedProfile = resolve(profilePath)
+  if (!resolvedProfile.startsWith(`${outputRoot}${sep}`)) throw new Error('Unsafe test profile path.')
+
+  let context: BrowserContext | null = null
+  try {
+    context = await chromium.launchPersistentContext(profilePath, {
+      channel: 'chromium',
+      headless: true,
+      viewport: { width: 1920, height: 1080 },
+    })
+    let page = await openHarnessPage(context, baseURL)
+    await page.evaluate(async ({ canvasId, nodeIds, boxIds, edgeIds, ordinaryEdgeId }) => {
+      const harness = (window as unknown as HarnessWindow).__taskPersistenceHarness
+      await harness.createCanvas({ id: canvasId, title: 'Node Box Reorder', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 400 })
+      const names = ['A', 'B', 'C', 'D', 'E', 'F']
+      for (const [index, id] of nodeIds.entries()) {
+        await harness.createCanvasNode({
+          id,
+          canvasId,
+          type: index % 2 === 0 ? 'text' : 'sticky',
+          content: { type: index % 2 === 0 ? 'text' : 'sticky', text: names[index] },
+          x: 120 + (index % 3) * 230,
+          y: 170 + Math.floor(index / 3) * 310,
+          createdAtMs: 410 + index,
+        })
+        await harness.renameCanvasNode({ canvasId, id, nodeName: names[index], updatedAtMs: 430 + index })
+      }
+      for (const [index, id] of boxIds.entries()) {
+        await harness.createCanvasNode({ id, canvasId, type: 'node_box', content: { type: 'node_box' }, x: 900 + index * 380, y: 220, createdAtMs: 450 + index })
+        await harness.renameCanvasNode({ canvasId, id, nodeName: index === 0 ? '主节点盒' : '第二节点盒', updatedAtMs: 460 + index })
+      }
+      const memberships = [
+        [edgeIds[0], nodeIds[0], boxIds[0], 'ordered_box_member'],
+        [edgeIds[1], nodeIds[1], boxIds[0], 'ordered_box_member'],
+        [edgeIds[2], nodeIds[2], boxIds[0], 'ordered_box_member'],
+        [edgeIds[3], nodeIds[3], boxIds[0], 'unordered_box_member'],
+        [edgeIds[4], nodeIds[4], boxIds[1], 'ordered_box_member'],
+        [edgeIds[5], nodeIds[5], boxIds[1], 'ordered_box_member'],
+      ] as const
+      for (const [index, [id, sourceNodeId, targetNodeId, relationType]] of memberships.entries()) {
+        await harness.addCanvasNodeBoxMember({ id, canvasId, sourceNodeId, targetNodeId, relationType, createdAtMs: 470 + index })
+      }
+      await harness.createCanvasEdge({ id: ordinaryEdgeId, canvasId, sourceNodeId: nodeIds[0], targetNodeId: nodeIds[1], relationType: 'default', direction: 'forward', lineStyle: 'solid', createdAtMs: 480 })
+      await harness.shutdown()
+    }, {
+      canvasId: REORDER_CANVAS_ID,
+      nodeIds: REORDER_NODE_IDS,
+      boxIds: REORDER_BOX_IDS,
+      edgeIds: REORDER_EDGE_IDS,
+      ordinaryEdgeId: REORDER_ORDINARY_EDGE_ID,
+    })
+
+    await page.goto(`${baseURL}/canvas/${REORDER_CANVAS_ID}`)
+    await expect(page.getByRole('heading', { name: 'Node Box Reorder' })).toBeVisible()
+    const mainBox = page.locator(`.react-flow__node[data-id="${REORDER_BOX_IDS[0]}"]`)
+    const secondBox = page.locator(`.react-flow__node[data-id="${REORDER_BOX_IDS[1]}"]`)
+    const memberNames = async (box: typeof mainBox, sectionName: string) => {
+      const section = box.getByRole('heading', { name: sectionName }).locator('..')
+      return section.locator('li[aria-label^="拖动成员 "] span[title]').allTextContents()
+    }
+    const dragToRow = async (sourceName: string, targetName: string, before: boolean) => {
+      const source = mainBox.getByLabel(`拖动成员 ${sourceName}`)
+      const target = mainBox.getByLabel(`拖动成员 ${targetName}`)
+      await expect(source).toHaveAttribute('draggable', 'true')
+      const bounds = await target.boundingBox()
+      if (bounds === null) throw new Error('Node Box member drop target is not visible.')
+      const dataTransfer = await page.evaluateHandle(() => new DataTransfer())
+      const clientY = before ? bounds.y + 2 : bounds.y + Math.max(2, bounds.height - 2)
+      await source.dispatchEvent('dragstart', { dataTransfer })
+      await target.dispatchEvent('dragover', { clientY, dataTransfer })
+      await target.dispatchEvent('drop', { clientY, dataTransfer })
+      await source.dispatchEvent('dragend', { dataTransfer })
+      await dataTransfer.dispose()
+      await expect(page.getByRole('status')).toContainText('成员顺序已保存')
+    }
+    const positionAuditNodeIds = [
+      ...REORDER_NODE_IDS.slice(0, 4),
+      REORDER_BOX_IDS[0],
+    ]
+    const positionsBefore = await Promise.all(
+      positionAuditNodeIds.map((id) =>
+        page.locator(`.react-flow__node[data-id="${id}"]`).boundingBox(),
+      ),
+    )
+
+    expect(await memberNames(mainBox, '有序成员')).toEqual(['A', 'B', 'C'])
+    expect(await memberNames(mainBox, '无序成员')).toEqual(['D'])
+    expect(await memberNames(secondBox, '有序成员')).toEqual(['E', 'F'])
+    await dragToRow('C', 'A', true)
+    await expect.poll(() => memberNames(mainBox, '有序成员')).toEqual(['C', 'A', 'B'])
+    await dragToRow('A', 'D', false)
+    await expect.poll(() => memberNames(mainBox, '无序成员')).toEqual(['D', 'A'])
+    await dragToRow('A', 'D', true)
+    await expect.poll(() => memberNames(mainBox, '无序成员')).toEqual(['A', 'D'])
+    await dragToRow('D', 'B', true)
+    await expect.poll(() => memberNames(mainBox, '有序成员')).toEqual(['C', 'D', 'B'])
+    await expect.poll(() => memberNames(mainBox, '无序成员')).toEqual(['A'])
+
+    const positionsAfter = await Promise.all(
+      positionAuditNodeIds.map((id) =>
+        page.locator(`.react-flow__node[data-id="${id}"]`).boundingBox(),
+      ),
+    )
+    expect(positionsAfter).toEqual(positionsBefore)
+    await expect(page.locator(`.react-flow__edge[data-id="${REORDER_ORDINARY_EDGE_ID}"]`)).toHaveCount(1)
+    await expect(page.locator('.react-flow__edge-text').filter({ hasText: /^1$/ })).toHaveCount(2)
+    await expect(page.locator('.react-flow__edge-text').filter({ hasText: /^2$/ })).toHaveCount(2)
+    await page.screenshot({ path: testInfo.outputPath('07-node-box-reordered.png') })
+
+    page = await openHarnessPage(context, baseURL)
+    const persistenceAudit = await page.evaluate(async ({ canvasId, boxId, orderedIds, unorderedIds }) => {
+      const harness = (window as unknown as HarnessWindow).__taskPersistenceHarness
+      const before = await harness.listCanvasEdges(canvasId)
+      const beforeMemberships = before.filter((edge) => edge.targetNodeId === boxId)
+      const beforeUpdatedAt = beforeMemberships.map((edge) => [edge.id, edge.updatedAtMs])
+      await harness.reorderCanvasNodeBoxMemberships({
+        canvasId,
+        nodeBoxId: boxId,
+        orderedMembershipEdgeIds: orderedIds,
+        unorderedMembershipEdgeIds: unorderedIds,
+        updatedAtMs: 999,
+      })
+      const afterNoop = await harness.listCanvasEdges(canvasId)
+      let rejectedIncompleteSet = false
+      try {
+        await harness.reorderCanvasNodeBoxMemberships({
+          canvasId,
+          nodeBoxId: boxId,
+          orderedMembershipEdgeIds: orderedIds.slice(0, 2),
+          unorderedMembershipEdgeIds: unorderedIds,
+          updatedAtMs: 1000,
+        })
+      } catch {
+        rejectedIncompleteSet = true
+      }
+      const afterFailure = await harness.listCanvasEdges(canvasId)
+      return {
+        before,
+        afterNoop,
+        afterFailure,
+        beforeUpdatedAt,
+        rejectedIncompleteSet,
+      }
+    }, {
+      canvasId: REORDER_CANVAS_ID,
+      boxId: REORDER_BOX_IDS[0],
+      orderedIds: [REORDER_EDGE_IDS[2], REORDER_EDGE_IDS[3], REORDER_EDGE_IDS[1]],
+      unorderedIds: [REORDER_EDGE_IDS[0]],
+    })
+    expect(persistenceAudit.afterNoop).toEqual(persistenceAudit.before)
+    expect(persistenceAudit.afterFailure).toEqual(persistenceAudit.before)
+    expect(persistenceAudit.rejectedIncompleteSet).toBe(true)
+
+    await page.goto(`${baseURL}/canvas/${REORDER_CANVAS_ID}`)
+    await expect(page.getByRole('heading', { name: 'Node Box Reorder' })).toBeVisible()
+    const restoredMainBox = page.locator(`.react-flow__node[data-id="${REORDER_BOX_IDS[0]}"]`)
+    await expect.poll(() => memberNames(restoredMainBox, '有序成员')).toEqual(['C', 'D', 'B'])
+    await expect.poll(() => memberNames(restoredMainBox, '无序成员')).toEqual(['A'])
+    await page.screenshot({ path: testInfo.outputPath('08-node-box-reorder-restart.png') })
   } finally {
     await context?.close()
     await rm(profilePath, { recursive: true, force: true })

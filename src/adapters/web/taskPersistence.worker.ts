@@ -277,6 +277,12 @@ async function handleRequest(value: unknown): Promise<void> {
           state.database.addCanvasNodeBoxMember(request.input),
         )
         return
+      case 'canvas.nodeBox.reorderMemberships':
+        success(
+          request.requestId,
+          state.database.reorderCanvasNodeBoxMemberships(request.input),
+        )
+        return
       case 'canvas.edge.list':
         success(
           request.requestId,

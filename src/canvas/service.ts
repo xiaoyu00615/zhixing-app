@@ -119,6 +119,12 @@ export interface CanvasService {
     targetNodeId: string,
     relationType: CanvasMembershipRelationType,
   ): Promise<CanvasEdge>
+  reorderNodeBoxMemberships(
+    canvasId: string,
+    nodeBoxId: string,
+    orderedMembershipEdgeIds: readonly string[],
+    unorderedMembershipEdgeIds: readonly string[],
+  ): Promise<readonly CanvasEdge[]>
   listCanvasEdges(canvasId: string): Promise<readonly CanvasEdge[]>
   updateCanvasEdgeDirection(
     id: string,
@@ -412,6 +418,35 @@ export function createCanvasService({
           targetNodeId,
           relationType,
           createdAtMs: readNowMs(nowMs),
+        }),
+      )
+    },
+    reorderNodeBoxMemberships(
+      canvasId,
+      nodeBoxId,
+      orderedMembershipEdgeIds,
+      unorderedMembershipEdgeIds,
+    ) {
+      validateId(canvasId, 'canvasId')
+      validateId(nodeBoxId, 'targetNodeId')
+      const edgeIds = new Set<string>()
+      const validateEdgeIds = (ids: readonly string[]) => ids.map((id) => {
+        const validatedId = validateId(id, 'id')
+        if (edgeIds.has(validatedId)) {
+          throw new CanvasApplicationError('VALIDATION', 'id')
+        }
+        edgeIds.add(validatedId)
+        return validatedId
+      })
+      const ordered = validateEdgeIds(orderedMembershipEdgeIds)
+      const unordered = validateEdgeIds(unorderedMembershipEdgeIds)
+      return callRepository(() =>
+        repository.reorderCanvasNodeBoxMemberships({
+          canvasId,
+          nodeBoxId,
+          orderedMembershipEdgeIds: ordered,
+          unorderedMembershipEdgeIds: unordered,
+          updatedAtMs: readNowMs(nowMs),
         }),
       )
     },

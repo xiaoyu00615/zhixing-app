@@ -101,6 +101,14 @@ export interface AddCanvasNodeBoxMemberInput {
   readonly createdAtMs: number
 }
 
+export interface ReorderCanvasNodeBoxMembershipsInput {
+  readonly canvasId: string
+  readonly nodeBoxId: string
+  readonly orderedMembershipEdgeIds: readonly string[]
+  readonly unorderedMembershipEdgeIds: readonly string[]
+  readonly updatedAtMs: number
+}
+
 export interface UpdateCanvasEdgeDirectionInput {
   readonly id: string
   readonly direction: CanvasEdgeDirection
@@ -143,6 +151,9 @@ export interface CanvasRepository {
   moveCanvasNodes(input: MoveCanvasNodesInput): Promise<readonly CanvasNode[]>
   createCanvasEdge(input: CreateCanvasEdgeInput): Promise<CanvasEdge>
   addCanvasNodeBoxMember(input: AddCanvasNodeBoxMemberInput): Promise<CanvasEdge>
+  reorderCanvasNodeBoxMemberships(
+    input: ReorderCanvasNodeBoxMembershipsInput,
+  ): Promise<readonly CanvasEdge[]>
   listCanvasEdges(canvasId: string): Promise<readonly CanvasEdge[]>
   updateCanvasEdgeDirection(
     input: UpdateCanvasEdgeDirectionInput,

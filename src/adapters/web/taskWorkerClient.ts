@@ -365,6 +365,16 @@ export class TaskWorkerClient {
     }))
   }
 
+  reorderCanvasNodeBoxMemberships(
+    input: import('@/canvas/repository').ReorderCanvasNodeBoxMembershipsInput,
+  ): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.nodeBox.reorderMemberships',
+      input,
+    }))
+  }
+
   listCanvasEdges(canvasId: string): Promise<unknown> {
     return this.send((requestId) => ({
       requestId,

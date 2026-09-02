@@ -15,6 +15,7 @@ const NODE_ID = '00000000-0000-4000-8000-000000000602'
 const TARGET_NODE_ID = '00000000-0000-4000-8000-000000000603'
 const EDGE_ID = '00000000-0000-4000-8000-000000000604'
 const SECOND_BOX_ID = '00000000-0000-4000-8000-000000000605'
+const SECOND_EDGE_ID = '00000000-0000-4000-8000-000000000606'
 
 function fixture(): {
   repository: CanvasRepository
@@ -24,6 +25,7 @@ function fixture(): {
   createTextNodeMock: ReturnType<typeof vi.fn>
   createCanvasEdgeMock: ReturnType<typeof vi.fn>
   addCanvasNodeBoxMemberMock: ReturnType<typeof vi.fn>
+  reorderCanvasNodeBoxMembershipsMock: ReturnType<typeof vi.fn>
   updateCanvasEdgeDirectionMock: ReturnType<typeof vi.fn>
   updateCanvasEdgeLineStyleMock: ReturnType<typeof vi.fn>
   updateCanvasEdgeRelationTypeMock: ReturnType<typeof vi.fn>
@@ -70,6 +72,13 @@ function fixture(): {
     relationType: 'ordered_box_member' as const,
     membershipPosition: 0,
   }))
+  const reorderCanvasNodeBoxMembershipsMock = vi.fn(() => Promise.resolve([
+    {
+      ...edge,
+      relationType: 'ordered_box_member' as const,
+      membershipPosition: 0,
+    },
+  ]))
   const updateCanvasEdgeDirectionMock = vi.fn((input) =>
     Promise.resolve({ ...edge, ...input }),
   )
@@ -103,6 +112,7 @@ function fixture(): {
       moveCanvasNodes: moveCanvasNodesMock,
       createCanvasEdge: createCanvasEdgeMock,
       addCanvasNodeBoxMember: addCanvasNodeBoxMemberMock,
+      reorderCanvasNodeBoxMemberships: reorderCanvasNodeBoxMembershipsMock,
       listCanvasEdges: vi.fn(() => Promise.resolve([edge])),
       updateCanvasEdgeDirection: updateCanvasEdgeDirectionMock,
       updateCanvasEdgeLineStyle: updateCanvasEdgeLineStyleMock,
@@ -113,6 +123,7 @@ function fixture(): {
     createTextNodeMock,
     createCanvasEdgeMock,
     addCanvasNodeBoxMemberMock,
+    reorderCanvasNodeBoxMembershipsMock,
     updateCanvasEdgeDirectionMock,
     updateCanvasEdgeLineStyleMock,
     updateCanvasEdgeRelationTypeMock,
@@ -451,5 +462,62 @@ describe('CanvasService', () => {
         'unordered_box_member',
       ),
     ).rejects.toMatchObject({ code: 'VALIDATION' })
+  })
+
+  test('validates and timestamps one complete Node Box membership reorder', async () => {
+    const { repository, reorderCanvasNodeBoxMembershipsMock } = fixture()
+    const service = createCanvasService({ repository, nowMs: () => 95 })
+
+    await service.reorderNodeBoxMemberships(
+      CANVAS_ID,
+      TARGET_NODE_ID,
+      [SECOND_EDGE_ID, EDGE_ID],
+      [],
+    )
+    expect(reorderCanvasNodeBoxMembershipsMock).toHaveBeenCalledWith({
+      canvasId: CANVAS_ID,
+      nodeBoxId: TARGET_NODE_ID,
+      orderedMembershipEdgeIds: [SECOND_EDGE_ID, EDGE_ID],
+      unorderedMembershipEdgeIds: [],
+      updatedAtMs: 95,
+    })
+  })
+
+  test('rejects invalid or duplicate membership reorder IDs and maps repository failure', async () => {
+    const { repository } = fixture()
+    const service = createCanvasService({ repository })
+
+    expect(() =>
+      service.reorderNodeBoxMemberships(
+        CANVAS_ID,
+        TARGET_NODE_ID,
+        [EDGE_ID],
+        [EDGE_ID],
+      ),
+    ).toThrowError(expect.objectContaining({ code: 'VALIDATION', field: 'id' }))
+    expect(() =>
+      service.reorderNodeBoxMemberships(
+        CANVAS_ID,
+        TARGET_NODE_ID,
+        ['bad'],
+        [],
+      ),
+    ).toThrowError(expect.objectContaining({ code: 'VALIDATION', field: 'id' }))
+    repository.reorderCanvasNodeBoxMemberships = vi.fn(() =>
+      Promise.reject(
+        new CanvasRepositoryError(
+          'PERSISTENCE_FAILED',
+          'reorderCanvasNodeBoxMemberships',
+        ),
+      ),
+    )
+    await expect(
+      service.reorderNodeBoxMemberships(
+        CANVAS_ID,
+        TARGET_NODE_ID,
+        [EDGE_ID],
+        [],
+      ),
+    ).rejects.toMatchObject({ code: 'UNAVAILABLE' })
   })
 })

@@ -28,6 +28,7 @@ import {
   type CreateTextNodeInput,
   type MoveCanvasNodeInput,
   type MoveCanvasNodesInput,
+  type ReorderCanvasNodeBoxMembershipsInput,
   type DeleteCanvasEdgeInput,
   type RenameCanvasInput,
   type RenameCanvasNodeInput,
@@ -407,6 +408,35 @@ export class WebCanvasRepository implements CanvasRepository {
         await this.#client.addCanvasNodeBoxMember(input),
         operation,
       )
+    } catch (error: unknown) {
+      throw mapError(error, operation)
+    }
+  }
+
+  async reorderCanvasNodeBoxMemberships(
+    input: ReorderCanvasNodeBoxMembershipsInput,
+  ): Promise<readonly CanvasEdge[]> {
+    const operation = 'reorderCanvasNodeBoxMemberships'
+    validateId(input.canvasId, operation)
+    validateId(input.nodeBoxId, operation)
+    validateTimestamp(input.updatedAtMs, operation)
+    const edgeIds = new Set<string>()
+    for (const edgeId of [
+      ...input.orderedMembershipEdgeIds,
+      ...input.unorderedMembershipEdgeIds,
+    ]) {
+      validateId(edgeId, operation)
+      if (edgeIds.has(edgeId)) {
+        throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+      }
+      edgeIds.add(edgeId)
+    }
+    try {
+      const value = await this.#client.reorderCanvasNodeBoxMemberships(input)
+      if (!Array.isArray(value)) {
+        throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+      }
+      return value.map((edge) => parseEdge(edge, operation))
     } catch (error: unknown) {
       throw mapError(error, operation)
     }

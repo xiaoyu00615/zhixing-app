@@ -30,6 +30,13 @@ vi.mock('@xyflow/react', () => {
       readonly nodeName: string
       readonly renameRequest?: number
       readonly onRename: (id: string, nodeName: string) => Promise<boolean>
+      readonly orderedMembers?: readonly { readonly edgeId: string }[]
+      readonly unorderedMembers?: readonly { readonly edgeId: string }[]
+      readonly onReorderMemberships?: (
+        nodeBoxId: string,
+        orderedMembershipEdgeIds: readonly string[],
+        unorderedMembershipEdgeIds: readonly string[],
+      ) => void
     }
     readonly selected?: boolean
   }
@@ -93,6 +100,23 @@ vi.mock('@xyflow/react', () => {
               onBlur={(event) => node.data.onCommit(node.id, event.currentTarget.value)}
             />
             <button type="button" onClick={() => void node.data.onRename(node.id, '新名称')}>模拟重命名 {node.id}</button>
+            {node.data.onReorderMemberships !== undefined && (
+              <>
+                <span data-testid={`成员顺序 ${node.id}`}>
+                  {`${node.data.orderedMembers?.map((member) => member.edgeId).join(',') ?? ''}|${node.data.unorderedMembers?.map((member) => member.edgeId).join(',') ?? ''}`}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => node.data.onReorderMemberships?.(
+                    node.id,
+                    [...(node.data.orderedMembers ?? [])].reverse().map((member) => member.edgeId),
+                    (node.data.unorderedMembers ?? []).map((member) => member.edgeId),
+                  )}
+                >
+                  模拟成员重排 {node.id}
+                </button>
+              </>
+            )}
           </div>
         ))}
         {nodes[0] !== undefined && (
@@ -181,6 +205,7 @@ const NODE_ID = '00000000-0000-4000-8000-000000000602'
 const CREATED_NODE_ID = '00000000-0000-4000-8000-000000000603'
 const TARGET_NODE_ID = '00000000-0000-4000-8000-000000000604'
 const EDGE_ID = '00000000-0000-4000-8000-000000000605'
+const SECOND_EDGE_ID = '00000000-0000-4000-8000-000000000606'
 const BOX_NODE_ID = '00000000-0000-4000-8000-000000000607'
 
 function fixture() {
@@ -207,6 +232,7 @@ function fixture() {
     relationType,
     membershipPosition: 0,
   }))
+  const reorderNodeBoxMembershipsMock = vi.fn<CanvasService['reorderNodeBoxMemberships']>(() => Promise.resolve([]))
   const updateCanvasEdgeDirectionMock = vi.fn<CanvasService['updateCanvasEdgeDirection']>((id, direction) => Promise.resolve({ ...edge, id, direction, updatedAtMs: 20 }))
   const updateCanvasEdgeLineStyleMock = vi.fn<CanvasService['updateCanvasEdgeLineStyle']>((id, lineStyle) => Promise.resolve({ ...edge, id, lineStyle, updatedAtMs: 20 }))
   const updateCanvasEdgeRelationTypeMock = vi.fn<CanvasService['updateCanvasEdgeRelationType']>((id, relationType) => Promise.resolve({ ...edge, id, relationType, direction: relationType === 'peer' ? 'none' : 'forward', lineStyle: 'solid', updatedAtMs: 20 }))
@@ -222,13 +248,14 @@ function fixture() {
     moveCanvasNodes: moveCanvasNodesMock,
     createCanvasEdge: createCanvasEdgeMock, listCanvasEdges: vi.fn(),
     addNodeBoxMember: addNodeBoxMemberMock,
+    reorderNodeBoxMemberships: reorderNodeBoxMembershipsMock,
     updateCanvasEdgeDirection: updateCanvasEdgeDirectionMock,
     updateCanvasEdgeLineStyle: updateCanvasEdgeLineStyleMock,
     updateCanvasEdgeRelationType: updateCanvasEdgeRelationTypeMock,
     deleteCanvasEdge: deleteCanvasEdgeMock,
   }
   const openRuntime: OpenCanvasRuntime = vi.fn(() => Promise.resolve({ service, dispose: vi.fn() }))
-  return { canvas, node, service, openRuntime, openCanvasMock, createTextNodeMock, editTextNodeMock, createCanvasNodeMock, updateCanvasNodeContentMock, renameCanvasNodeMock, moveCanvasNodeMock, moveCanvasNodesMock, updateViewportMock, createCanvasEdgeMock, addNodeBoxMemberMock, updateCanvasEdgeDirectionMock, updateCanvasEdgeLineStyleMock, updateCanvasEdgeRelationTypeMock, deleteCanvasEdgeMock }
+  return { canvas, node, service, openRuntime, openCanvasMock, createTextNodeMock, editTextNodeMock, createCanvasNodeMock, updateCanvasNodeContentMock, renameCanvasNodeMock, moveCanvasNodeMock, moveCanvasNodesMock, updateViewportMock, createCanvasEdgeMock, addNodeBoxMemberMock, reorderNodeBoxMembershipsMock, updateCanvasEdgeDirectionMock, updateCanvasEdgeLineStyleMock, updateCanvasEdgeRelationTypeMock, deleteCanvasEdgeMock }
 }
 
 function renderEditor(openRuntime: OpenCanvasRuntime) {
@@ -318,6 +345,96 @@ describe('CanvasEditorPage', () => {
       BOX_NODE_ID,
       'ordered_box_member',
     ))
+  })
+
+  test('optimistically reorders Node Box members and restores the snapshot on failure', async () => {
+    const {
+      canvas,
+      node,
+      openRuntime,
+      openCanvasMock,
+      reorderNodeBoxMembershipsMock,
+    } = fixture()
+    const secondNode: CanvasNode = {
+      ...node,
+      id: TARGET_NODE_ID,
+      nodeName: 'Second',
+      createdAtMs: 11,
+      updatedAtMs: 11,
+    }
+    const boxNode: CanvasNode = {
+      ...node,
+      id: BOX_NODE_ID,
+      type: 'node_box',
+      nodeName: '收集盒',
+      content: { type: 'node_box' },
+      createdAtMs: 12,
+      updatedAtMs: 12,
+    }
+    const memberships: CanvasEdge[] = [
+      {
+        id: EDGE_ID,
+        canvasId: CANVAS_ID,
+        sourceNodeId: NODE_ID,
+        targetNodeId: BOX_NODE_ID,
+        relationType: 'ordered_box_member',
+        direction: 'forward',
+        lineStyle: 'solid',
+        membershipPosition: 0,
+        createdAtMs: 20,
+        updatedAtMs: 20,
+        deletedAtMs: null,
+      },
+      {
+        id: SECOND_EDGE_ID,
+        canvasId: CANVAS_ID,
+        sourceNodeId: TARGET_NODE_ID,
+        targetNodeId: BOX_NODE_ID,
+        relationType: 'ordered_box_member',
+        direction: 'forward',
+        lineStyle: 'solid',
+        membershipPosition: 1,
+        createdAtMs: 21,
+        updatedAtMs: 21,
+        deletedAtMs: null,
+      },
+    ]
+    openCanvasMock.mockResolvedValueOnce({
+      canvas,
+      nodes: [node, secondNode, boxNode],
+      edges: memberships,
+    })
+    let rejectReorder: ((error: Error) => void) | undefined
+    reorderNodeBoxMembershipsMock.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => {
+        rejectReorder = reject
+      }),
+    )
+
+    renderEditor(openRuntime)
+    await screen.findByRole('heading', { name: '产品构思' })
+    expect(screen.getByTestId(`成员顺序 ${BOX_NODE_ID}`)).toHaveTextContent(
+      `${EDGE_ID},${SECOND_EDGE_ID}|`,
+    )
+    await userEvent.click(
+      screen.getByRole('button', { name: `模拟成员重排 ${BOX_NODE_ID}` }),
+    )
+    expect(reorderNodeBoxMembershipsMock).toHaveBeenCalledWith(
+      CANVAS_ID,
+      BOX_NODE_ID,
+      [SECOND_EDGE_ID, EDGE_ID],
+      [],
+    )
+    expect(screen.getByTestId(`成员顺序 ${BOX_NODE_ID}`)).toHaveTextContent(
+      `${SECOND_EDGE_ID},${EDGE_ID}|`,
+    )
+    act(() => rejectReorder?.(new Error('private')))
+    await waitFor(() => expect(
+      screen.getByTestId(`成员顺序 ${BOX_NODE_ID}`),
+    ).toHaveTextContent(`${EDGE_ID},${SECOND_EDGE_ID}|`))
+    expect(screen.getByRole('status')).toHaveTextContent(
+      '成员顺序保存失败，已恢复原顺序。',
+    )
   })
 
   test('renames through CanvasService and rolls UI state back on persistence failure', async () => {

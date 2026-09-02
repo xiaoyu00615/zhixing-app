@@ -30,6 +30,7 @@ import {
   type DeleteCanvasEdgeInput,
   type MoveCanvasNodeInput,
   type MoveCanvasNodesInput,
+  type ReorderCanvasNodeBoxMembershipsInput,
   type RenameCanvasInput,
   type RenameCanvasNodeInput,
   type UpdateCanvasViewportInput,
@@ -296,6 +297,21 @@ export class NativeCanvasRepository implements CanvasRepository {
       ),
       'addCanvasNodeBoxMember',
     )
+  }
+
+  async reorderCanvasNodeBoxMemberships(
+    input: ReorderCanvasNodeBoxMembershipsInput,
+  ): Promise<readonly CanvasEdge[]> {
+    const operation = 'reorderCanvasNodeBoxMemberships'
+    const value = await invokeCanvas(
+      'canvas_node_box_reorder_memberships',
+      operation,
+      { input },
+    )
+    if (!Array.isArray(value)) {
+      throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+    }
+    return value.map((edge) => parseEdge(edge, operation))
   }
 
   async listCanvasEdges(canvasId: string): Promise<readonly CanvasEdge[]> {

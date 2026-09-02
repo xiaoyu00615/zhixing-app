@@ -8,8 +8,8 @@ use crate::canvas::{
     CanvasEdgeRecord, CanvasError, CanvasNodeContent, CanvasNodePositionMove, CanvasNodeRecord,
     CanvasRecord, CanvasViewport, CreateCanvasEdgeInput, CreateCanvasInput, CreateCanvasNodeInput,
     DeleteCanvasEdgeInput, MoveCanvasNodeInput, MoveCanvasNodesInput, RenameCanvasInput,
-    RenameCanvasNodeInput, UpdateCanvasEdgeDirectionInput, UpdateCanvasEdgeLineStyleInput,
-    UpdateCanvasNodeContentInput, UpdateCanvasViewportInput,
+    RenameCanvasNodeInput, ReorderCanvasNodeBoxMembershipsInput, UpdateCanvasEdgeDirectionInput,
+    UpdateCanvasEdgeLineStyleInput, UpdateCanvasNodeContentInput, UpdateCanvasViewportInput,
 };
 use crate::project::{
     CreateProjectInput, ProjectDbService, ProjectError, ProjectRecord, RenameProjectInput,
@@ -838,6 +838,16 @@ pub(crate) struct AddCanvasNodeBoxMemberDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ReorderCanvasNodeBoxMembershipsDto {
+    canvas_id: String,
+    node_box_id: String,
+    ordered_membership_edge_ids: Vec<String>,
+    unordered_membership_edge_ids: Vec<String>,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct UpdateCanvasEdgeDirectionDto {
     id: String,
     direction: CanvasEdgeDirection,
@@ -1179,6 +1189,27 @@ pub(crate) fn canvas_node_box_add_member(
         },
     )
     .map(CanvasEdgeDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_node_box_reorder_memberships(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: ReorderCanvasNodeBoxMembershipsDto,
+) -> Result<Vec<CanvasEdgeDto>, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::reorder_node_box_memberships(
+        &connection,
+        ReorderCanvasNodeBoxMembershipsInput {
+            canvas_id: input.canvas_id,
+            node_box_id: input.node_box_id,
+            ordered_membership_edge_ids: input.ordered_membership_edge_ids,
+            unordered_membership_edge_ids: input.unordered_membership_edge_ids,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(|edges| edges.into_iter().map(CanvasEdgeDto::from).collect())
     .map_err(Into::into)
 }
 

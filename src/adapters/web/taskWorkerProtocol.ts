@@ -47,6 +47,7 @@ import type {
   DeleteCanvasEdgeInput,
   MoveCanvasNodeInput,
   MoveCanvasNodesInput,
+  ReorderCanvasNodeBoxMembershipsInput,
   RenameCanvasInput,
   RenameCanvasNodeInput,
   UpdateCanvasViewportInput,
@@ -222,6 +223,11 @@ export type TaskWorkerRequest =
       readonly requestId: number
       readonly type: 'canvas.nodeBox.addMember'
       readonly input: AddCanvasNodeBoxMemberInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.nodeBox.reorderMemberships'
+      readonly input: ReorderCanvasNodeBoxMembershipsInput
     }
   | {
       readonly requestId: number
@@ -433,6 +439,34 @@ function isAddCanvasNodeBoxMemberInput(
     isCanvasMembershipRelationType(value.relationType) &&
     isCanvasTimestamp(value.createdAtMs)
   )
+}
+
+function isReorderCanvasNodeBoxMembershipsInput(
+  value: unknown,
+): value is ReorderCanvasNodeBoxMembershipsInput {
+  if (
+    !isRecord(value) ||
+    !isCanonicalCanvasId(value.canvasId) ||
+    !isCanonicalCanvasId(value.nodeBoxId) ||
+    !Array.isArray(value.orderedMembershipEdgeIds) ||
+    !Array.isArray(value.unorderedMembershipEdgeIds) ||
+    !isCanvasTimestamp(value.updatedAtMs)
+  ) {
+    return false
+  }
+  const orderedMembershipEdgeIds: unknown[] = value.orderedMembershipEdgeIds
+  const unorderedMembershipEdgeIds: unknown[] = value.unorderedMembershipEdgeIds
+  const edgeIds = new Set<string>()
+  for (const membershipEdgeIds of [
+    orderedMembershipEdgeIds,
+    unorderedMembershipEdgeIds,
+  ]) {
+    for (const edgeId of membershipEdgeIds) {
+      if (!isCanonicalCanvasId(edgeId) || edgeIds.has(edgeId)) return false
+      edgeIds.add(edgeId)
+    }
+  }
+  return true
 }
 
 function isMoveCanvasNodesInput(value: unknown): value is MoveCanvasNodesInput {
@@ -694,6 +728,10 @@ export function parseTaskWorkerRequest(
         : null
     case 'canvas.nodeBox.addMember':
       return isAddCanvasNodeBoxMemberInput(value.input)
+        ? { requestId: value.requestId, type: value.type, input: value.input }
+        : null
+    case 'canvas.nodeBox.reorderMemberships':
+      return isReorderCanvasNodeBoxMembershipsInput(value.input)
         ? { requestId: value.requestId, type: value.type, input: value.input }
         : null
     case 'canvas.edge.list':

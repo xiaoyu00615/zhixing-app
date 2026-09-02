@@ -1,6 +1,9 @@
 //! Canvas native persistence.
 
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension, Row};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -278,6 +281,14 @@ pub(crate) struct AddCanvasNodeBoxMemberInput {
     pub(crate) target_node_id: String,
     pub(crate) relation_type: String,
     pub(crate) created_at_ms: i64,
+}
+
+pub(crate) struct ReorderCanvasNodeBoxMembershipsInput {
+    pub(crate) canvas_id: String,
+    pub(crate) node_box_id: String,
+    pub(crate) ordered_membership_edge_ids: Vec<String>,
+    pub(crate) unordered_membership_edge_ids: Vec<String>,
+    pub(crate) updated_at_ms: i64,
 }
 
 pub(crate) struct UpdateCanvasEdgeDirectionInput {
@@ -1061,6 +1072,145 @@ impl CanvasDbService {
             .commit()
             .map_err(|_| CanvasError::PersistenceFailed)?;
         Ok(created)
+    }
+
+    pub(crate) fn reorder_node_box_memberships(
+        connection: &Connection,
+        input: ReorderCanvasNodeBoxMembershipsInput,
+    ) -> Result<Vec<CanvasEdgeRecord>, CanvasError> {
+        validate_id(&input.canvas_id)?;
+        validate_id(&input.node_box_id)?;
+        validate_timestamp(input.updated_at_ms)?;
+        let supplied_edge_ids: Vec<&String> = input
+            .ordered_membership_edge_ids
+            .iter()
+            .chain(input.unordered_membership_edge_ids.iter())
+            .collect();
+        let mut unique_edge_ids = HashSet::new();
+        for edge_id in &supplied_edge_ids {
+            validate_id(edge_id)?;
+            if !unique_edge_ids.insert((*edge_id).clone()) {
+                return Err(CanvasError::PersistenceFailed);
+            }
+        }
+
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|_| CanvasError::PersistenceFailed)?;
+        Self::get_canvas(&transaction, &input.canvas_id)?;
+        let node_box =
+            Self::get_node_in_canvas(&transaction, &input.canvas_id, &input.node_box_id)?;
+        if node_box.node_type != "node_box" {
+            return Err(CanvasError::PersistenceFailed);
+        }
+        let current_memberships = {
+            let mut statement = transaction
+                .prepare(&format!(
+                    "SELECT {EDGE_COLUMNS} FROM canvas_edges \
+                     WHERE canvas_id = ?1 AND target_node_id = ?2 \
+                       AND relation_type IN ('ordered_box_member', 'unordered_box_member') \
+                       AND deleted_at_ms IS NULL \
+                     ORDER BY relation_type ASC, membership_position ASC, id ASC"
+                ))
+                .map_err(|_| CanvasError::PersistenceFailed)?;
+            let memberships = statement
+                .query_map(params![input.canvas_id, input.node_box_id], edge_from_row)
+                .map_err(|_| CanvasError::PersistenceFailed)?
+                .map(|row| {
+                    row.map_err(|_| CanvasError::PersistenceFailed)
+                        .and_then(validate_edge)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            memberships
+        };
+        if current_memberships.len() != supplied_edge_ids.len()
+            || current_memberships
+                .iter()
+                .any(|edge| !unique_edge_ids.contains(&edge.id))
+        {
+            return Err(CanvasError::PersistenceFailed);
+        }
+
+        let mut desired = HashMap::new();
+        for (position, edge_id) in input.ordered_membership_edge_ids.iter().enumerate() {
+            let position = i64::try_from(position).map_err(|_| CanvasError::PersistenceFailed)?;
+            desired.insert(edge_id.clone(), ("ordered_box_member", position));
+        }
+        for (position, edge_id) in input.unordered_membership_edge_ids.iter().enumerate() {
+            let position = i64::try_from(position).map_err(|_| CanvasError::PersistenceFailed)?;
+            desired.insert(edge_id.clone(), ("unordered_box_member", position));
+        }
+        let changed_ids: HashSet<String> = current_memberships
+            .iter()
+            .filter_map(|edge| {
+                let (relation_type, position) = desired.get(&edge.id)?;
+                (edge.relation_type != *relation_type
+                    || edge.membership_position != Some(*position))
+                .then(|| edge.id.clone())
+            })
+            .collect();
+
+        if !changed_ids.is_empty() {
+            let maximum_position = current_memberships
+                .iter()
+                .filter_map(|edge| edge.membership_position)
+                .max()
+                .unwrap_or(-1);
+            let membership_count = i64::try_from(current_memberships.len())
+                .map_err(|_| CanvasError::PersistenceFailed)?;
+            let temporary_base = maximum_position
+                .checked_add(membership_count)
+                .and_then(|value| value.checked_add(1))
+                .filter(|value| *value <= MAX_SAFE_INTEGER_MILLISECONDS)
+                .ok_or(CanvasError::PersistenceFailed)?;
+            for (index, edge) in current_memberships.iter().enumerate() {
+                let index = i64::try_from(index).map_err(|_| CanvasError::PersistenceFailed)?;
+                let temporary_position = temporary_base
+                    .checked_add(index)
+                    .filter(|value| *value <= MAX_SAFE_INTEGER_MILLISECONDS)
+                    .ok_or(CanvasError::PersistenceFailed)?;
+                let changed = transaction
+                    .execute(
+                        "UPDATE canvas_edges SET membership_position = ?1 \
+                         WHERE id = ?2 AND deleted_at_ms IS NULL",
+                        params![temporary_position, edge.id],
+                    )
+                    .map_err(|_| CanvasError::PersistenceFailed)?;
+                if changed != 1 {
+                    return Err(CanvasError::PersistenceFailed);
+                }
+            }
+            for edge in &current_memberships {
+                let (relation_type, position) = desired
+                    .get(&edge.id)
+                    .ok_or(CanvasError::PersistenceFailed)?;
+                let updated_at_ms = if changed_ids.contains(&edge.id) {
+                    input.updated_at_ms
+                } else {
+                    edge.updated_at_ms
+                };
+                let changed = transaction
+                    .execute(
+                        "UPDATE canvas_edges \
+                         SET relation_type = ?1, membership_position = ?2, updated_at_ms = ?3 \
+                         WHERE id = ?4 AND deleted_at_ms IS NULL",
+                        params![relation_type, position, updated_at_ms, edge.id],
+                    )
+                    .map_err(|_| CanvasError::PersistenceFailed)?;
+                if changed != 1 {
+                    return Err(CanvasError::PersistenceFailed);
+                }
+            }
+        }
+
+        let reordered = supplied_edge_ids
+            .iter()
+            .map(|edge_id| Self::get_active_edge(&transaction, edge_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction
+            .commit()
+            .map_err(|_| CanvasError::PersistenceFailed)?;
+        Ok(reordered)
     }
 
     pub(crate) fn list_edges(
@@ -3086,6 +3236,161 @@ mod tests {
         assert!(members
             .iter()
             .any(|edge| { edge.id == readded_id && edge.membership_position == Some(1) }));
+    }
+
+    #[test]
+    fn node_box_membership_reorder_normalizes_sections_and_rolls_back_atomically() {
+        let (_sandbox, database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let member_ids = [
+            "00000000-0000-4000-8000-000000000621",
+            "00000000-0000-4000-8000-000000000622",
+            "00000000-0000-4000-8000-000000000623",
+            "00000000-0000-4000-8000-000000000624",
+        ];
+        for (index, member_id) in member_ids.iter().enumerate() {
+            create_node(
+                &connection,
+                member_id,
+                CANVAS_ID,
+                &format!("Member {index}"),
+            );
+        }
+        let box_id = "00000000-0000-4000-8000-000000000625";
+        CanvasDbService::create_node(
+            &connection,
+            CreateCanvasNodeInput {
+                id: box_id.into(),
+                canvas_id: CANVAS_ID.into(),
+                node_type: "node_box".into(),
+                content: CanvasNodeContent::NodeBox,
+                x: 360.0,
+                y: 100.0,
+                created_at_ms: 40,
+            },
+        )
+        .unwrap();
+        let edge_ids = [
+            "00000000-0000-4000-8000-000000000631",
+            "00000000-0000-4000-8000-000000000632",
+            "00000000-0000-4000-8000-000000000633",
+            "00000000-0000-4000-8000-000000000634",
+        ];
+        for (index, (edge_id, member_id)) in edge_ids.iter().zip(member_ids.iter()).enumerate() {
+            CanvasDbService::add_node_box_member(
+                &connection,
+                AddCanvasNodeBoxMemberInput {
+                    id: (*edge_id).into(),
+                    canvas_id: CANVAS_ID.into(),
+                    source_node_id: (*member_id).into(),
+                    target_node_id: box_id.into(),
+                    relation_type: if index == 3 {
+                        "unordered_box_member"
+                    } else {
+                        "ordered_box_member"
+                    }
+                    .into(),
+                    created_at_ms: 50 + i64::try_from(index).unwrap(),
+                },
+            )
+            .unwrap();
+        }
+        connection
+            .execute(
+                "UPDATE canvas_edges SET membership_position = 5 WHERE id = ?1",
+                [edge_ids[2]],
+            )
+            .unwrap();
+
+        let reordered = CanvasDbService::reorder_node_box_memberships(
+            &connection,
+            ReorderCanvasNodeBoxMembershipsInput {
+                canvas_id: CANVAS_ID.into(),
+                node_box_id: box_id.into(),
+                ordered_membership_edge_ids: vec![edge_ids[2].into(), edge_ids[0].into()],
+                unordered_membership_edge_ids: vec![edge_ids[3].into(), edge_ids[1].into()],
+                updated_at_ms: 100,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            reordered
+                .iter()
+                .map(|edge| (
+                    edge.id.as_str(),
+                    edge.relation_type.as_str(),
+                    edge.membership_position
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (edge_ids[2], "ordered_box_member", Some(0)),
+                (edge_ids[0], "ordered_box_member", Some(1)),
+                (edge_ids[3], "unordered_box_member", Some(0)),
+                (edge_ids[1], "unordered_box_member", Some(1)),
+            ]
+        );
+        assert!(reordered.iter().all(|edge| {
+            edge.direction == CanvasEdgeDirection::Forward
+                && edge.line_style == CanvasEdgeLineStyle::Solid
+        }));
+        assert_eq!(
+            reordered
+                .iter()
+                .find(|edge| edge.id == edge_ids[1])
+                .unwrap()
+                .created_at_ms,
+            51
+        );
+
+        let before_noop = reordered.clone();
+        let noop = CanvasDbService::reorder_node_box_memberships(
+            &connection,
+            ReorderCanvasNodeBoxMembershipsInput {
+                canvas_id: CANVAS_ID.into(),
+                node_box_id: box_id.into(),
+                ordered_membership_edge_ids: vec![edge_ids[2].into(), edge_ids[0].into()],
+                unordered_membership_edge_ids: vec![edge_ids[3].into(), edge_ids[1].into()],
+                updated_at_ms: 200,
+            },
+        )
+        .unwrap();
+        assert_eq!(noop, before_noop);
+        let persisted_before_failure = CanvasDbService::list_edges(&connection, CANVAS_ID)
+            .unwrap()
+            .into_iter()
+            .filter(|edge| edge.target_node_id == box_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            CanvasDbService::reorder_node_box_memberships(
+                &connection,
+                ReorderCanvasNodeBoxMembershipsInput {
+                    canvas_id: CANVAS_ID.into(),
+                    node_box_id: box_id.into(),
+                    ordered_membership_edge_ids: vec![edge_ids[0].into(), edge_ids[2].into()],
+                    unordered_membership_edge_ids: vec![edge_ids[3].into(), edge_ids[1].into()],
+                    updated_at_ms: 1,
+                },
+            ),
+            Err(CanvasError::PersistenceFailed)
+        );
+        assert_eq!(
+            CanvasDbService::list_edges(&connection, CANVAS_ID)
+                .unwrap()
+                .into_iter()
+                .filter(|edge| edge.target_node_id == box_id)
+                .collect::<Vec<_>>(),
+            persisted_before_failure
+        );
+
+        drop(connection);
+        let reopened = open_existing_configured_connection(database_path).unwrap();
+        let restored = CanvasDbService::list_edges(&reopened, CANVAS_ID)
+            .unwrap()
+            .into_iter()
+            .filter(|edge| edge.target_node_id == box_id)
+            .collect::<Vec<_>>();
+        assert_eq!(restored, persisted_before_failure);
     }
 
     #[test]

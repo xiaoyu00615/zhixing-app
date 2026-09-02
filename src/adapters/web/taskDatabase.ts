@@ -57,6 +57,7 @@ import type {
   DeleteCanvasEdgeInput,
   MoveCanvasNodeInput,
   MoveCanvasNodesInput,
+  ReorderCanvasNodeBoxMembershipsInput,
   RenameCanvasInput,
   RenameCanvasNodeInput,
   UpdateCanvasViewportInput,
@@ -1077,6 +1078,129 @@ export class WebTaskDatabase {
           ],
         })
         return this.requireCanvasEdge(input.id, false)
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  reorderCanvasNodeBoxMemberships(
+    input: ReorderCanvasNodeBoxMembershipsInput,
+  ): readonly CanvasEdge[] {
+    if (
+      !isCanonicalCanvasId(input.canvasId) ||
+      !isCanonicalCanvasId(input.nodeBoxId) ||
+      !isNonNegativeSafeIntegerMilliseconds(input.updatedAtMs)
+    ) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    const suppliedEdgeIds = [
+      ...input.orderedMembershipEdgeIds,
+      ...input.unorderedMembershipEdgeIds,
+    ]
+    const uniqueEdgeIds = new Set<string>()
+    for (const edgeId of suppliedEdgeIds) {
+      if (!isCanonicalCanvasId(edgeId) || uniqueEdgeIds.has(edgeId)) {
+        throw new TaskDatabaseError('PERSISTENCE_FAILED')
+      }
+      uniqueEdgeIds.add(edgeId)
+    }
+
+    try {
+      return this.#database.transaction(() => {
+        this.requireCanvas(input.canvasId)
+        const nodeBox = this.requireNodeInCanvas(input.canvasId, input.nodeBoxId)
+        if (nodeBox.type !== 'node_box') {
+          throw new TaskDatabaseError('PERSISTENCE_FAILED')
+        }
+        const currentMemberships = this.#database
+          .selectObjects(
+            `SELECT ${CANVAS_EDGE_COLUMNS} FROM canvas_edges
+             WHERE canvas_id = ? AND target_node_id = ?
+               AND relation_type IN ('ordered_box_member', 'unordered_box_member')
+               AND deleted_at_ms IS NULL
+             ORDER BY relation_type ASC, membership_position ASC, id ASC`,
+            [input.canvasId, input.nodeBoxId],
+          )
+          .map((row) => {
+            const edge = parseCanvasEdgeRow(row)
+            if (edge === null) throw new TaskDatabaseError('PERSISTENCE_FAILED')
+            return edge
+          })
+        if (
+          currentMemberships.length !== suppliedEdgeIds.length ||
+          currentMemberships.some((edge) => !uniqueEdgeIds.has(edge.id))
+        ) {
+          throw new TaskDatabaseError('PERSISTENCE_FAILED')
+        }
+
+        const desired = new Map<
+          string,
+          { readonly relationType: 'ordered_box_member' | 'unordered_box_member'; readonly position: number }
+        >()
+        input.orderedMembershipEdgeIds.forEach((edgeId, position) => {
+          desired.set(edgeId, { relationType: 'ordered_box_member', position })
+        })
+        input.unorderedMembershipEdgeIds.forEach((edgeId, position) => {
+          desired.set(edgeId, { relationType: 'unordered_box_member', position })
+        })
+        const changedIds = new Set(
+          currentMemberships
+            .filter((edge) => {
+              const next = desired.get(edge.id)!
+              return edge.relationType !== next.relationType ||
+                edge.membershipPosition !== next.position
+            })
+            .map((edge) => edge.id),
+        )
+        if (changedIds.size === 0) {
+          const byId = new Map(currentMemberships.map((edge) => [edge.id, edge]))
+          return suppliedEdgeIds.map((edgeId) => byId.get(edgeId)!)
+        }
+
+        const maxPosition = Math.max(
+          -1,
+          ...currentMemberships.map((edge) => edge.membershipPosition ?? -1),
+        )
+        const temporaryBase = maxPosition + currentMemberships.length + 1
+        if (!Number.isSafeInteger(temporaryBase)) {
+          throw new TaskDatabaseError('PERSISTENCE_FAILED')
+        }
+        currentMemberships.forEach((edge, index) => {
+          const temporaryPosition = temporaryBase + index
+          if (!Number.isSafeInteger(temporaryPosition)) {
+            throw new TaskDatabaseError('PERSISTENCE_FAILED')
+          }
+          this.#database.exec({
+            sql: `UPDATE canvas_edges SET membership_position = ?
+                  WHERE id = ? AND deleted_at_ms IS NULL`,
+            bind: [temporaryPosition, edge.id],
+          })
+          if (this.#database.changes() !== 1) {
+            throw new TaskDatabaseError('PERSISTENCE_FAILED')
+          }
+        })
+        for (const edge of currentMemberships) {
+          const next = desired.get(edge.id)!
+          this.#database.exec({
+            sql: `UPDATE canvas_edges
+                  SET relation_type = ?, membership_position = ?, updated_at_ms = ?
+                  WHERE id = ? AND deleted_at_ms IS NULL`,
+            bind: [
+              next.relationType,
+              next.position,
+              changedIds.has(edge.id) ? input.updatedAtMs : edge.updatedAtMs,
+              edge.id,
+            ],
+          })
+          if (this.#database.changes() !== 1) {
+            throw new TaskDatabaseError('PERSISTENCE_FAILED')
+          }
+        }
+        return suppliedEdgeIds.map((edgeId) =>
+          this.requireCanvasEdge(edgeId, false),
+        )
       })
     } catch (error: unknown) {
       if (error instanceof TaskDatabaseError) throw error

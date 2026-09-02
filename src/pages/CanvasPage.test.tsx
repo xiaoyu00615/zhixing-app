@@ -50,6 +50,7 @@ function createFixture(initial: readonly Canvas[] = []) {
     moveCanvasNodes: vi.fn(),
     createCanvasEdge: vi.fn(),
     addNodeBoxMember: vi.fn(),
+    reorderNodeBoxMemberships: vi.fn(),
     listCanvasEdges: vi.fn(),
     updateCanvasEdgeDirection: vi.fn(),
     updateCanvasEdgeLineStyle: vi.fn(),

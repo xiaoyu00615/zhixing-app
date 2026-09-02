@@ -46,13 +46,19 @@ export function toCanvasFlowNode(
   }
   const entry = canvasNodeRegistry.byType.get(node.type)!
   const data = entry.parseData(node.content)
-  return { id: node.id, type: entry.flowNodeType, position: { x: node.x, y: node.y }, data: { ...data, nodeName: node.nodeName, renameRequest: 0, onRename, onCommit: (id: string, text: string) => onCommit(id, node.type, text), onRemoveMembership: () => undefined } }
+  return { id: node.id, type: entry.flowNodeType, position: { x: node.x, y: node.y }, data: { ...data, nodeName: node.nodeName, renameRequest: 0, onRename, onCommit: (id: string, text: string) => onCommit(id, node.type, text), membershipReorderBusy: false, onRemoveMembership: () => undefined, onReorderMemberships: () => undefined } }
 }
 
 export function withCanvasNodeRuntimeData(
   nodes: readonly CanvasFlowNode[],
   edges: readonly CanvasEdge[],
   onRemoveMembership: (edgeId: string) => void,
+  onReorderMemberships: (
+    nodeBoxId: string,
+    orderedMembershipEdgeIds: readonly string[],
+    unorderedMembershipEdgeIds: readonly string[],
+  ) => void,
+  membershipReorderBusy: boolean,
 ): CanvasFlowNode[] {
   const nodeNames = new Map(
     nodes.map((node) => [
@@ -88,8 +94,32 @@ export function withCanvasNodeRuntimeData(
         unorderedMembers: memberships
           .filter((edge) => edge.relationType === 'unordered_box_member')
           .map(toView),
+        membershipReorderBusy,
         onRemoveMembership,
+        onReorderMemberships,
       },
     }
   })
+}
+
+export function orderedMembershipDisplayNumbers(
+  edges: readonly CanvasEdge[],
+): ReadonlyMap<string, number> {
+  const byNodeBox = new Map<string, CanvasEdge[]>()
+  for (const edge of edges) {
+    if (edge.relationType !== 'ordered_box_member') continue
+    const memberships = byNodeBox.get(edge.targetNodeId) ?? []
+    memberships.push(edge)
+    byNodeBox.set(edge.targetNodeId, memberships)
+  }
+  const numbers = new Map<string, number>()
+  for (const memberships of byNodeBox.values()) {
+    memberships
+      .sort((left, right) =>
+        (left.membershipPosition ?? 0) - (right.membershipPosition ?? 0) ||
+        left.id.localeCompare(right.id),
+      )
+      .forEach((edge, index) => numbers.set(edge.id, index + 1))
+  }
+  return numbers
 }
