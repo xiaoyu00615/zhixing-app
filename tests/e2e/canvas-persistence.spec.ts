@@ -19,6 +19,7 @@ interface CanvasHarness {
     readonly unknownEdgePreserved: boolean
     readonly ordinaryMembershipPositionsNull: number
     readonly membershipColumnPresent: boolean
+    readonly nodeSoftDeleteColumnPresent: boolean
     readonly temporaryTablesPresent: boolean
     readonly foreignKeyViolations: number
   }>
@@ -34,6 +35,7 @@ interface CanvasHarness {
   updateTextNode(input: object): Promise<unknown>
   updateCanvasNodeContent(input: object): Promise<unknown>
   renameCanvasNode(input: object): Promise<unknown>
+  deleteCanvasNode(input: object): Promise<void>
   moveCanvasNode(input: object): Promise<unknown>
   moveCanvasNodes(input: object): Promise<readonly Record<string, unknown>[]>
   createCanvasEdge(input: object): Promise<Record<string, unknown>>
@@ -101,6 +103,23 @@ const REORDER_EDGE_IDS = [
   '00000000-0000-4000-8000-000000001115',
 ] as const
 const REORDER_ORDINARY_EDGE_ID = '00000000-0000-4000-8000-000000001116'
+const CONTEXT_CANVAS_ID = '00000000-0000-4000-8000-000000001201'
+const CONTEXT_NODE_IDS = [
+  '00000000-0000-4000-8000-000000001202',
+  '00000000-0000-4000-8000-000000001203',
+  '00000000-0000-4000-8000-000000001204',
+] as const
+const CONTEXT_BOX_ID = '00000000-0000-4000-8000-000000001205'
+const CONTEXT_EDGE_ID = '00000000-0000-4000-8000-000000001206'
+const CONTEXT_ORDERED_EDGE_ID = '00000000-0000-4000-8000-000000001207'
+const CONTEXT_UNORDERED_EDGE_ID = '00000000-0000-4000-8000-000000001208'
+const NODE_MENU_CANVAS_ID = '00000000-0000-4000-8000-000000001301'
+const NODE_MENU_TEXT_ID = '00000000-0000-4000-8000-000000001302'
+const NODE_MENU_STICKY_ID = '00000000-0000-4000-8000-000000001303'
+const NODE_MENU_BOX_ID = '00000000-0000-4000-8000-000000001304'
+const NODE_MENU_EDGE_ID = '00000000-0000-4000-8000-000000001305'
+const NODE_MENU_ORDERED_ID = '00000000-0000-4000-8000-000000001306'
+const NODE_MENU_UNORDERED_ID = '00000000-0000-4000-8000-000000001307'
 
 async function openHarnessPage(context: BrowserContext, baseURL: string): Promise<Page> {
   const page = context.pages()[0] ?? await context.newPage()
@@ -132,7 +151,7 @@ test('rolls a failed Web Migration 10 table rebuild back atomically', async ({ b
   }
 })
 
-test('preserves exact v9 Canvas data through Web Migration 10', async ({ browserName }, testInfo) => {
+test('preserves exact v9 Canvas data through Web Migrations 10 and 11', async ({ browserName }, testInfo) => {
   expect(browserName).toBe('chromium')
   const baseURL = testInfo.project.use.baseURL
   if (typeof baseURL !== 'string') throw new Error('Playwright baseURL is required.')
@@ -144,13 +163,14 @@ test('preserves exact v9 Canvas data through Web Migration 10', async ({ browser
     await expect(page.evaluate(() =>
       (window as unknown as HarnessWindow).__taskPersistenceHarness.auditMigrationTenUpgrade(),
     )).resolves.toEqual({
-      historyVersion: 10,
+      historyVersion: 11,
       canvasPreserved: true,
       nodesPreserved: 2,
       edgesPreserved: 4,
       unknownEdgePreserved: true,
       ordinaryMembershipPositionsNull: 4,
       membershipColumnPresent: true,
+      nodeSoftDeleteColumnPresent: true,
       temporaryTablesPresent: false,
       foreignKeyViolations: 0,
     })
@@ -1170,6 +1190,282 @@ test('reorders Node Box sections atomically and restores the exact order after r
     await expect.poll(() => memberNames(restoredMainBox, '有序成员')).toEqual(['C', 'D', 'B'])
     await expect.poll(() => memberNames(restoredMainBox, '无序成员')).toEqual(['A'])
     await page.screenshot({ path: testInfo.outputPath('08-node-box-reorder-restart.png') })
+  } finally {
+    await context?.close()
+    await rm(profilePath, { recursive: true, force: true })
+  }
+})
+
+test('configures ordinary and Membership Edges through the contextual command path', async ({ browserName }, testInfo) => {
+  test.setTimeout(120_000)
+  expect(browserName).toBe('chromium')
+  const baseURL = testInfo.project.use.baseURL
+  if (typeof baseURL !== 'string') throw new Error('Playwright baseURL is required.')
+  const profilePath = testInfo.outputPath('canvas-edge-context-menu-profile')
+  const outputRoot = resolve(testInfo.outputDir)
+  const resolvedProfile = resolve(profilePath)
+  if (!resolvedProfile.startsWith(`${outputRoot}${sep}`)) throw new Error('Unsafe test profile path.')
+
+  let context: BrowserContext | null = null
+  try {
+    context = await chromium.launchPersistentContext(profilePath, {
+      channel: 'chromium',
+      headless: true,
+      viewport: { width: 1920, height: 1080 },
+    })
+    const page = await openHarnessPage(context, baseURL)
+    await page.evaluate(async ({ canvasId, nodeIds, boxId, edgeId, orderedEdgeId, unorderedEdgeId }) => {
+      const harness = (window as unknown as HarnessWindow).__taskPersistenceHarness
+      await harness.createCanvas({ id: canvasId, title: 'Edge Context Menu', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 500 })
+      const names = ['产品策略', '执行路径', '验证记录']
+      for (const [index, id] of nodeIds.entries()) {
+        await harness.createCanvasNode({
+          id,
+          canvasId,
+          type: index === 1 ? 'sticky' : 'text',
+          content: { type: index === 1 ? 'sticky' : 'text', text: names[index] },
+          x: 220 + (index % 2) * 440,
+          y: 180 + Math.floor(index / 2) * 360,
+          createdAtMs: 510 + index,
+        })
+        await harness.renameCanvasNode({ canvasId, id, nodeName: names[index], updatedAtMs: 520 + index })
+      }
+      await harness.createCanvasNode({ id: boxId, canvasId, type: 'node_box', content: { type: 'node_box' }, x: 1080, y: 260, createdAtMs: 530 })
+      await harness.renameCanvasNode({ canvasId, id: boxId, nodeName: '关系整理', updatedAtMs: 531 })
+      await harness.createCanvasEdge({ id: edgeId, canvasId, sourceNodeId: nodeIds[0], targetNodeId: nodeIds[1], relationType: 'default', direction: 'forward', lineStyle: 'solid', createdAtMs: 540 })
+      await harness.addCanvasNodeBoxMember({ id: orderedEdgeId, canvasId, sourceNodeId: nodeIds[0], targetNodeId: boxId, relationType: 'ordered_box_member', createdAtMs: 541 })
+      await harness.addCanvasNodeBoxMember({ id: unorderedEdgeId, canvasId, sourceNodeId: nodeIds[2], targetNodeId: boxId, relationType: 'unordered_box_member', createdAtMs: 542 })
+      await harness.shutdown()
+    }, {
+      canvasId: CONTEXT_CANVAS_ID,
+      nodeIds: CONTEXT_NODE_IDS,
+      boxId: CONTEXT_BOX_ID,
+      edgeId: CONTEXT_EDGE_ID,
+      orderedEdgeId: CONTEXT_ORDERED_EDGE_ID,
+      unorderedEdgeId: CONTEXT_UNORDERED_EDGE_ID,
+    })
+
+    await page.goto(`${baseURL}/canvas/${CONTEXT_CANVAS_ID}`)
+    await expect(page.getByRole('heading', { name: 'Edge Context Menu' })).toBeVisible()
+    const edge = (id: string) => page.locator(`.react-flow__edge[data-id="${id}"]`)
+    const openMenu = async (id: string, title: string, x = 720, y = 360) => {
+      const target = edge(id)
+      await expect(target).toHaveCount(1)
+      await target.evaluate((element, coordinates) => {
+        element.dispatchEvent(new MouseEvent('contextmenu', {
+          bubbles: true,
+          button: 2,
+          clientX: coordinates.x,
+          clientY: coordinates.y,
+        }))
+      }, { x, y })
+      const menu = page.getByRole('menu', { name: `关系菜单：${title}` })
+      await expect(menu).toBeVisible()
+      return menu
+    }
+
+    let menu = await openMenu(CONTEXT_EDGE_ID, '连线设置')
+    await expect(menu.getByRole('menuitemradio', { name: '普通关系' })).toHaveAttribute('aria-checked', 'true')
+    await expect(menu.getByRole('menuitemradio', { name: '单向' })).toHaveAttribute('aria-checked', 'true')
+    await expect(menu.getByRole('menuitemradio', { name: '实线' })).toHaveAttribute('aria-checked', 'true')
+    await page.screenshot({ path: testInfo.outputPath('01-ordinary-edge-context-menu.png') })
+    await menu.getByRole('menuitemradio', { name: '上下级' }).click()
+    await expect(menu).toBeHidden()
+
+    menu = await openMenu(CONTEXT_EDGE_ID, '连线设置')
+    await expect(menu.getByRole('menuitemradio', { name: '上下级' })).toHaveAttribute('aria-checked', 'true')
+    await menu.getByRole('menuitemradio', { name: '双向' }).click()
+    await expect(menu).toBeHidden()
+    menu = await openMenu(CONTEXT_EDGE_ID, '连线设置')
+    await menu.getByRole('menuitemradio', { name: '虚线' }).click()
+    await expect(menu).toBeHidden()
+    menu = await openMenu(CONTEXT_EDGE_ID, '连线设置')
+    await expect(menu.getByRole('menuitemradio', { name: '上下级' })).toHaveAttribute('aria-checked', 'true')
+    await expect(menu.getByRole('menuitemradio', { name: '双向' })).toHaveAttribute('aria-checked', 'true')
+    await expect(menu.getByRole('menuitemradio', { name: '虚线' })).toHaveAttribute('aria-checked', 'true')
+    await page.screenshot({ path: testInfo.outputPath('02-edge-semantic-state.png') })
+    await page.keyboard.press('Escape')
+
+    menu = await openMenu(CONTEXT_ORDERED_EDGE_ID, '有序成员')
+    await expect(menu.getByText('关系类型')).toHaveCount(0)
+    await expect(menu.getByRole('menuitem', { name: '移到无序成员区' })).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('03-ordered-membership-menu.png') })
+    await menu.getByRole('menuitem', { name: '移到无序成员区' }).click()
+    await expect(menu).toBeHidden()
+    await expect(edge(CONTEXT_ORDERED_EDGE_ID).locator('.react-flow__edge-text')).toHaveText('−')
+    await page.screenshot({ path: testInfo.outputPath('05-membership-section-move.png') })
+
+    menu = await openMenu(CONTEXT_ORDERED_EDGE_ID, '无序成员')
+    await expect(menu.getByRole('menuitem', { name: '移到有序成员区' })).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('04-unordered-membership-menu.png') })
+    await page.keyboard.press('Escape')
+
+    menu = await openMenu(CONTEXT_UNORDERED_EDGE_ID, '无序成员')
+    await menu.getByRole('menuitem', { name: '移到有序成员区' }).click()
+    await expect(menu).toBeHidden()
+    await expect(edge(CONTEXT_UNORDERED_EDGE_ID).locator('.react-flow__edge-text')).toHaveText('1')
+    await expect(edge(CONTEXT_ORDERED_EDGE_ID).locator('.react-flow__edge-text')).toHaveText('−')
+
+    menu = await openMenu(CONTEXT_ORDERED_EDGE_ID, '无序成员')
+    await menu.getByRole('menuitem', { name: '从节点盒移除' }).click()
+    await expect(menu).toBeHidden()
+    await expect(edge(CONTEXT_ORDERED_EDGE_ID)).toHaveCount(0)
+    await expect(page.locator(`.react-flow__node[data-id="${CONTEXT_NODE_IDS[0]}"]`)).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('06-membership-remove-source-remains.png') })
+
+    menu = await openMenu(CONTEXT_EDGE_ID, '连线设置', 1916, 1076)
+    const menuBounds = await menu.boundingBox()
+    if (menuBounds === null) throw new Error('Context menu bounds unavailable.')
+    expect(menuBounds.x).toBeGreaterThanOrEqual(8)
+    expect(menuBounds.y).toBeGreaterThanOrEqual(8)
+    expect(menuBounds.x + menuBounds.width).toBeLessThanOrEqual(1912)
+    expect(menuBounds.y + menuBounds.height).toBeLessThanOrEqual(1072)
+    await page.screenshot({ path: testInfo.outputPath('07-viewport-clamped-menu.png') })
+
+    const auditPage = await openHarnessPage(context, baseURL)
+    const persisted = await auditPage.evaluate(async (canvasId) => {
+      const harness = (window as unknown as HarnessWindow).__taskPersistenceHarness
+      return harness.listCanvasEdges(canvasId)
+    }, CONTEXT_CANVAS_ID)
+    expect(persisted).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: CONTEXT_EDGE_ID, relationType: 'hierarchy', direction: 'bidirectional', lineStyle: 'dashed' }),
+      expect.objectContaining({ id: CONTEXT_UNORDERED_EDGE_ID, relationType: 'ordered_box_member', membershipPosition: 0 }),
+    ]))
+    expect(persisted).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: CONTEXT_ORDERED_EDGE_ID }),
+    ]))
+  } finally {
+    await context?.close()
+    await rm(profilePath, { recursive: true, force: true })
+  }
+})
+
+test('opens Node context menus and persists atomic soft delete across restart', async ({ browserName }, testInfo) => {
+  test.setTimeout(120_000)
+  expect(browserName).toBe('chromium')
+  const baseURL = testInfo.project.use.baseURL
+  if (typeof baseURL !== 'string') throw new Error('Playwright baseURL is required.')
+  const profilePath = testInfo.outputPath('canvas-node-context-menu-profile')
+  const outputRoot = resolve(testInfo.outputDir)
+  const resolvedProfile = resolve(profilePath)
+  if (!resolvedProfile.startsWith(`${outputRoot}${sep}`)) throw new Error('Unsafe test profile path.')
+
+  let context: BrowserContext | null = null
+  try {
+    context = await chromium.launchPersistentContext(profilePath, {
+      channel: 'chromium',
+      headless: true,
+      viewport: { width: 1920, height: 1080 },
+    })
+    let page = await openHarnessPage(context, baseURL)
+    await page.evaluate(async ({ canvasId, textId, stickyId, boxId, edgeId, orderedId, unorderedId }) => {
+      const harness = (window as unknown as HarnessWindow).__taskPersistenceHarness
+      await harness.createCanvas({ id: canvasId, title: 'Node Context Menu', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 600 })
+      await harness.createCanvasNode({ id: textId, canvasId, type: 'text', content: { type: 'text', text: 'Text body' }, x: 180, y: 180, createdAtMs: 610 })
+      await harness.renameCanvasNode({ canvasId, id: textId, nodeName: '文字概念', updatedAtMs: 611 })
+      await harness.createCanvasNode({ id: stickyId, canvasId, type: 'sticky', content: { type: 'sticky', text: 'Sticky body' }, x: 620, y: 180, createdAtMs: 612 })
+      await harness.renameCanvasNode({ canvasId, id: stickyId, nodeName: '便签想法', updatedAtMs: 613 })
+      await harness.createCanvasNode({ id: boxId, canvasId, type: 'node_box', content: { type: 'node_box' }, x: 1060, y: 220, createdAtMs: 614 })
+      await harness.renameCanvasNode({ canvasId, id: boxId, nodeName: '节点集合', updatedAtMs: 615 })
+      await harness.createCanvasEdge({ id: edgeId, canvasId, sourceNodeId: textId, targetNodeId: stickyId, relationType: 'default', direction: 'forward', lineStyle: 'solid', createdAtMs: 620 })
+      await harness.addCanvasNodeBoxMember({ id: orderedId, canvasId, sourceNodeId: textId, targetNodeId: boxId, relationType: 'ordered_box_member', createdAtMs: 621 })
+      await harness.addCanvasNodeBoxMember({ id: unorderedId, canvasId, sourceNodeId: stickyId, targetNodeId: boxId, relationType: 'unordered_box_member', createdAtMs: 622 })
+      await harness.shutdown()
+    }, {
+      canvasId: NODE_MENU_CANVAS_ID,
+      textId: NODE_MENU_TEXT_ID,
+      stickyId: NODE_MENU_STICKY_ID,
+      boxId: NODE_MENU_BOX_ID,
+      edgeId: NODE_MENU_EDGE_ID,
+      orderedId: NODE_MENU_ORDERED_ID,
+      unorderedId: NODE_MENU_UNORDERED_ID,
+    })
+
+    await context.close()
+    context = await chromium.launchPersistentContext(profilePath, {
+      channel: 'chromium',
+      headless: true,
+      viewport: { width: 1920, height: 1080 },
+    })
+    page = await openHarnessPage(context, baseURL)
+    await page.goto(`${baseURL}/canvas/${NODE_MENU_CANVAS_ID}`)
+    await expect(page.getByRole('heading', { name: 'Node Context Menu' })).toBeVisible()
+    const node = (id: string) => page.locator(`.react-flow__node[data-id="${id}"]`)
+    const openNodeMenu = async (id: string, title: string) => {
+      await node(id).click({ button: 'right' })
+      const menu = page.getByRole('menu', { name: `节点菜单：${title}` })
+      await expect(menu).toBeVisible()
+      return menu
+    }
+
+    await page.screenshot({ path: testInfo.outputPath('01-node-and-edge-before-delete.png') })
+
+    let menu = await openNodeMenu(NODE_MENU_TEXT_ID, '文字节点')
+    await expect(menu.getByRole('textbox', { name: '节点名称' })).toHaveValue('文字概念')
+    await page.screenshot({ path: testInfo.outputPath('02-text-node-context-menu.png') })
+    await menu.getByRole('textbox', { name: '节点名称' }).fill('重命名文字概念')
+    await menu.getByRole('button', { name: '保存节点名称' }).click()
+    await expect(menu).toBeHidden()
+    await expect(node(NODE_MENU_TEXT_ID).getByText('重命名文字概念')).toBeVisible()
+    menu = await openNodeMenu(NODE_MENU_STICKY_ID, '便签节点')
+    await expect(menu.getByRole('menuitem', { name: '删除节点' })).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('03-sticky-node-context-menu.png') })
+    await page.keyboard.press('Escape')
+    menu = await openNodeMenu(NODE_MENU_BOX_ID, '节点盒')
+    await page.screenshot({ path: testInfo.outputPath('04-node-box-context-menu.png') })
+    await menu.getByRole('menuitem', { name: '删除节点' }).click()
+    await expect(page.getByRole('status')).toContainText('节点已删除')
+    await expect(node(NODE_MENU_BOX_ID)).toHaveCount(0)
+    await expect(node(NODE_MENU_TEXT_ID)).toHaveCount(1)
+    await expect(node(NODE_MENU_STICKY_ID)).toHaveCount(1)
+    await expect(page.locator(`.react-flow__edge[data-id="${NODE_MENU_ORDERED_ID}"]`)).toHaveCount(0)
+    await expect(page.locator(`.react-flow__edge[data-id="${NODE_MENU_UNORDERED_ID}"]`)).toHaveCount(0)
+    await page.screenshot({ path: testInfo.outputPath('05-node-box-deleted-members-remain.png') })
+
+    menu = await openNodeMenu(NODE_MENU_TEXT_ID, '文字节点')
+    await menu.getByRole('menuitem', { name: '删除节点' }).click()
+    await expect(node(NODE_MENU_TEXT_ID)).toHaveCount(0)
+    await expect(page.locator(`.react-flow__edge[data-id="${NODE_MENU_EDGE_ID}"]`)).toHaveCount(0)
+    await expect(node(NODE_MENU_STICKY_ID)).toHaveCount(1)
+    await page.screenshot({ path: testInfo.outputPath('06-node-and-edge-deleted.png') })
+
+    const harnessPage = await openHarnessPage(context, baseURL)
+    const beforeRestart = await harnessPage.evaluate(async (canvasId) => {
+      const harness = (window as unknown as HarnessWindow).__taskPersistenceHarness
+      return {
+        nodes: await harness.listCanvasNodes(canvasId),
+        edges: await harness.listCanvasEdges(canvasId),
+      }
+    }, NODE_MENU_CANVAS_ID)
+    expect(beforeRestart.nodes).toEqual([
+      expect.objectContaining({ id: NODE_MENU_STICKY_ID }),
+    ])
+    expect(beforeRestart.edges).toEqual([])
+    await harnessPage.evaluate(() =>
+      (window as unknown as HarnessWindow).__taskPersistenceHarness.shutdown(),
+    )
+
+    await context.close()
+    context = await chromium.launchPersistentContext(profilePath, {
+      channel: 'chromium',
+      headless: true,
+      viewport: { width: 1920, height: 1080 },
+    })
+    page = await openHarnessPage(context, baseURL)
+    const afterRestart = await page.evaluate(async (canvasId) => {
+      const harness = (window as unknown as HarnessWindow).__taskPersistenceHarness
+      return {
+        nodes: await harness.listCanvasNodes(canvasId),
+        edges: await harness.listCanvasEdges(canvasId),
+      }
+    }, NODE_MENU_CANVAS_ID)
+    expect(afterRestart).toEqual(beforeRestart)
+    await page.goto(`${baseURL}/canvas/${NODE_MENU_CANVAS_ID}`)
+    await expect(page.getByRole('heading', { name: 'Node Context Menu' })).toBeVisible()
+    await expect(node(NODE_MENU_STICKY_ID)).toHaveCount(1)
+    await expect(node(NODE_MENU_TEXT_ID)).toHaveCount(0)
+    await expect(node(NODE_MENU_BOX_ID)).toHaveCount(0)
+    await page.screenshot({ path: testInfo.outputPath('07-restart-soft-delete-restored.png') })
   } finally {
     await context?.close()
     await rm(profilePath, { recursive: true, force: true })

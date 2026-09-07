@@ -8,6 +8,7 @@ import type {
   CreateCanvasEdgeInput,
   CreateTextNodeInput,
   DeleteCanvasEdgeInput,
+  DeleteCanvasNodeInput,
   MoveCanvasNodeInput,
   MoveCanvasNodesInput,
   ReorderCanvasNodeBoxMembershipsInput,
@@ -43,6 +44,7 @@ defineCanvasRepositoryContract('NativeCanvasRepository', () => {
       case 'canvas_node_update_text': return backend.updateTextNode(args?.input as UpdateTextNodeInput)
       case 'canvas_node_update_content': return backend.updateCanvasNodeContent(args?.input as UpdateCanvasNodeContentInput)
       case 'canvas_node_rename': return backend.renameCanvasNode(args?.input as RenameCanvasNodeInput)
+      case 'canvas_node_delete': return backend.deleteCanvasNode(args?.input as DeleteCanvasNodeInput)
       case 'canvas_node_move': return backend.moveCanvasNode(args?.input as MoveCanvasNodeInput)
       case 'canvas_nodes_move': return backend.moveCanvasNodes(args?.input as MoveCanvasNodesInput)
       case 'canvas_edge_create': return backend.createCanvasEdge(args?.input as CreateCanvasEdgeInput)

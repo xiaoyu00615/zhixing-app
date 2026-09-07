@@ -30,6 +30,7 @@ import type {
   CreateCanvasEdgeInput,
   CreateTextNodeInput,
   DeleteCanvasEdgeInput,
+  DeleteCanvasNodeInput,
   MoveCanvasNodeInput,
   MoveCanvasNodesInput,
   ReorderCanvasNodeBoxMembershipsInput,
@@ -59,6 +60,7 @@ interface PersistenceHarness {
     readonly unknownEdgePreserved: boolean
     readonly ordinaryMembershipPositionsNull: number
     readonly membershipColumnPresent: boolean
+    readonly nodeSoftDeleteColumnPresent: boolean
     readonly temporaryTablesPresent: boolean
     readonly foreignKeyViolations: number
   }>
@@ -99,6 +101,7 @@ interface PersistenceHarness {
   updateTextNode(input: UpdateTextNodeInput): Promise<CanvasNode>
   updateCanvasNodeContent(input: UpdateCanvasNodeContentInput): Promise<CanvasNode>
   renameCanvasNode(input: RenameCanvasNodeInput): Promise<CanvasNode>
+  deleteCanvasNode(input: DeleteCanvasNodeInput): Promise<void>
   moveCanvasNode(input: MoveCanvasNodeInput): Promise<CanvasNode>
   moveCanvasNodes(input: MoveCanvasNodesInput): Promise<readonly CanvasNode[]>
   createCanvasEdge(input: CreateCanvasEdgeInput): Promise<CanvasEdge>
@@ -345,6 +348,9 @@ window.__taskPersistenceHarness = {
         membershipColumnPresent: database.selectValue(
           "SELECT COUNT(*) FROM pragma_table_info('canvas_edges') WHERE name = 'membership_position'",
         ) === 1,
+        nodeSoftDeleteColumnPresent: database.selectValue(
+          "SELECT COUNT(*) FROM pragma_table_info('canvas_nodes') WHERE name = 'deleted_at_ms'",
+        ) === 1,
         temporaryTablesPresent: database.selectValue(
           "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('canvas_nodes_v9', 'canvas_edges_v9')",
         ) !== 0,
@@ -442,6 +448,9 @@ window.__taskPersistenceHarness = {
   },
   async renameCanvasNode(input) {
     return (await requireCanvasRepository()).renameCanvasNode(input)
+  },
+  async deleteCanvasNode(input) {
+    return (await requireCanvasRepository()).deleteCanvasNode(input)
   },
   async moveCanvasNode(input) {
     return (await requireCanvasRepository()).moveCanvasNode(input)

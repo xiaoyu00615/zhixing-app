@@ -34,6 +34,7 @@ class CanvasWorker implements TaskWorkerEndpoint {
       case 'canvas.node.updateText': return this.backend.updateTextNode(request.input)
       case 'canvas.node.updateContent': return this.backend.updateCanvasNodeContent(request.input)
       case 'canvas.node.rename': return this.backend.renameCanvasNode(request.input)
+      case 'canvas.node.delete': return this.backend.deleteCanvasNode(request.input)
       case 'canvas.node.move': return this.backend.moveCanvasNode(request.input)
       case 'canvas.nodes.move': return this.backend.moveCanvasNodes(request.input)
       case 'canvas.edge.create': return this.backend.createCanvasEdge(request.input)

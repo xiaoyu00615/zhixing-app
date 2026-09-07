@@ -81,6 +81,13 @@ export interface MoveCanvasNodesInput {
   readonly updatedAtMs: number
 }
 
+export interface DeleteCanvasNodeInput {
+  readonly canvasId: string
+  readonly id: string
+  readonly deletedAtMs: number
+  readonly updatedAtMs: number
+}
+
 export interface CreateCanvasEdgeInput {
   readonly id: string
   readonly canvasId: string
@@ -149,6 +156,7 @@ export interface CanvasRepository {
   updateTextNode(input: UpdateTextNodeInput): Promise<CanvasNode>
   moveCanvasNode(input: MoveCanvasNodeInput): Promise<CanvasNode>
   moveCanvasNodes(input: MoveCanvasNodesInput): Promise<readonly CanvasNode[]>
+  deleteCanvasNode(input: DeleteCanvasNodeInput): Promise<void>
   createCanvasEdge(input: CreateCanvasEdgeInput): Promise<CanvasEdge>
   addCanvasNodeBoxMember(input: AddCanvasNodeBoxMemberInput): Promise<CanvasEdge>
   reorderCanvasNodeBoxMemberships(

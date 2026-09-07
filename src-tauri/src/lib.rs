@@ -215,6 +215,7 @@ pub fn run() {
             commands::canvas_node_list,
             commands::canvas_node_update_content,
             commands::canvas_node_rename,
+            commands::canvas_node_delete,
             commands::canvas_node_move,
             commands::canvas_nodes_move,
             commands::canvas_edge_create,
@@ -749,7 +750,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(rows, 10, "Production Migrations 1-10 必须写入 history");
+        assert_eq!(rows, 11, "Production Migrations 1-11 必须写入 history");
         let task_table: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
@@ -813,12 +814,12 @@ mod tests {
         let manifest_bytes_before =
             fs::read(data_root.join(MANIFEST_FILENAME)).unwrap();
 
-        // (2) Production already applied v1-v10; insert an unknown v11.
+        // (2) Production already applied v1-v11; insert an unknown v12.
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
             conn.execute_batch(
                 "INSERT INTO schema_migrations(version,id,checksum_sha256,applied_at_ms) \
-                 VALUES(11,'m11','sha11',101);",
+                 VALUES(12,'m12','sha12',101);",
             )
             .unwrap();
         }
@@ -851,10 +852,10 @@ mod tests {
         assert_eq!(device_id_1.as_str(), loaded2.device_id.as_str());
         assert!(db_path.exists(), "失败不得删 zhixing.db");
 
-        // (4) Remove only the injected v11 row; approved v1-v10 remain intact.
+        // (4) Remove only the injected v12 row; approved v1-v11 remain intact.
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
-            conn.execute_batch("DELETE FROM schema_migrations WHERE version = 11;")
+            conn.execute_batch("DELETE FROM schema_migrations WHERE version = 12;")
                 .unwrap();
         }
         let status = run_bootstrap_pipeline(&cfg, &local);

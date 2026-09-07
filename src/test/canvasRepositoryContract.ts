@@ -14,6 +14,7 @@ import {
   type CreateCanvasEdgeInput,
   type CreateTextNodeInput,
   type DeleteCanvasEdgeInput,
+  type DeleteCanvasNodeInput,
   type MoveCanvasNodeInput,
   type MoveCanvasNodesInput,
   type ReorderCanvasNodeBoxMembershipsInput,
@@ -36,6 +37,7 @@ export const CONTRACT_BOX_ID = '00000000-0000-4000-8000-000000000620'
 export class CanvasContractBackend implements CanvasRepository {
   readonly canvases = new Map<string, Canvas>()
   readonly nodes = new Map<string, CanvasNode>()
+  readonly deletedNodes = new Map<string, CanvasNode>()
   readonly edges = new Map<string, CanvasEdge>()
 
   createCanvas(input: CreateCanvasInput): Promise<Canvas> {
@@ -148,6 +150,34 @@ export class CanvasContractBackend implements CanvasRepository {
     }))
     for (const node of updated) this.nodes.set(node.id, node)
     return updated
+  }
+
+  deleteCanvasNode(input: DeleteCanvasNodeInput): Promise<void> {
+    const node = this.nodes.get(input.id)
+    if (node === undefined || node.canvasId !== input.canvasId) {
+      return Promise.reject(
+        new CanvasRepositoryError('NOT_FOUND', 'deleteCanvasNode'),
+      )
+    }
+    this.nodes.delete(input.id)
+    this.deletedNodes.set(input.id, {
+      ...node,
+      updatedAtMs: input.updatedAtMs,
+    })
+    for (const edge of this.edges.values()) {
+      if (
+        edge.deletedAtMs === null &&
+        edge.canvasId === input.canvasId &&
+        (edge.sourceNodeId === input.id || edge.targetNodeId === input.id)
+      ) {
+        this.edges.set(edge.id, {
+          ...edge,
+          deletedAtMs: input.deletedAtMs,
+          updatedAtMs: input.updatedAtMs,
+        })
+      }
+    }
+    return Promise.resolve()
   }
 
   async createCanvasEdge(input: CreateCanvasEdgeInput): Promise<CanvasEdge> {
@@ -442,6 +472,41 @@ export function defineCanvasRepositoryContract(
         expect.objectContaining({ id: CONTRACT_NODE_ID, x: 10, y: 20, updatedAtMs: 50 }),
         expect.objectContaining({ id: CONTRACT_TARGET_NODE_ID, x: 30, y: 40, updatedAtMs: 50 }),
       ])
+    })
+
+    test('soft-deletes a node and every incident Edge while preserving other nodes', async () => {
+      const { repository, backend } = createFixture()
+      await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+      await repository.createTextNode({ id: CONTRACT_NODE_ID, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: 'Source' }, x: 1, y: 2, createdAtMs: 20 })
+      await repository.createCanvasNode({ id: CONTRACT_TARGET_NODE_ID, canvasId: CONTRACT_CANVAS_ID, type: 'sticky', content: { type: 'sticky', text: 'Target' }, x: 3, y: 4, createdAtMs: 21 })
+      await repository.createCanvasNode({ id: CONTRACT_BOX_ID, canvasId: CONTRACT_CANVAS_ID, type: 'node_box', content: { type: 'node_box' }, x: 5, y: 6, createdAtMs: 22 })
+      await repository.createCanvasEdge({ id: CONTRACT_EDGE_ID, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_TARGET_NODE_ID, relationType: 'default', direction: 'forward', lineStyle: 'solid', createdAtMs: 30 })
+      await repository.addCanvasNodeBoxMember({ id: CONTRACT_REVERSE_EDGE_ID, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_BOX_ID, relationType: 'ordered_box_member', createdAtMs: 31 })
+
+      await repository.deleteCanvasNode({
+        canvasId: CONTRACT_CANVAS_ID,
+        id: CONTRACT_NODE_ID,
+        deletedAtMs: 40,
+        updatedAtMs: 40,
+      })
+
+      await expect(repository.listCanvasNodes(CONTRACT_CANVAS_ID)).resolves.toEqual([
+        expect.objectContaining({ id: CONTRACT_TARGET_NODE_ID }),
+        expect.objectContaining({ id: CONTRACT_BOX_ID }),
+      ])
+      await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toEqual([])
+      expect(backend.deletedNodes.get(CONTRACT_NODE_ID)).toMatchObject({
+        id: CONTRACT_NODE_ID,
+        updatedAtMs: 40,
+      })
+      expect(backend.edges.get(CONTRACT_EDGE_ID)).toMatchObject({ deletedAtMs: 40, updatedAtMs: 40 })
+      expect(backend.edges.get(CONTRACT_REVERSE_EDGE_ID)).toMatchObject({ deletedAtMs: 40, updatedAtMs: 40 })
+      await expect(repository.deleteCanvasNode({
+        canvasId: CONTRACT_CANVAS_ID,
+        id: CONTRACT_NODE_ID,
+        deletedAtMs: 50,
+        updatedAtMs: 50,
+      })).rejects.toMatchObject({ code: 'NOT_FOUND', operation: 'deleteCanvasNode' })
     })
 
     test('does not partially move nodes when a batch member is missing or cross-Canvas', async () => {

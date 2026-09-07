@@ -20,9 +20,22 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 
 import { CanvasEdgeToolbar } from '@/components/canvas/CanvasEdgeToolbar'
+import { CanvasEdgeContextMenu } from '@/components/canvas/CanvasEdgeContextMenu'
+import { CanvasNodeContextMenu } from '@/components/canvas/CanvasNodeContextMenu'
 import { Button } from '@/components/ui/button'
 import type { Canvas, CanvasEdge, CanvasMembershipRelationType, CanvasNode } from '@/canvas/model'
-import type { CanvasOrdinaryEdgeRelationType, RegisteredCanvasNodeType } from '@/canvas/model'
+import type { RegisteredCanvasNodeType } from '@/canvas/model'
+import {
+  executeCanvasEdgeCommand,
+  executeCanvasNodeCommand,
+  type CanvasEdgeCommand,
+  type CanvasNodeCommand,
+  type CanvasNodeCommandTarget,
+} from '@/canvas/commandRegistry'
+import {
+  createCanvasContextMenuModel,
+  createCanvasNodeContextMenuModel,
+} from '@/canvas/contextMenuRegistry'
 import { getCanvasEdgeTypeDefinition, UNKNOWN_CANVAS_EDGE_RENDER } from '@/canvas/edgeRegistry'
 import { canvasNodeRegistry, orderedMembershipDisplayNumbers, toCanvasFlowNode, withCanvasNodeRuntimeData, type CanvasFlowNode } from '@/canvas/nodeRegistry'
 import { openCanvasRuntime } from '@/canvas/runtime'
@@ -37,7 +50,7 @@ const CAMERA_PAN_KEYS = new Set(['w', 'a', 's', 'd'])
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false
   return target.isContentEditable ||
-    target.closest('input, textarea, select, [contenteditable="true"]') !== null
+    target.closest('input, textarea, select, [contenteditable="true"], [role="menu"]') !== null
 }
 
 function edgeStrokeDasharray(edge: CanvasEdge): string | undefined {
@@ -91,7 +104,20 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
   const [flowNodes, setFlowNodes] = useState<CanvasFlowNode[]>([])
   const [canvasEdges, setCanvasEdges] = useState<CanvasEdge[]>([])
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
+  const [edgeContextMenu, setEdgeContextMenu] = useState<{
+    readonly edgeId: string
+    readonly x: number
+    readonly y: number
+  } | null>(null)
+  const [nodeContextMenu, setNodeContextMenu] = useState<{
+    readonly nodeId: string
+    readonly nodeName: string
+    readonly nodeType: CanvasNodeCommandTarget['type']
+    readonly x: number
+    readonly y: number
+  } | null>(null)
   const [edgeBusy, setEdgeBusy] = useState(false)
+  const [nodeBusy, setNodeBusy] = useState(false)
   const [service, setService] = useState<CanvasService | null>(null)
   const serviceRef = useRef<CanvasService | null>(null)
   const [feedback, setFeedback] = useState<string | null>(null)
@@ -101,6 +127,71 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
     ReadonlyMap<string, { readonly x: number; readonly y: number }> | null
   >(null)
   const keyboardPanActive = useRef(false)
+  const nodeTargets = useRef(new Map<string, CanvasNodeCommandTarget>())
+  const canvasEdgesRef = useRef<CanvasEdge[]>([])
+
+  useEffect(() => {
+    canvasEdgesRef.current = canvasEdges
+  }, [canvasEdges])
+
+  const runNodeCommand = useCallback(async (
+    command: CanvasNodeCommand,
+  ): Promise<boolean> => {
+    const currentService = serviceRef.current
+    const node = nodeTargets.current.get(command.nodeId)
+    if (currentService === null || canvasId === '' || node === undefined) {
+      return false
+    }
+    setNodeBusy(true)
+    try {
+      const result = await executeCanvasNodeCommand(command, {
+        canvasId,
+        node,
+        edges: canvasEdgesRef.current,
+        service: currentService,
+      })
+      if (result.updatedNode !== null) {
+        setFlowNodes((nodes) => nodes.map((flowNode) =>
+          flowNode.id === result.updatedNode?.id
+            ? {
+                ...flowNode,
+                data: {
+                  ...flowNode.data,
+                  nodeName: result.updatedNode.nodeName,
+                },
+              }
+            : flowNode,
+        ))
+      }
+      if (result.removedNodeId !== null) {
+        const removedEdges = new Set(result.removedEdgeIds)
+        nodeTargets.current.delete(result.removedNodeId)
+        setFlowNodes((nodes) =>
+          nodes.filter((flowNode) => flowNode.id !== result.removedNodeId),
+        )
+        setCanvasEdges((edges) => {
+          const remaining = edges.filter((edge) => !removedEdges.has(edge.id))
+          canvasEdgesRef.current = remaining
+          return remaining
+        })
+        setSelectedEdgeId((edgeId) =>
+          edgeId !== null && removedEdges.has(edgeId) ? null : edgeId,
+        )
+        setEdgeContextMenu((menu) =>
+          menu !== null && removedEdges.has(menu.edgeId) ? null : menu,
+        )
+      }
+      if (result.feedback !== '') setFeedback(result.feedback)
+      return true
+    } catch {
+      setFeedback(command.id === 'rename_node'
+        ? '节点名称保存失败，已恢复原名称。'
+        : '节点删除失败，请重试。')
+      return false
+    } finally {
+      setNodeBusy(false)
+    }
+  }, [canvasId])
 
   const commitNodeContent = useCallback(async (id: string, type: RegisteredCanvasNodeType, text: string) => {
     const currentService = serviceRef.current
@@ -121,20 +212,8 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
   }, [])
 
   const commitNodeName = useCallback(async (id: string, nodeName: string): Promise<boolean> => {
-    const currentService = serviceRef.current
-    if (currentService === null || canvasId === '') return false
-    try {
-      const updated = await currentService.renameCanvasNode(canvasId, id, nodeName)
-      setFlowNodes((nodes) => nodes.map((node) => node.id === id
-        ? { ...node, data: { ...node.data, nodeName: updated.nodeName } }
-        : node))
-      setFeedback(updated.nodeName === '' ? '节点名称已清空' : '节点名称已保存')
-      return true
-    } catch {
-      setFeedback('节点名称保存失败，已恢复原名称。')
-      return false
-    }
-  }, [canvasId])
+    return runNodeCommand({ id: 'rename_node', nodeId: id, nodeName })
+  }, [runNodeCommand])
 
   useEffect(() => {
     let active = true
@@ -149,6 +228,12 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
         serviceRef.current = runtime.service
         setService(runtime.service)
         setCanvas(workspace.canvas)
+        nodeTargets.current = new Map(
+          workspace.nodes.map((node) => [
+            node.id,
+            { id: node.id, type: node.type },
+          ]),
+        )
         setFlowNodes(workspace.nodes.map((node: CanvasNode) =>
           toCanvasFlowNode(
             node,
@@ -156,6 +241,7 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
             commitNodeName,
           ),
         ))
+        canvasEdgesRef.current = [...workspace.edges]
         setCanvasEdges([...workspace.edges])
         setPhase('ready')
       } catch {
@@ -348,6 +434,7 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
     try {
       const entry = canvasNodeRegistry.byType.get(type)!
       const created = await service.createCanvasNode(canvas.id, type, entry.createDefaultData(), position)
+      nodeTargets.current.set(created.id, { id: created.id, type: created.type })
       setFlowNodes((nodes) => [...nodes, toCanvasFlowNode(
         created,
         (id, nodeType, text) => void commitNodeContent(id, nodeType, text),
@@ -441,6 +528,7 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
         connection.target,
       )
       setCanvasEdges((edges) => [...edges, created])
+      canvasEdgesRef.current = [...canvasEdgesRef.current, created]
       setSelectedEdgeId(created.id)
       setFeedback('已创建普通关系')
     } catch (error: unknown) {
@@ -452,91 +540,77 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
     }
   }
 
-  async function changeEdgeDirection(
-    edge: CanvasEdge,
-    direction: CanvasEdge['direction'],
-  ): Promise<void> {
-    if (service === null || direction === edge.direction) return
+  const runEdgeCommand = useCallback(async (
+    command: CanvasEdgeCommand,
+  ): Promise<boolean> => {
+    if (service === null || canvas === null || edgeBusy) return false
     setEdgeBusy(true)
     try {
-      const updated = await service.updateCanvasEdgeDirection(edge.id, direction)
-      setCanvasEdges((edges) =>
-        edges.map((item) => (item.id === updated.id ? updated : item)),
-      )
-      setFeedback('连线方向已保存')
+      const result = await executeCanvasEdgeCommand(command, {
+        canvasId: canvas.id,
+        edges: canvasEdges,
+        service,
+      })
+      if (result.updatedEdges.length > 0) {
+        const updatedById = new Map(
+          result.updatedEdges.map((edge) => [edge.id, edge]),
+        )
+        setCanvasEdges((edges) => {
+          const updated = edges.map((edge) => updatedById.get(edge.id) ?? edge)
+          canvasEdgesRef.current = updated
+          return updated
+        })
+      }
+      if (result.removedEdgeId !== null) {
+        setCanvasEdges((edges) => {
+          const remaining = edges.filter(
+            (edge) => edge.id !== result.removedEdgeId,
+          )
+          canvasEdgesRef.current = remaining
+          return remaining
+        })
+        setSelectedEdgeId((edgeId) =>
+          edgeId === result.removedEdgeId ? null : edgeId,
+        )
+        setEdgeContextMenu((menu) =>
+          menu?.edgeId === result.removedEdgeId ? null : menu,
+        )
+      }
+      if (result.feedback !== '') setFeedback(result.feedback)
+      return true
     } catch (error: unknown) {
-      setFeedback(
-        error instanceof Error && 'code' in error && error.code === 'CONFLICT'
-          ? '该方向会产生重复关系。'
-          : '连线方向保存失败，请重试。',
-      )
-    } finally {
-      setEdgeBusy(false)
-    }
-  }
-
-  async function changeEdgeLineStyle(
-    edge: CanvasEdge,
-    lineStyle: CanvasEdge['lineStyle'],
-  ): Promise<void> {
-    if (service === null || lineStyle === edge.lineStyle) return
-    setEdgeBusy(true)
-    try {
-      const updated = await service.updateCanvasEdgeLineStyle(edge.id, lineStyle)
-      setCanvasEdges((edges) =>
-        edges.map((item) => (item.id === updated.id ? updated : item)),
-      )
-      setFeedback('连线样式已保存')
-    } catch {
-      setFeedback('连线样式保存失败，请重试。')
-    } finally {
-      setEdgeBusy(false)
-    }
-  }
-
-  async function changeEdgeRelationType(
-    edge: CanvasEdge,
-    relationType: CanvasOrdinaryEdgeRelationType,
-  ): Promise<void> {
-    if (service === null || relationType === edge.relationType) return
-    setEdgeBusy(true)
-    try {
-      const updated = await service.updateCanvasEdgeRelationType(edge.id, relationType)
-      setCanvasEdges((edges) =>
-        edges.map((item) => (item.id === updated.id ? updated : item)),
-      )
-      const definition = getCanvasEdgeTypeDefinition(updated.relationType)
-      setFeedback(`${definition?.displayName ?? '关系类型'}已保存`)
-    } catch (error: unknown) {
-      setFeedback(
-        error instanceof Error && 'code' in error && error.code === 'CONFLICT'
+      const conflict = error instanceof Error &&
+        'code' in error &&
+        error.code === 'CONFLICT'
+      if (command.id === 'update_edge_relation_type') {
+        setFeedback(conflict
           ? '该关系类型会产生重复关系，已保留原配置。'
-          : '关系类型保存失败，已保留原配置。',
-      )
+          : '关系类型保存失败，已保留原配置。')
+      } else if (command.id === 'update_edge_direction') {
+        setFeedback(conflict
+          ? '该方向会产生重复关系。'
+          : '连线方向保存失败，请重试。')
+      } else if (command.id === 'update_edge_line_style') {
+        setFeedback('连线样式保存失败，请重试。')
+      } else if (command.id === 'delete_edge') {
+        setFeedback('连线删除失败，请重试。')
+      } else if (command.id === 'remove_membership') {
+        setFeedback('成员移除失败，请重试。')
+      } else {
+        setFeedback('成员分区保存失败，已保留原顺序。')
+      }
+      return false
     } finally {
       setEdgeBusy(false)
     }
-  }
-
-  const removeEdge = useCallback(async (edge: CanvasEdge): Promise<void> => {
-    if (service === null) return
-    setEdgeBusy(true)
-    try {
-      await service.deleteCanvasEdge(edge.id)
-      setCanvasEdges((edges) => edges.filter((item) => item.id !== edge.id))
-      setSelectedEdgeId(null)
-      setFeedback('连线已删除')
-    } catch {
-      setFeedback('连线删除失败，请重试。')
-    } finally {
-      setEdgeBusy(false)
-    }
-  }, [service])
+  }, [canvas, canvasEdges, edgeBusy, service])
 
   const removeMembership = useCallback((edgeId: string) => {
     const edge = canvasEdges.find((item) => item.id === edgeId)
-    if (edge !== undefined) void removeEdge(edge)
-  }, [canvasEdges, removeEdge])
+    if (edge !== undefined) {
+      void runEdgeCommand({ id: 'remove_membership', edgeId: edge.id })
+    }
+  }, [canvasEdges, runEdgeCommand])
 
   const reorderMemberships = useCallback((
     nodeBoxId: string,
@@ -662,7 +736,7 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
         edges={canvasEdges.map((edge) =>
           toFlowEdge(
             edge,
-            edge.id === selectedEdgeId,
+            edge.id === selectedEdgeId || edge.id === edgeContextMenu?.edgeId,
             orderedEdgeNumbers.get(edge.id),
           ),
         )}
@@ -672,7 +746,37 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
         onNodeDragStop={finishNodeDrag}
         onConnect={(connection) => void connectNodes(connection)}
         onEdgeClick={(_, edge) => setSelectedEdgeId(edge.id)}
-        onPaneClick={() => setSelectedEdgeId(null)}
+        onEdgeContextMenu={(event, edge) => {
+          event.preventDefault()
+          event.stopPropagation()
+          setEdgeContextMenu({
+            edgeId: edge.id,
+            x: event.clientX,
+            y: event.clientY,
+          })
+          setNodeContextMenu(null)
+        }}
+        onNodeContextMenu={(event, node) => {
+          event.preventDefault()
+          event.stopPropagation()
+          const target = nodeTargets.current.get(node.id)
+          if (target === undefined) return
+          setNodeContextMenu({
+            nodeId: node.id,
+            nodeName: typeof node.data.nodeName === 'string'
+              ? node.data.nodeName
+              : '',
+            nodeType: target.type,
+            x: event.clientX,
+            y: event.clientY,
+          })
+          setEdgeContextMenu(null)
+        }}
+        onPaneClick={() => {
+          setSelectedEdgeId(null)
+          setEdgeContextMenu(null)
+          setNodeContextMenu(null)
+        }}
         onMove={(_, viewport) => { latestViewport.current = viewport }}
         onMoveEnd={(_, viewport) => {
           if (!keyboardPanActive.current) void persistViewport(viewport)
@@ -709,19 +813,42 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
           <CanvasEdgeToolbar
             busy={edgeBusy}
             edge={selectedEdge}
-            onDelete={() => void removeEdge(selectedEdge)}
-            onRelationTypeChange={(relationType) =>
-              void changeEdgeRelationType(selectedEdge, relationType)
-            }
-            onDirectionChange={(direction) =>
-              void changeEdgeDirection(selectedEdge, direction)
-            }
-            onLineStyleChange={(lineStyle) =>
-              void changeEdgeLineStyle(selectedEdge, lineStyle)
-            }
+            onCommand={(command) => void runEdgeCommand(command)}
           />
         )
       })()}
+      {edgeContextMenu !== null && (() => {
+        const targetEdge = canvasEdges.find(
+          (edge) => edge.id === edgeContextMenu.edgeId,
+        )
+        return targetEdge === undefined ? null : (
+          <CanvasEdgeContextMenu
+            busy={edgeBusy}
+            model={createCanvasContextMenuModel({
+              type: 'edge',
+              edge: targetEdge,
+            })}
+            onClose={() => setEdgeContextMenu(null)}
+            onCommand={runEdgeCommand}
+            x={edgeContextMenu.x}
+            y={edgeContextMenu.y}
+          />
+        )
+      })()}
+      {nodeContextMenu !== null && (
+        <CanvasNodeContextMenu
+          busy={nodeBusy}
+          model={createCanvasNodeContextMenuModel({
+            id: nodeContextMenu.nodeId,
+            type: nodeContextMenu.nodeType,
+            nodeName: nodeContextMenu.nodeName,
+          })}
+          onClose={() => setNodeContextMenu(null)}
+          onCommand={runNodeCommand}
+          x={nodeContextMenu.x}
+          y={nodeContextMenu.y}
+        />
+      )}
       {flowNodes.length === 0 && <div className="pointer-events-none absolute inset-0 flex items-center justify-center pt-16"><div className="rounded-2xl border border-border/80 bg-surface/90 px-8 py-6 text-center shadow-sm"><p className="font-medium">这张画布还是空的</p><p className="mt-1 text-sm text-foreground-secondary">点击右上角添加第一个节点</p></div></div>}
       {feedback !== null && <div className="absolute bottom-5 left-1/2 z-10 -translate-x-1/2 rounded-full bg-foreground px-4 py-2 text-xs text-background shadow-lg" role="status">{feedback}</div>}
     </div>

@@ -45,6 +45,7 @@ import type {
   CreateCanvasNodeInput,
   CreateTextNodeInput,
   DeleteCanvasEdgeInput,
+  DeleteCanvasNodeInput,
   MoveCanvasNodeInput,
   MoveCanvasNodesInput,
   ReorderCanvasNodeBoxMembershipsInput,
@@ -202,6 +203,11 @@ export type TaskWorkerRequest =
       readonly requestId: number
       readonly type: 'canvas.node.rename'
       readonly input: RenameCanvasNodeInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.node.delete'
+      readonly input: DeleteCanvasNodeInput
     }
   | { readonly requestId: number; readonly type: 'canvas.node.updateText'; readonly input: UpdateTextNodeInput }
   | {
@@ -702,6 +708,16 @@ export function parseTaskWorkerRequest(
             requestId: value.requestId,
             type: value.type,
             input: value.input as unknown as RenameCanvasNodeInput,
+          }
+        : null
+    case 'canvas.node.delete':
+      return isCanvasUpdateBase(value.input) &&
+        isCanonicalCanvasId(value.input.canvasId) &&
+        isNonNegativeSafeIntegerMilliseconds(value.input.deletedAtMs)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input as unknown as DeleteCanvasNodeInput,
           }
         : null
     case 'canvas.node.updateText':

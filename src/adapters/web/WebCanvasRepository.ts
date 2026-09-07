@@ -30,6 +30,7 @@ import {
   type MoveCanvasNodesInput,
   type ReorderCanvasNodeBoxMembershipsInput,
   type DeleteCanvasEdgeInput,
+  type DeleteCanvasNodeInput,
   type RenameCanvasInput,
   type RenameCanvasNodeInput,
   type UpdateCanvasViewportInput,
@@ -361,6 +362,19 @@ export class WebCanvasRepository implements CanvasRepository {
         throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
       }
       return value.map((node) => parseNode(node, operation))
+    } catch (error: unknown) {
+      throw mapError(error, operation)
+    }
+  }
+
+  async deleteCanvasNode(input: DeleteCanvasNodeInput): Promise<void> {
+    const operation = 'deleteCanvasNode'
+    validateId(input.canvasId, operation)
+    validateId(input.id, operation)
+    validateTimestamp(input.deletedAtMs, operation)
+    validateTimestamp(input.updatedAtMs, operation)
+    try {
+      await this.#client.deleteCanvasNode(input)
     } catch (error: unknown) {
       throw mapError(error, operation)
     }

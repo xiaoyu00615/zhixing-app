@@ -7,9 +7,10 @@ use crate::canvas::{
     AddCanvasNodeBoxMemberInput, CanvasDbService, CanvasEdgeDirection, CanvasEdgeLineStyle,
     CanvasEdgeRecord, CanvasError, CanvasNodeContent, CanvasNodePositionMove, CanvasNodeRecord,
     CanvasRecord, CanvasViewport, CreateCanvasEdgeInput, CreateCanvasInput, CreateCanvasNodeInput,
-    DeleteCanvasEdgeInput, MoveCanvasNodeInput, MoveCanvasNodesInput, RenameCanvasInput,
-    RenameCanvasNodeInput, ReorderCanvasNodeBoxMembershipsInput, UpdateCanvasEdgeDirectionInput,
-    UpdateCanvasEdgeLineStyleInput, UpdateCanvasNodeContentInput, UpdateCanvasViewportInput,
+    DeleteCanvasEdgeInput, DeleteCanvasNodeInput, MoveCanvasNodeInput, MoveCanvasNodesInput,
+    RenameCanvasInput, RenameCanvasNodeInput, ReorderCanvasNodeBoxMembershipsInput,
+    UpdateCanvasEdgeDirectionInput, UpdateCanvasEdgeLineStyleInput, UpdateCanvasNodeContentInput,
+    UpdateCanvasViewportInput,
 };
 use crate::project::{
     CreateProjectInput, ProjectDbService, ProjectError, ProjectRecord, RenameProjectInput,
@@ -758,6 +759,15 @@ pub(crate) struct RenameCanvasNodeDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct DeleteCanvasNodeDto {
+    canvas_id: String,
+    id: String,
+    deleted_at_ms: i64,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct MoveCanvasNodeDto {
     id: String,
     x: f64,
@@ -1096,6 +1106,25 @@ pub(crate) fn canvas_node_rename(
         },
     )
     .map(CanvasNodeDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_node_delete(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: DeleteCanvasNodeDto,
+) -> Result<(), CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    CanvasDbService::delete_node(
+        &connection,
+        DeleteCanvasNodeInput {
+            canvas_id: input.canvas_id,
+            id: input.id,
+            deleted_at_ms: input.deleted_at_ms,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
     .map_err(Into::into)
 }
 

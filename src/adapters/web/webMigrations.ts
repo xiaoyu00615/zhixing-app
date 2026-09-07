@@ -10,6 +10,7 @@ import addCanvasEdgesSql from '../../../src-tauri/migrations/0007_add_canvas_edg
 import addStickyCanvasNodesSql from '../../../src-tauri/migrations/0008_add_sticky_canvas_nodes.sql?raw'
 import addCanvasNodeNameSql from '../../../src-tauri/migrations/0009_add_canvas_node_name.sql?raw'
 import addCanvasNodeBoxesSql from '../../../src-tauri/migrations/0010_add_canvas_node_boxes.sql?raw'
+import addCanvasNodeSoftDeleteSql from '../../../src-tauri/migrations/0011_add_canvas_node_soft_delete.sql?raw'
 
 export interface WebMigrationDefinition {
   readonly version: number
@@ -106,6 +107,12 @@ export const WEB_MIGRATIONS: readonly WebMigrationDefinition[] = [
     version: 10,
     id: '0010_add_canvas_node_boxes',
     sql: addCanvasNodeBoxesSql,
+    highRisk: false,
+  },
+  {
+    version: 11,
+    id: '0011_add_canvas_node_soft_delete',
+    sql: addCanvasNodeSoftDeleteSql,
     highRisk: false,
   },
 ]

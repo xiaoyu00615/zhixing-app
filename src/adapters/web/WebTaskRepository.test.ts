@@ -569,6 +569,12 @@ describe('Web migrations', () => {
         checksumSha256: await sha256Hex(WEB_MIGRATIONS[9]?.sql ?? ''),
         appliedAtMs: 123,
       },
+      {
+        version: 11,
+        id: '0011_add_canvas_node_soft_delete',
+        checksumSha256: await sha256Hex(WEB_MIGRATIONS[10]?.sql ?? ''),
+        appliedAtMs: 123,
+      },
     ])
   })
 
@@ -582,7 +588,7 @@ describe('Web migrations', () => {
     expect(store.executedSql).toEqual(
       WEB_MIGRATIONS.map((migration) => migration.sql),
     )
-    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
   })
 
   test('upgrades an exact v2 prefix through Canvas Edge migration 7', async () => {
@@ -590,7 +596,7 @@ describe('Web migrations', () => {
     await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 2), () => 123)
     expect(store.history.map((row) => row.version)).toEqual([1, 2])
     await runWebMigrations(store, WEB_MIGRATIONS, () => 456)
-    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
     expect(store.history[2]).toMatchObject({
       id: '0003_add_task_projects',
       appliedAtMs: 456,
@@ -614,13 +620,14 @@ describe('Web migrations', () => {
     expect(store.history[7]).toMatchObject({ id: '0008_add_sticky_canvas_nodes', appliedAtMs: 456 })
     expect(store.history[8]).toMatchObject({ id: '0009_add_canvas_node_name', appliedAtMs: 456 })
     expect(store.history[9]).toMatchObject({ id: '0010_add_canvas_node_boxes', appliedAtMs: 456 })
+    expect(store.history[10]).toMatchObject({ id: '0011_add_canvas_node_soft_delete', appliedAtMs: 456 })
   })
 
   test('upgrades an exact v3 prefix through Canvas Edge migration 7', async () => {
     const store = new FakeMigrationStore()
     await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 3), () => 123)
     await runWebMigrations(store, WEB_MIGRATIONS, () => 456)
-    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
     expect(store.history[3]).toMatchObject({
       id: '0004_add_task_tags',
       appliedAtMs: 456,
@@ -636,7 +643,7 @@ describe('Web migrations', () => {
     await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 4), () => 123)
     await runWebMigrations(store, WEB_MIGRATIONS, () => 456)
 
-    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
     expect(store.history[4]).toMatchObject({
       id: '0005_add_task_soft_delete',
       appliedAtMs: 456,
@@ -648,7 +655,7 @@ describe('Web migrations', () => {
     const store = new FakeMigrationStore()
     await runWebMigrations(store, WEB_MIGRATIONS.slice(0, 5), () => 123)
     await runWebMigrations(store, WEB_MIGRATIONS, () => 456)
-    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    expect(store.history.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
     expect(store.history[5]).toMatchObject({
       id: '0006_add_canvas_core',
       appliedAtMs: 456,

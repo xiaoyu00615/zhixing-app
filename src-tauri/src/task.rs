@@ -958,6 +958,7 @@ mod tests {
                 (8, "0008_add_sticky_canvas_nodes".to_string()),
                 (9, "0009_add_canvas_node_name".to_string()),
                 (10, "0010_add_canvas_node_boxes".to_string()),
+                (11, "0011_add_canvas_node_soft_delete".to_string()),
             ]
         );
 
@@ -1052,7 +1053,7 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(history, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(history, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
 
         let foreign_keys: Vec<(String, String, String)> = connection
             .prepare("PRAGMA foreign_key_list('tasks')")

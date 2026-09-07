@@ -327,6 +327,16 @@ export class TaskWorkerClient {
     }))
   }
 
+  deleteCanvasNode(
+    input: import('@/canvas/repository').DeleteCanvasNodeInput,
+  ): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.node.delete',
+      input,
+    }))
+  }
+
   updateTextNode(input: UpdateTextNodeInput): Promise<unknown> {
     return this.send((requestId) => ({ requestId, type: 'canvas.node.updateText', input }))
   }

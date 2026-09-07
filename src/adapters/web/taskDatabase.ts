@@ -55,6 +55,7 @@ import type {
   CreateCanvasNodeInput,
   CreateTextNodeInput,
   DeleteCanvasEdgeInput,
+  DeleteCanvasNodeInput,
   MoveCanvasNodeInput,
   MoveCanvasNodesInput,
   ReorderCanvasNodeBoxMembershipsInput,
@@ -842,7 +843,8 @@ export class WebTaskDatabase {
       return this.#database
         .selectObjects(
           `SELECT ${CANVAS_NODE_COLUMNS} FROM canvas_nodes
-           WHERE canvas_id = ? ORDER BY created_at_ms ASC, id ASC`,
+           WHERE canvas_id = ? AND deleted_at_ms IS NULL
+           ORDER BY created_at_ms ASC, id ASC`,
           [canvasId],
         )
         .map((row) => {
@@ -891,7 +893,8 @@ export class WebTaskDatabase {
         }
         this.#database.exec({
           sql: `UPDATE canvas_nodes SET node_name = ?, updated_at_ms = ?
-                WHERE canvas_id = ? AND id = ? AND type IN ('text', 'sticky', 'node_box')`,
+                WHERE canvas_id = ? AND id = ? AND deleted_at_ms IS NULL
+                  AND type IN ('text', 'sticky', 'node_box')`,
           bind: [input.nodeName, input.updatedAtMs, input.canvasId, input.id],
         })
         if (this.#database.changes() !== 1) {
@@ -919,7 +922,7 @@ export class WebTaskDatabase {
         this.requireCanvasNode(input.id)
         this.#database.exec({
           sql: `UPDATE canvas_nodes SET x = ?, y = ?, updated_at_ms = ?
-                WHERE id = ?`,
+                WHERE id = ? AND deleted_at_ms IS NULL`,
           bind: [input.x, input.y, input.updatedAtMs, input.id],
         })
         if (this.#database.changes() !== 1) {
@@ -959,7 +962,7 @@ export class WebTaskDatabase {
         for (const move of input.moves) {
           this.#database.exec({
             sql: `UPDATE canvas_nodes SET x = ?, y = ?, updated_at_ms = ?
-                  WHERE canvas_id = ? AND id = ?`,
+                  WHERE canvas_id = ? AND id = ? AND deleted_at_ms IS NULL`,
             bind: [
               move.x,
               move.y,
@@ -975,6 +978,47 @@ export class WebTaskDatabase {
         return input.moves.map((move) =>
           this.requireNodeInCanvas(input.canvasId, move.nodeId),
         )
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  deleteCanvasNode(input: DeleteCanvasNodeInput): void {
+    this.validateCanvasUpdate(input.id, input.updatedAtMs)
+    if (
+      !isCanonicalCanvasId(input.canvasId) ||
+      !isNonNegativeSafeIntegerMilliseconds(input.deletedAtMs)
+    ) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    try {
+      this.#database.transaction(() => {
+        this.requireNodeInCanvas(input.canvasId, input.id)
+        this.#database.exec({
+          sql: `UPDATE canvas_edges
+                SET deleted_at_ms = ?, updated_at_ms = ?
+                WHERE canvas_id = ?
+                  AND (source_node_id = ? OR target_node_id = ?)
+                  AND deleted_at_ms IS NULL`,
+          bind: [
+            input.deletedAtMs,
+            input.updatedAtMs,
+            input.canvasId,
+            input.id,
+            input.id,
+          ],
+        })
+        this.#database.exec({
+          sql: `UPDATE canvas_nodes
+                SET deleted_at_ms = ?, updated_at_ms = ?
+                WHERE canvas_id = ? AND id = ? AND deleted_at_ms IS NULL`,
+          bind: [input.deletedAtMs, input.updatedAtMs, input.canvasId, input.id],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
       })
     } catch (error: unknown) {
       if (error instanceof TaskDatabaseError) throw error
@@ -1536,7 +1580,8 @@ export class WebTaskDatabase {
   private requireCanvasNode(id: string): CanvasNode {
     const node = parseCanvasNodeRow(
       this.#database.selectObject(
-        `SELECT ${CANVAS_NODE_COLUMNS} FROM canvas_nodes WHERE id = ?`,
+        `SELECT ${CANVAS_NODE_COLUMNS} FROM canvas_nodes
+         WHERE id = ? AND deleted_at_ms IS NULL`,
         [id],
       ),
     )
@@ -1548,7 +1593,7 @@ export class WebTaskDatabase {
     const node = parseCanvasNodeRow(
       this.#database.selectObject(
         `SELECT ${CANVAS_NODE_COLUMNS} FROM canvas_nodes
-         WHERE canvas_id = ? AND id = ?`,
+         WHERE canvas_id = ? AND id = ? AND deleted_at_ms IS NULL`,
         [canvasId, id],
       ),
     )
@@ -1621,7 +1666,7 @@ export class WebTaskDatabase {
         this.requireCanvasNode(id)
         this.#database.exec({
           sql: `UPDATE canvas_nodes SET ${column} = ?, updated_at_ms = ?
-                WHERE id = ?`,
+                WHERE id = ? AND deleted_at_ms IS NULL`,
           bind: [value, updatedAtMs, id],
         })
         if (this.#database.changes() !== 1) {

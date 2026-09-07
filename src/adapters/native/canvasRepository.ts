@@ -28,6 +28,7 @@ import {
   type CreateCanvasNodeInput,
   type CreateTextNodeInput,
   type DeleteCanvasEdgeInput,
+  type DeleteCanvasNodeInput,
   type MoveCanvasNodeInput,
   type MoveCanvasNodesInput,
   type ReorderCanvasNodeBoxMembershipsInput,
@@ -277,6 +278,10 @@ export class NativeCanvasRepository implements CanvasRepository {
       throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
     }
     return value.map((node) => parseNode(node, operation))
+  }
+
+  async deleteCanvasNode(input: DeleteCanvasNodeInput): Promise<void> {
+    await invokeCanvas('canvas_node_delete', 'deleteCanvasNode', { input })
   }
 
   async createCanvasEdge(input: CreateCanvasEdgeInput): Promise<CanvasEdge> {

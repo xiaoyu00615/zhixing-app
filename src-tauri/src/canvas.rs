@@ -263,6 +263,13 @@ pub(crate) struct MoveCanvasNodesInput {
     pub(crate) updated_at_ms: i64,
 }
 
+pub(crate) struct DeleteCanvasNodeInput {
+    pub(crate) canvas_id: String,
+    pub(crate) id: String,
+    pub(crate) deleted_at_ms: i64,
+    pub(crate) updated_at_ms: i64,
+}
+
 pub(crate) struct CreateCanvasEdgeInput {
     pub(crate) id: String,
     pub(crate) canvas_id: String,
@@ -830,7 +837,8 @@ impl CanvasDbService {
         let mut statement = connection
             .prepare(&format!(
                 "SELECT {NODE_COLUMNS} FROM canvas_nodes \
-                 WHERE canvas_id = ?1 ORDER BY created_at_ms ASC, id ASC"
+                 WHERE canvas_id = ?1 AND deleted_at_ms IS NULL \
+                 ORDER BY created_at_ms ASC, id ASC"
             ))
             .map_err(|_| CanvasError::PersistenceFailed)?;
         let nodes = statement
@@ -854,7 +862,7 @@ impl CanvasDbService {
         let changed = connection
             .execute(
                 "UPDATE canvas_nodes SET content_json = ?1, updated_at_ms = ?2 \
-                 WHERE id = ?3 AND type = ?4",
+                 WHERE id = ?3 AND type = ?4 AND deleted_at_ms IS NULL",
                 params![content, input.updated_at_ms, input.id, input.node_type],
             )
             .map_err(|_| CanvasError::PersistenceFailed)?;
@@ -875,7 +883,8 @@ impl CanvasDbService {
         let changed = connection
             .execute(
                 "UPDATE canvas_nodes SET node_name = ?1, updated_at_ms = ?2 \
-                 WHERE canvas_id = ?3 AND id = ?4 AND type IN ('text', 'sticky', 'node_box')",
+                 WHERE canvas_id = ?3 AND id = ?4 AND deleted_at_ms IS NULL \
+                   AND type IN ('text', 'sticky', 'node_box')",
                 params![
                     input.node_name,
                     input.updated_at_ms,
@@ -899,7 +908,8 @@ impl CanvasDbService {
         validate_timestamp(input.updated_at_ms)?;
         let changed = connection
             .execute(
-                "UPDATE canvas_nodes SET x = ?1, y = ?2, updated_at_ms = ?3 WHERE id = ?4",
+                "UPDATE canvas_nodes SET x = ?1, y = ?2, updated_at_ms = ?3 \
+                 WHERE id = ?4 AND deleted_at_ms IS NULL",
                 params![input.x, input.y, input.updated_at_ms, input.id],
             )
             .map_err(|_| CanvasError::PersistenceFailed)?;
@@ -938,7 +948,7 @@ impl CanvasDbService {
             let changed = transaction
                 .execute(
                     "UPDATE canvas_nodes SET x = ?1, y = ?2, updated_at_ms = ?3 \
-                     WHERE canvas_id = ?4 AND id = ?5",
+                     WHERE canvas_id = ?4 AND id = ?5 AND deleted_at_ms IS NULL",
                     params![
                         node_move.x,
                         node_move.y,
@@ -961,6 +971,51 @@ impl CanvasDbService {
             .commit()
             .map_err(|_| CanvasError::PersistenceFailed)?;
         Ok(moved_nodes)
+    }
+
+    pub(crate) fn delete_node(
+        connection: &Connection,
+        input: DeleteCanvasNodeInput,
+    ) -> Result<(), CanvasError> {
+        validate_id(&input.canvas_id)?;
+        validate_id(&input.id)?;
+        validate_timestamp(input.deleted_at_ms)?;
+        validate_timestamp(input.updated_at_ms)?;
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|_| CanvasError::PersistenceFailed)?;
+        Self::require_node_in_canvas(&transaction, &input.canvas_id, &input.id)?;
+        transaction
+            .execute(
+                "UPDATE canvas_edges SET deleted_at_ms = ?1, updated_at_ms = ?2 \
+                 WHERE canvas_id = ?3 AND (source_node_id = ?4 OR target_node_id = ?4) \
+                   AND deleted_at_ms IS NULL",
+                params![
+                    input.deleted_at_ms,
+                    input.updated_at_ms,
+                    input.canvas_id,
+                    input.id
+                ],
+            )
+            .map_err(|_| CanvasError::PersistenceFailed)?;
+        let changed = transaction
+            .execute(
+                "UPDATE canvas_nodes SET deleted_at_ms = ?1, updated_at_ms = ?2 \
+                 WHERE canvas_id = ?3 AND id = ?4 AND deleted_at_ms IS NULL",
+                params![
+                    input.deleted_at_ms,
+                    input.updated_at_ms,
+                    input.canvas_id,
+                    input.id
+                ],
+            )
+            .map_err(|_| CanvasError::PersistenceFailed)?;
+        if changed != 1 {
+            return Err(CanvasError::NotFound);
+        }
+        transaction
+            .commit()
+            .map_err(|_| CanvasError::PersistenceFailed)
     }
 
     pub(crate) fn create_edge(
@@ -1328,7 +1383,10 @@ impl CanvasDbService {
     fn get_node(connection: &Connection, id: &str) -> Result<CanvasNodeRecord, CanvasError> {
         let raw = connection
             .query_row(
-                &format!("SELECT {NODE_COLUMNS} FROM canvas_nodes WHERE id = ?1"),
+                &format!(
+                    "SELECT {NODE_COLUMNS} FROM canvas_nodes \
+                     WHERE id = ?1 AND deleted_at_ms IS NULL"
+                ),
                 [id],
                 node_from_row,
             )
@@ -1345,7 +1403,8 @@ impl CanvasDbService {
     ) -> Result<(), CanvasError> {
         connection
             .query_row(
-                "SELECT 1 FROM canvas_nodes WHERE canvas_id = ?1 AND id = ?2",
+                "SELECT 1 FROM canvas_nodes \
+                 WHERE canvas_id = ?1 AND id = ?2 AND deleted_at_ms IS NULL",
                 params![canvas_id, node_id],
                 |_| Ok(()),
             )
@@ -1475,12 +1534,13 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(history.len(), 10);
+        assert_eq!(history.len(), 11);
         assert_eq!(history[5], (6, "0006_add_canvas_core".into()));
         assert_eq!(history[6], (7, "0007_add_canvas_edges".into()));
         assert_eq!(history[7], (8, "0008_add_sticky_canvas_nodes".into()));
         assert_eq!(history[8], (9, "0009_add_canvas_node_name".into()));
         assert_eq!(history[9], (10, "0010_add_canvas_node_boxes".into()));
+        assert_eq!(history[10], (11, "0011_add_canvas_node_soft_delete".into()));
         for table in ["canvases", "canvas_nodes", "canvas_edges"] {
             let exists: i64 = connection
                 .query_row(
@@ -1521,6 +1581,14 @@ mod tests {
                 .unwrap(),
             None
         );
+        let node_columns: Vec<String> = connection
+            .prepare("PRAGMA table_info('canvas_nodes')")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(node_columns.iter().any(|column| column == "deleted_at_ms"));
     }
 
     #[test]
@@ -1679,7 +1747,7 @@ mod tests {
                 .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),
-            10
+            11
         );
 
         CanvasDbService::create_text_node(
@@ -2067,7 +2135,7 @@ mod tests {
                 .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),
-            10
+            11
         );
         assert_eq!(
             CanvasDbService::get_canvas(&connection, CANVAS_ID)
@@ -2342,16 +2410,16 @@ mod tests {
             },
         )
         .unwrap();
-        CanvasDbService::create_edge(
-            &connection,
-            edge_input(
-                EDGE_ID,
-                NODE_ID,
-                TARGET_NODE_ID,
-                CanvasEdgeDirection::Forward,
-            ),
-        )
-        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO canvas_edges(
+                    id, canvas_id, source_node_id, target_node_id, relation_type,
+                    direction, line_style, membership_position, created_at_ms,
+                    updated_at_ms, deleted_at_ms
+                 ) VALUES(?1, ?2, ?3, ?4, 'default', 'forward', 'solid', NULL, 30, 30, NULL)",
+                params![EDGE_ID, CANVAS_ID, NODE_ID, TARGET_NODE_ID],
+            )
+            .unwrap();
 
         let renamed_text = CanvasDbService::rename_node(
             &connection,
@@ -3622,6 +3690,275 @@ mod tests {
             Some(0),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn migration_eleven_preserves_existing_nodes_and_edges_as_active() {
+        let sandbox = tempdir().unwrap();
+        let database_dir = sandbox.path().join("database");
+        let backup_dir = sandbox.path().join("backup");
+        fs::create_dir_all(&database_dir).unwrap();
+        fs::create_dir_all(&backup_dir).unwrap();
+        let database_path = database_dir.join("zhixing.db");
+        let mut connection = open_configured_connection(&database_path).unwrap();
+        MigrationRunner::new(&MIGRATIONS[..10], SqliteBackupSnapshot)
+            .run(&mut connection, &backup_dir)
+            .unwrap();
+        create_canvas(&connection);
+        create_node(&connection, NODE_ID, CANVAS_ID, "Source");
+        create_node(&connection, TARGET_NODE_ID, CANVAS_ID, "Target");
+        connection
+            .execute(
+                "INSERT INTO canvas_edges(
+                    id, canvas_id, source_node_id, target_node_id, relation_type,
+                    direction, line_style, membership_position, created_at_ms,
+                    updated_at_ms, deleted_at_ms
+                 ) VALUES(?1, ?2, ?3, ?4, 'default', 'forward', 'solid', NULL, 30, 30, NULL)",
+                params![EDGE_ID, CANVAS_ID, NODE_ID, TARGET_NODE_ID],
+            )
+            .unwrap();
+
+        MigrationRunner::new(MIGRATIONS, SqliteBackupSnapshot)
+            .run(&mut connection, &backup_dir)
+            .unwrap();
+
+        assert_eq!(
+            CanvasDbService::list_nodes(&connection, CANVAS_ID)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            CanvasDbService::list_edges(&connection, CANVAS_ID)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT deleted_at_ms FROM canvas_nodes WHERE id = ?1",
+                    [NODE_ID],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT id FROM schema_migrations WHERE version = 11",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "0011_add_canvas_node_soft_delete"
+        );
+    }
+
+    #[test]
+    fn node_soft_delete_preserves_row_and_atomically_soft_deletes_incident_edges() {
+        let (_sandbox, database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        create_node(&connection, NODE_ID, CANVAS_ID, "Source");
+        create_node(&connection, TARGET_NODE_ID, CANVAS_ID, "Target");
+        CanvasDbService::create_edge(
+            &connection,
+            edge_input(
+                EDGE_ID,
+                NODE_ID,
+                TARGET_NODE_ID,
+                CanvasEdgeDirection::Forward,
+            ),
+        )
+        .unwrap();
+
+        CanvasDbService::delete_node(
+            &connection,
+            DeleteCanvasNodeInput {
+                canvas_id: CANVAS_ID.into(),
+                id: NODE_ID.into(),
+                deleted_at_ms: 50,
+                updated_at_ms: 50,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            CanvasDbService::list_nodes(&connection, CANVAS_ID)
+                .unwrap()
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            [TARGET_NODE_ID]
+        );
+        assert!(CanvasDbService::list_edges(&connection, CANVAS_ID)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT deleted_at_ms, updated_at_ms FROM canvas_nodes WHERE id = ?1",
+                    [NODE_ID],
+                    |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .unwrap(),
+            (Some(50), 50)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT deleted_at_ms, updated_at_ms FROM canvas_edges WHERE id = ?1",
+                    [EDGE_ID],
+                    |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .unwrap(),
+            (Some(50), 50)
+        );
+
+        drop(connection);
+        let reopened = open_existing_configured_connection(database_path).unwrap();
+        assert_eq!(
+            CanvasDbService::list_nodes(&reopened, CANVAS_ID)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(CanvasDbService::list_edges(&reopened, CANVAS_ID)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn node_box_soft_delete_removes_memberships_without_deleting_members() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        create_node(&connection, NODE_ID, CANVAS_ID, "Member");
+        let box_id = "00000000-0000-4000-8000-000000000607";
+        CanvasDbService::create_node(
+            &connection,
+            CreateCanvasNodeInput {
+                id: box_id.into(),
+                canvas_id: CANVAS_ID.into(),
+                node_type: "node_box".into(),
+                content: CanvasNodeContent::NodeBox,
+                x: 360.0,
+                y: 100.0,
+                created_at_ms: 40,
+            },
+        )
+        .unwrap();
+        CanvasDbService::add_node_box_member(
+            &connection,
+            AddCanvasNodeBoxMemberInput {
+                id: EDGE_ID.into(),
+                canvas_id: CANVAS_ID.into(),
+                source_node_id: NODE_ID.into(),
+                target_node_id: box_id.into(),
+                relation_type: "ordered_box_member".into(),
+                created_at_ms: 50,
+            },
+        )
+        .unwrap();
+
+        CanvasDbService::delete_node(
+            &connection,
+            DeleteCanvasNodeInput {
+                canvas_id: CANVAS_ID.into(),
+                id: box_id.into(),
+                deleted_at_ms: 60,
+                updated_at_ms: 60,
+            },
+        )
+        .unwrap();
+
+        let nodes = CanvasDbService::list_nodes(&connection, CANVAS_ID).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, NODE_ID);
+        assert!(CanvasDbService::list_edges(&connection, CANVAS_ID)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT deleted_at_ms FROM canvas_edges WHERE id = ?1",
+                    [EDGE_ID],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .unwrap(),
+            Some(60)
+        );
+    }
+
+    #[test]
+    fn node_soft_delete_rolls_back_incident_edges_when_node_update_fails() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        create_node(&connection, NODE_ID, CANVAS_ID, "Source");
+        create_node(&connection, TARGET_NODE_ID, CANVAS_ID, "Target");
+        CanvasDbService::create_edge(
+            &connection,
+            edge_input(
+                EDGE_ID,
+                NODE_ID,
+                TARGET_NODE_ID,
+                CanvasEdgeDirection::Forward,
+            ),
+        )
+        .unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TRIGGER fail_node_soft_delete
+                 BEFORE UPDATE OF deleted_at_ms ON canvas_nodes
+                 WHEN OLD.id = '{NODE_ID}' AND NEW.deleted_at_ms IS NOT NULL
+                 BEGIN SELECT RAISE(ABORT, 'injected node delete failure'); END;"
+            ))
+            .unwrap();
+
+        assert_eq!(
+            CanvasDbService::delete_node(
+                &connection,
+                DeleteCanvasNodeInput {
+                    canvas_id: CANVAS_ID.into(),
+                    id: NODE_ID.into(),
+                    deleted_at_ms: 70,
+                    updated_at_ms: 70,
+                },
+            ),
+            Err(CanvasError::PersistenceFailed)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT deleted_at_ms FROM canvas_nodes WHERE id = ?1",
+                    [NODE_ID],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT deleted_at_ms FROM canvas_edges WHERE id = ?1",
+                    [EDGE_ID],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            CanvasDbService::list_nodes(&connection, CANVAS_ID)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            CanvasDbService::list_edges(&connection, CANVAS_ID)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

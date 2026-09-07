@@ -2,23 +2,18 @@ import { ArrowLeftRight, ArrowRight, Minus, Trash2 } from 'lucide-react'
 
 import type {
   CanvasEdge,
-  CanvasEdgeDirection,
-  CanvasEdgeLineStyle,
-  CanvasOrdinaryEdgeRelationType,
 } from '@/canvas/model'
+import type { CanvasEdgeCommand } from '@/canvas/commandRegistry'
 import { getCanvasEdgeTypeDefinition, canvasEdgeRegistry } from '@/canvas/edgeRegistry'
 
 interface CanvasEdgeToolbarProps {
   readonly edge: CanvasEdge
   readonly busy: boolean
-  readonly onRelationTypeChange: (relationType: CanvasOrdinaryEdgeRelationType) => void
-  readonly onDirectionChange: (direction: CanvasEdgeDirection) => void
-  readonly onLineStyleChange: (lineStyle: CanvasEdgeLineStyle) => void
-  readonly onDelete: () => void
+  readonly onCommand: (command: CanvasEdgeCommand) => void
 }
 
 const DIRECTIONS: readonly {
-  value: CanvasEdgeDirection
+  value: CanvasEdge['direction']
   label: string
   icon: typeof ArrowRight
 }[] = [
@@ -28,7 +23,7 @@ const DIRECTIONS: readonly {
 ]
 
 const LINE_STYLES: readonly {
-  value: CanvasEdgeLineStyle
+  value: CanvasEdge['lineStyle']
   label: string
   dash: string
 }[] = [
@@ -40,10 +35,7 @@ const LINE_STYLES: readonly {
 export function CanvasEdgeToolbar({
   edge,
   busy,
-  onRelationTypeChange,
-  onDirectionChange,
-  onLineStyleChange,
-  onDelete,
+  onCommand,
 }: CanvasEdgeToolbarProps) {
   const definition = getCanvasEdgeTypeDefinition(edge.relationType)
   const locked = definition?.presentationLocked === true
@@ -90,7 +82,11 @@ export function CanvasEdgeToolbar({
                     : 'text-foreground-secondary hover:text-foreground'
                 }`}
                 key={item.relationType}
-                onClick={() => onRelationTypeChange(item.relationType)}
+                onClick={() => onCommand({
+                  id: 'update_edge_relation_type',
+                  edgeId: edge.id,
+                  relationType: item.relationType,
+                })}
                 type="button"
               >
                 {item.displayName}
@@ -106,7 +102,7 @@ export function CanvasEdgeToolbar({
         </p>
       )}
 
-      {!locked && <fieldset className="mt-4" disabled={busy}>
+      {definition !== null && !locked && <fieldset className="mt-4" disabled={busy}>
         <legend className="mb-2 text-xs font-medium text-foreground-secondary">
           方向
         </legend>
@@ -120,7 +116,11 @@ export function CanvasEdgeToolbar({
                   : 'text-foreground-secondary hover:text-foreground'
               }`}
               key={value}
-              onClick={() => onDirectionChange(value)}
+              onClick={() => onCommand({
+                id: 'update_edge_direction',
+                edgeId: edge.id,
+                direction: value,
+              })}
               type="button"
             >
               <Icon className="size-3.5" />
@@ -130,7 +130,7 @@ export function CanvasEdgeToolbar({
         </div>
       </fieldset>}
 
-      {!locked && <fieldset className="mt-4" disabled={busy}>
+      {definition !== null && !locked && <fieldset className="mt-4" disabled={busy}>
         <legend className="mb-2 text-xs font-medium text-foreground-secondary">
           线型
         </legend>
@@ -144,7 +144,11 @@ export function CanvasEdgeToolbar({
                   : 'text-foreground-secondary hover:text-foreground'
               }`}
               key={value}
-              onClick={() => onLineStyleChange(value)}
+              onClick={() => onCommand({
+                id: 'update_edge_line_style',
+                edgeId: edge.id,
+                lineStyle: value,
+              })}
               type="button"
             >
               <svg aria-hidden="true" className="h-1.5 w-10" viewBox="0 0 40 6">
@@ -169,7 +173,10 @@ export function CanvasEdgeToolbar({
         <button
           className="flex h-9 w-full items-center justify-center gap-2 rounded-lg text-xs font-medium text-danger transition hover:bg-danger/8 disabled:cursor-not-allowed disabled:opacity-50"
           disabled={busy}
-          onClick={onDelete}
+          onClick={() => onCommand({
+            id: locked ? 'remove_membership' : 'delete_edge',
+            edgeId: edge.id,
+          })}
           type="button"
         >
           <Trash2 className="size-4" />

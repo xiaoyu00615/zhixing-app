@@ -30,6 +30,7 @@ function fixture(): {
   updateCanvasEdgeLineStyleMock: ReturnType<typeof vi.fn>
   updateCanvasEdgeRelationTypeMock: ReturnType<typeof vi.fn>
   deleteCanvasEdgeMock: ReturnType<typeof vi.fn>
+  deleteCanvasNodeMock: ReturnType<typeof vi.fn>
   moveCanvasNodesMock: ReturnType<typeof vi.fn>
   renameCanvasNodeMock: ReturnType<typeof vi.fn>
 } {
@@ -91,6 +92,7 @@ function fixture(): {
   const deleteCanvasEdgeMock = vi.fn((input) =>
     Promise.resolve({ ...edge, ...input }),
   )
+  const deleteCanvasNodeMock = vi.fn(() => Promise.resolve())
   const moveCanvasNodesMock = vi.fn(() => Promise.resolve([node]))
   const renameCanvasNodeMock = vi.fn((input) => Promise.resolve({ ...node, ...input }))
   return {
@@ -110,6 +112,7 @@ function fixture(): {
       renameCanvasNode: renameCanvasNodeMock,
       moveCanvasNode: vi.fn(() => Promise.resolve(node)),
       moveCanvasNodes: moveCanvasNodesMock,
+      deleteCanvasNode: deleteCanvasNodeMock,
       createCanvasEdge: createCanvasEdgeMock,
       addCanvasNodeBoxMember: addCanvasNodeBoxMemberMock,
       reorderCanvasNodeBoxMemberships: reorderCanvasNodeBoxMembershipsMock,
@@ -128,6 +131,7 @@ function fixture(): {
     updateCanvasEdgeLineStyleMock,
     updateCanvasEdgeRelationTypeMock,
     deleteCanvasEdgeMock,
+    deleteCanvasNodeMock,
     moveCanvasNodesMock,
     renameCanvasNodeMock,
   }
@@ -481,6 +485,25 @@ describe('CanvasService', () => {
       unorderedMembershipEdgeIds: [],
       updatedAtMs: 95,
     })
+  })
+
+  test('validates and timestamps the narrow Node soft-delete capability', async () => {
+    const { repository, deleteCanvasNodeMock } = fixture()
+    const service = createCanvasService({ repository, nowMs: () => 96 })
+
+    await service.deleteCanvasNode(CANVAS_ID, NODE_ID)
+    expect(deleteCanvasNodeMock).toHaveBeenCalledWith({
+      canvasId: CANVAS_ID,
+      id: NODE_ID,
+      deletedAtMs: 96,
+      updatedAtMs: 96,
+    })
+    await expect(service.deleteCanvasNode('bad', NODE_ID)).rejects.toEqual(
+      expect.objectContaining({ code: 'VALIDATION', field: 'canvasId' }),
+    )
+    await expect(service.deleteCanvasNode(CANVAS_ID, 'bad')).rejects.toEqual(
+      expect.objectContaining({ code: 'VALIDATION', field: 'id' }),
+    )
   })
 
   test('rejects invalid or duplicate membership reorder IDs and maps repository failure', async () => {

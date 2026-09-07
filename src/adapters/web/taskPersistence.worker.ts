@@ -250,6 +250,12 @@ async function handleRequest(value: unknown): Promise<void> {
           state.database.renameCanvasNode(request.input),
         )
         return
+      case 'canvas.node.delete':
+        success(
+          request.requestId,
+          state.database.deleteCanvasNode(request.input),
+        )
+        return
       case 'canvas.node.updateText':
         success(request.requestId, state.database.updateTextNode(request.input))
         return

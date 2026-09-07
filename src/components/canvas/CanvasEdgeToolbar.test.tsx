@@ -20,20 +20,15 @@ const edge: CanvasEdge = {
 }
 
 function renderToolbar(value: CanvasEdge = edge) {
-  const onRelationTypeChange = vi.fn()
-  const onDirectionChange = vi.fn()
-  const onLineStyleChange = vi.fn()
+  const onCommand = vi.fn()
   render(
     <CanvasEdgeToolbar
       busy={false}
       edge={value}
-      onDelete={vi.fn()}
-      onDirectionChange={onDirectionChange}
-      onLineStyleChange={onLineStyleChange}
-      onRelationTypeChange={onRelationTypeChange}
+      onCommand={onCommand}
     />,
   )
-  return { onRelationTypeChange, onDirectionChange, onLineStyleChange }
+  return onCommand
 }
 
 describe('CanvasEdgeToolbar', () => {
@@ -44,17 +39,33 @@ describe('CanvasEdgeToolbar', () => {
     expect(screen.getByRole('button', { name: '同级' })).toBeInTheDocument()
     expect(screen.queryByText(/Node Box/)).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: '上下级' }))
-    expect(callbacks.onRelationTypeChange).toHaveBeenCalledWith('hierarchy')
+    expect(callbacks).toHaveBeenCalledWith({
+      id: 'update_edge_relation_type',
+      edgeId: edge.id,
+      relationType: 'hierarchy',
+    })
     await userEvent.click(screen.getByRole('button', { name: '同级' }))
-    expect(callbacks.onRelationTypeChange).toHaveBeenCalledWith('peer')
+    expect(callbacks).toHaveBeenCalledWith({
+      id: 'update_edge_relation_type',
+      edgeId: edge.id,
+      relationType: 'peer',
+    })
   })
 
   test('keeps direction and line style as independent controls', async () => {
     const callbacks = renderToolbar({ ...edge, relationType: 'hierarchy' })
     await userEvent.click(screen.getByRole('button', { name: '双向' }))
     await userEvent.click(screen.getByRole('button', { name: '点线' }))
-    expect(callbacks.onDirectionChange).toHaveBeenCalledWith('bidirectional')
-    expect(callbacks.onLineStyleChange).toHaveBeenCalledWith('dotted')
+    expect(callbacks).toHaveBeenCalledWith({
+      id: 'update_edge_direction',
+      edgeId: edge.id,
+      direction: 'bidirectional',
+    })
+    expect(callbacks).toHaveBeenCalledWith({
+      id: 'update_edge_line_style',
+      edgeId: edge.id,
+      lineStyle: 'dotted',
+    })
   })
 
   test('keeps membership presentation locked and out of the ordinary selector', () => {
@@ -80,7 +91,7 @@ describe('CanvasEdgeToolbar', () => {
     expect(screen.getByText('原始类型：future_relation')).toBeInTheDocument()
     expect(screen.getByText('未知关系保持只读，不会自动转换。')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '普通关系' })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '双向' })).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.getByRole('button', { name: '点线' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByRole('button', { name: '双向' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '点线' })).not.toBeInTheDocument()
   })
 })

@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
@@ -23,6 +23,7 @@ const reactFlowMocks = vi.hoisted(() => {
 vi.mock('@xyflow/react', () => {
   interface MockNode {
     readonly id: string
+    readonly type?: string
     readonly position: { readonly x: number; readonly y: number }
     readonly data: {
       readonly text: string
@@ -45,6 +46,7 @@ vi.mock('@xyflow/react', () => {
     readonly nodes: readonly MockNode[]
     readonly edges: readonly {
       readonly id: string
+      readonly label?: string
       readonly markerStart?: unknown
       readonly markerEnd?: unknown
       readonly style?: { readonly strokeDasharray?: string }
@@ -52,6 +54,14 @@ vi.mock('@xyflow/react', () => {
     readonly defaultViewport: { readonly x: number; readonly y: number; readonly zoom: number }
     readonly onConnect?: (connection: { readonly source: string; readonly target: string }) => void
     readonly onEdgeClick?: (event: null, edge: { readonly id: string }) => void
+    readonly onEdgeContextMenu?: (
+      event: import('react').MouseEvent<HTMLButtonElement>,
+      edge: { readonly id: string },
+    ) => void
+    readonly onNodeContextMenu?: (
+      event: import('react').MouseEvent<HTMLDivElement>,
+      node: MockNode,
+    ) => void
     readonly onNodeDragStart?: (
       event: null,
       node: MockNode,
@@ -77,7 +87,7 @@ vi.mock('@xyflow/react', () => {
   }
   return {
     ReactFlowProvider: ({ children }: { readonly children: import('react').ReactNode }) => <>{children}</>,
-    ReactFlow: ({ children, nodes, edges, defaultViewport, onConnect, onEdgeClick, onNodeDragStart, onNodeDragStop, onNodesChange, onMoveEnd, selectionKeyCode, multiSelectionKeyCode, selectionMode, selectionOnDrag, panOnDrag, panOnScroll, zoomOnScroll }: MockFlowProps) => (
+    ReactFlow: ({ children, nodes, edges, defaultViewport, onConnect, onEdgeClick, onEdgeContextMenu, onNodeContextMenu, onNodeDragStart, onNodeDragStop, onNodesChange, onMoveEnd, selectionKeyCode, multiSelectionKeyCode, selectionMode, selectionOnDrag, panOnDrag, panOnScroll, zoomOnScroll }: MockFlowProps) => (
       <div
         role="application"
         data-multi-selection-keys={multiSelectionKeyCode?.join(',')}
@@ -90,7 +100,12 @@ vi.mock('@xyflow/react', () => {
         data-zoom-on-scroll={String(zoomOnScroll)}
       >
         {nodes.map((node) => (
-          <div data-rename-request={node.data.renameRequest ?? 0} data-testid={`测试节点 ${node.id}`} key={`${node.id}-${node.data.text}`}>
+          <div
+            data-rename-request={node.data.renameRequest ?? 0}
+            data-testid={`测试节点 ${node.id}`}
+            key={`${node.id}-${node.data.text}`}
+            onContextMenu={(event) => onNodeContextMenu?.(event, node)}
+          >
             <span aria-label={`测试节点名称 ${node.id}`}>{node.data.nodeName}</span>
             <textarea
               aria-label={`测试文字节点 ${node.id}`}
@@ -164,8 +179,10 @@ vi.mock('@xyflow/react', () => {
             data-dash={edge.style?.strokeDasharray ?? 'solid'}
             data-marker-end={edge.markerEnd === undefined ? 'none' : 'arrow'}
             data-marker-start={edge.markerStart === undefined ? 'none' : 'arrow'}
+            data-label={edge.label ?? ''}
             key={edge.id}
             onClick={() => onEdgeClick?.(null, edge)}
+            onContextMenu={(event) => onEdgeContextMenu?.(event, edge)}
             type="button"
           >
             {`测试连线 ${edge.id}`}
@@ -237,6 +254,7 @@ function fixture() {
   const updateCanvasEdgeLineStyleMock = vi.fn<CanvasService['updateCanvasEdgeLineStyle']>((id, lineStyle) => Promise.resolve({ ...edge, id, lineStyle, updatedAtMs: 20 }))
   const updateCanvasEdgeRelationTypeMock = vi.fn<CanvasService['updateCanvasEdgeRelationType']>((id, relationType) => Promise.resolve({ ...edge, id, relationType, direction: relationType === 'peer' ? 'none' : 'forward', lineStyle: 'solid', updatedAtMs: 20 }))
   const deleteCanvasEdgeMock = vi.fn<CanvasService['deleteCanvasEdge']>(() => Promise.resolve({ ...edge, deletedAtMs: 20, updatedAtMs: 20 }))
+  const deleteCanvasNodeMock = vi.fn<CanvasService['deleteCanvasNode']>(() => Promise.resolve())
   const service: CanvasService = {
     createCanvas: vi.fn(), listCanvases: vi.fn(), renameCanvas: vi.fn(),
     openCanvas: openCanvasMock, updateViewport: updateViewportMock,
@@ -246,6 +264,7 @@ function fixture() {
     renameCanvasNode: renameCanvasNodeMock,
     editTextNode: editTextNodeMock, moveCanvasNode: moveCanvasNodeMock,
     moveCanvasNodes: moveCanvasNodesMock,
+    deleteCanvasNode: deleteCanvasNodeMock,
     createCanvasEdge: createCanvasEdgeMock, listCanvasEdges: vi.fn(),
     addNodeBoxMember: addNodeBoxMemberMock,
     reorderNodeBoxMemberships: reorderNodeBoxMembershipsMock,
@@ -255,7 +274,7 @@ function fixture() {
     deleteCanvasEdge: deleteCanvasEdgeMock,
   }
   const openRuntime: OpenCanvasRuntime = vi.fn(() => Promise.resolve({ service, dispose: vi.fn() }))
-  return { canvas, node, service, openRuntime, openCanvasMock, createTextNodeMock, editTextNodeMock, createCanvasNodeMock, updateCanvasNodeContentMock, renameCanvasNodeMock, moveCanvasNodeMock, moveCanvasNodesMock, updateViewportMock, createCanvasEdgeMock, addNodeBoxMemberMock, reorderNodeBoxMembershipsMock, updateCanvasEdgeDirectionMock, updateCanvasEdgeLineStyleMock, updateCanvasEdgeRelationTypeMock, deleteCanvasEdgeMock }
+  return { canvas, node, service, openRuntime, openCanvasMock, createTextNodeMock, editTextNodeMock, createCanvasNodeMock, updateCanvasNodeContentMock, renameCanvasNodeMock, deleteCanvasNodeMock, moveCanvasNodeMock, moveCanvasNodesMock, updateViewportMock, createCanvasEdgeMock, addNodeBoxMemberMock, reorderNodeBoxMembershipsMock, updateCanvasEdgeDirectionMock, updateCanvasEdgeLineStyleMock, updateCanvasEdgeRelationTypeMock, deleteCanvasEdgeMock }
 }
 
 function renderEditor(openRuntime: OpenCanvasRuntime) {
@@ -284,6 +303,86 @@ describe('CanvasEditorPage', () => {
     expect(screen.getByRole('application')).toHaveAttribute('data-viewport', JSON.stringify(canvas.viewport))
     expect(screen.getByLabelText(`测试文字节点 ${NODE_ID}`)).toHaveValue('初始文字')
     expect(openCanvasMock).toHaveBeenCalledWith(CANVAS_ID)
+  })
+
+  test.each([
+    ['text', '文字节点'],
+    ['sticky', '便签节点'],
+    ['node_box', '节点盒'],
+  ] as const)('opens the shared %s Node context menu', async (type, title) => {
+    const resolved = fixture()
+    const opened = await resolved.openCanvasMock(CANVAS_ID)
+    const contextNode: CanvasNode = type === 'text'
+      ? opened.nodes[0]!
+      : type === 'sticky'
+        ? opened.nodes[1]!
+        : {
+            id: BOX_NODE_ID,
+            canvasId: CANVAS_ID,
+            type: 'node_box',
+            nodeName: '研究盒',
+            content: { type: 'node_box' },
+            x: 620,
+            y: 120,
+            createdAtMs: 12,
+            updatedAtMs: 12,
+          }
+    resolved.openCanvasMock.mockResolvedValueOnce({
+      ...opened,
+      nodes: [contextNode],
+      edges: [],
+    })
+    renderEditor(resolved.openRuntime)
+
+    fireEvent.contextMenu(await screen.findByTestId(`测试节点 ${contextNode.id}`), {
+      clientX: 240,
+      clientY: 180,
+    })
+    const menu = screen.getByRole('menu', { name: `节点菜单：${title}` })
+    expect(within(menu).getByRole('textbox', { name: '节点名称' })).toHaveValue(
+      contextNode.nodeName,
+    )
+    expect(within(menu).getByRole('menuitem', { name: '删除节点' })).toBeEnabled()
+  })
+
+  test('soft-deletes a Node through Command Registry and removes its incident Edge from UI', async () => {
+    const resolved = fixture()
+    renderEditor(resolved.openRuntime)
+
+    fireEvent.contextMenu(await screen.findByTestId(`测试节点 ${NODE_ID}`), {
+      clientX: 240,
+      clientY: 180,
+    })
+    await userEvent.click(screen.getByRole('menuitem', { name: '删除节点' }))
+
+    await waitFor(() => expect(resolved.deleteCanvasNodeMock).toHaveBeenCalledWith(
+      CANVAS_ID,
+      NODE_ID,
+    ))
+    expect(screen.queryByTestId(`测试节点 ${NODE_ID}`)).not.toBeInTheDocument()
+    expect(screen.getByTestId(`测试节点 ${TARGET_NODE_ID}`)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: `测试连线 ${EDGE_ID}` })).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('节点已删除')
+  })
+
+  test('keeps the Node and incident Edge visible when the delete command fails', async () => {
+    const resolved = fixture()
+    resolved.deleteCanvasNodeMock.mockRejectedValueOnce(
+      new CanvasApplicationError('UNAVAILABLE'),
+    )
+    renderEditor(resolved.openRuntime)
+
+    fireEvent.contextMenu(await screen.findByTestId(`测试节点 ${NODE_ID}`), {
+      clientX: 240,
+      clientY: 180,
+    })
+    const menu = screen.getByRole('menu', { name: '节点菜单：文字节点' })
+    await userEvent.click(within(menu).getByRole('menuitem', { name: '删除节点' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('节点删除失败')
+    expect(screen.getByTestId(`测试节点 ${NODE_ID}`)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: `测试连线 ${EDGE_ID}` })).toBeInTheDocument()
+    expect(menu).toBeInTheDocument()
   })
 
   test('creates and edits text, saves drag-stop position, and saves move-end viewport', async () => {
@@ -834,6 +933,155 @@ describe('CanvasEditorPage', () => {
     expect(screen.queryByRole('button', { name: `测试连线 ${EDGE_ID}` })).not.toBeInTheDocument()
   })
 
+  test('routes Edge context menu and settings actions through the same command execution path', async () => {
+    const resolved = fixture()
+    let persistedEdge = (await resolved.openCanvasMock(CANVAS_ID)).edges[0]!
+    resolved.openCanvasMock.mockClear()
+    resolved.updateCanvasEdgeRelationTypeMock.mockImplementation((id, relationType) => {
+      persistedEdge = {
+        ...persistedEdge,
+        id,
+        relationType,
+        direction: relationType === 'peer' ? 'none' : 'forward',
+        lineStyle: 'solid',
+        updatedAtMs: 20,
+      }
+      return Promise.resolve(persistedEdge)
+    })
+    resolved.updateCanvasEdgeDirectionMock.mockImplementation((id, direction) => {
+      persistedEdge = { ...persistedEdge, id, direction, updatedAtMs: 21 }
+      return Promise.resolve(persistedEdge)
+    })
+
+    renderEditor(resolved.openRuntime)
+    const edgeButton = await screen.findByRole('button', { name: `测试连线 ${EDGE_ID}` })
+    fireEvent.contextMenu(edgeButton, { clientX: 240, clientY: 180 })
+    const contextMenu = screen.getByRole('menu', { name: '关系菜单：连线设置' })
+    expect(contextMenu).toHaveStyle({ left: '240px', top: '180px' })
+    await userEvent.click(within(contextMenu).getByRole('menuitemradio', { name: '上下级' }))
+    await waitFor(() => expect(resolved.updateCanvasEdgeRelationTypeMock).toHaveBeenCalledWith(EDGE_ID, 'hierarchy'))
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+
+    await userEvent.click(edgeButton)
+    const settings = screen.getByRole('complementary', { name: '连线设置' })
+    expect(within(settings).getByRole('button', { name: '上下级' })).toHaveAttribute('aria-pressed', 'true')
+    await userEvent.click(within(settings).getByRole('button', { name: '双向' }))
+    await waitFor(() => expect(resolved.updateCanvasEdgeDirectionMock).toHaveBeenCalledWith(EDGE_ID, 'bidirectional'))
+
+    fireEvent.contextMenu(edgeButton, { clientX: 300, clientY: 220 })
+    expect(screen.getByRole('menuitemradio', { name: '上下级' })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByRole('menuitemradio', { name: '双向' })).toHaveAttribute('aria-checked', 'true')
+  })
+
+  test('keeps selection independent and replaces the context target on a second right click', async () => {
+    const resolved = fixture()
+    const opened = await resolved.openCanvasMock(CANVAS_ID)
+    const secondEdge: CanvasEdge = {
+      ...opened.edges[0]!,
+      id: SECOND_EDGE_ID,
+      sourceNodeId: TARGET_NODE_ID,
+      targetNodeId: NODE_ID,
+    }
+    resolved.openCanvasMock.mockResolvedValueOnce({
+      ...opened,
+      edges: [...opened.edges, secondEdge],
+    })
+    renderEditor(resolved.openRuntime)
+    await userEvent.click(await screen.findByRole('button', { name: '模拟单选' }))
+    expect(screen.getByLabelText(`测试文字节点 ${NODE_ID}`)).toHaveAttribute('data-selected', 'true')
+
+    fireEvent.contextMenu(screen.getByRole('button', { name: `测试连线 ${EDGE_ID}` }), {
+      clientX: 120,
+      clientY: 140,
+    })
+    fireEvent.contextMenu(screen.getByRole('button', { name: `测试连线 ${SECOND_EDGE_ID}` }), {
+      clientX: 360,
+      clientY: 240,
+    })
+    await userEvent.click(screen.getByRole('menuitemradio', { name: '点线' }))
+    await waitFor(() => expect(resolved.updateCanvasEdgeLineStyleMock).toHaveBeenCalledWith(SECOND_EDGE_ID, 'dotted'))
+    expect(resolved.updateCanvasEdgeLineStyleMock).not.toHaveBeenCalledWith(EDGE_ID, 'dotted')
+    expect(screen.getByLabelText(`测试文字节点 ${NODE_ID}`)).toHaveAttribute('data-selected', 'true')
+  })
+
+  test('moves and removes Memberships through the narrow context menu without deleting source Nodes', async () => {
+    const resolved = fixture()
+    const opened = await resolved.openCanvasMock(CANVAS_ID)
+    const boxNode: CanvasNode = {
+      ...resolved.node,
+      id: BOX_NODE_ID,
+      type: 'node_box',
+      nodeName: '研究盒',
+      content: { type: 'node_box' },
+      x: 760,
+      y: 180,
+    }
+    const orderedEdge: CanvasEdge = {
+      ...opened.edges[0]!,
+      relationType: 'ordered_box_member',
+      targetNodeId: BOX_NODE_ID,
+      membershipPosition: 0,
+    }
+    const unorderedEdge: CanvasEdge = {
+      ...orderedEdge,
+      id: SECOND_EDGE_ID,
+      sourceNodeId: TARGET_NODE_ID,
+      relationType: 'unordered_box_member',
+    }
+    resolved.openCanvasMock.mockResolvedValueOnce({
+      ...opened,
+      nodes: [...opened.nodes, boxNode],
+      edges: [orderedEdge, unorderedEdge],
+    })
+    resolved.reorderNodeBoxMembershipsMock.mockImplementation(
+      (_canvasId, _boxId, orderedIds, unorderedIds) => Promise.resolve([
+        ...orderedIds.map((id, membershipPosition) => ({
+          ...(id === EDGE_ID ? orderedEdge : unorderedEdge),
+          id,
+          relationType: 'ordered_box_member' as const,
+          membershipPosition,
+          updatedAtMs: 20,
+        })),
+        ...unorderedIds.map((id, membershipPosition) => ({
+          ...(id === EDGE_ID ? orderedEdge : unorderedEdge),
+          id,
+          relationType: 'unordered_box_member' as const,
+          membershipPosition,
+          updatedAtMs: 20,
+        })),
+      ]),
+    )
+    renderEditor(resolved.openRuntime)
+
+    fireEvent.contextMenu(await screen.findByRole('button', { name: `测试连线 ${EDGE_ID}` }))
+    const orderedMenu = screen.getByRole('menu', { name: '关系菜单：有序成员' })
+    expect(within(orderedMenu).queryByText('关系类型')).not.toBeInTheDocument()
+    await userEvent.click(within(orderedMenu).getByRole('menuitem', { name: '移到无序成员区' }))
+    await waitFor(() => expect(resolved.reorderNodeBoxMembershipsMock).toHaveBeenCalledWith(
+      CANVAS_ID,
+      BOX_NODE_ID,
+      [],
+      [SECOND_EDGE_ID, EDGE_ID],
+    ))
+    expect(screen.getByRole('button', { name: `测试连线 ${EDGE_ID}` })).toHaveAttribute('data-label', '−')
+
+    fireEvent.contextMenu(screen.getByRole('button', { name: `测试连线 ${SECOND_EDGE_ID}` }))
+    await userEvent.click(screen.getByRole('menuitem', { name: '移到有序成员区' }))
+    await waitFor(() => expect(resolved.reorderNodeBoxMembershipsMock).toHaveBeenLastCalledWith(
+      CANVAS_ID,
+      BOX_NODE_ID,
+      [SECOND_EDGE_ID],
+      [EDGE_ID],
+    ))
+    expect(screen.getByRole('button', { name: `测试连线 ${SECOND_EDGE_ID}` })).toHaveAttribute('data-label', '1')
+
+    fireEvent.contextMenu(screen.getByRole('button', { name: `测试连线 ${EDGE_ID}` }))
+    await userEvent.click(screen.getByRole('menuitem', { name: '从节点盒移除' }))
+    await waitFor(() => expect(resolved.deleteCanvasEdgeMock).toHaveBeenCalledWith(EDGE_ID))
+    expect(screen.queryByRole('button', { name: `测试连线 ${EDGE_ID}` })).not.toBeInTheDocument()
+    expect(screen.getByTestId(`测试节点 ${NODE_ID}`)).toBeInTheDocument()
+  })
+
   test('keeps the selected Edge configuration unchanged when semantic update conflicts', async () => {
     const resolved = fixture()
     resolved.updateCanvasEdgeRelationTypeMock.mockRejectedValueOnce(
@@ -846,6 +1094,22 @@ describe('CanvasEditorPage', () => {
     expect(screen.getByRole('button', { name: '普通关系' })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByRole('button', { name: '单向' })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByRole('button', { name: '实线' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  test('keeps a failed context-menu command open with the previous Edge state', async () => {
+    const resolved = fixture()
+    resolved.updateCanvasEdgeRelationTypeMock.mockRejectedValueOnce(
+      new CanvasApplicationError('CONFLICT'),
+    )
+    renderEditor(resolved.openRuntime)
+    const edgeButton = await screen.findByRole('button', { name: `测试连线 ${EDGE_ID}` })
+    fireEvent.contextMenu(edgeButton, { clientX: 200, clientY: 180 })
+    const menu = screen.getByRole('menu', { name: '关系菜单：连线设置' })
+    await userEvent.click(within(menu).getByRole('menuitemradio', { name: '上下级' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('已保留原配置')
+    expect(menu).toBeInTheDocument()
+    expect(within(menu).getByRole('menuitemradio', { name: '普通关系' })).toHaveAttribute('aria-checked', 'true')
+    expect(within(menu).getByRole('menuitemradio', { name: '上下级' })).toHaveAttribute('aria-checked', 'false')
   })
 
   test('keeps the persisted Edge set unchanged when a duplicate connect conflicts', async () => {

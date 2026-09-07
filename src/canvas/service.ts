@@ -108,6 +108,7 @@ export interface CanvasService {
       readonly y: number
     }[],
   ): Promise<readonly CanvasNode[]>
+  deleteCanvasNode(canvasId: string, id: string): Promise<void>
   createCanvasEdge(
     canvasId: string,
     sourceNodeId: string,
@@ -360,6 +361,19 @@ export function createCanvasService({
           canvasId,
           moves: validatedMoves,
           updatedAtMs: readNowMs(nowMs),
+        }),
+      )
+    },
+    async deleteCanvasNode(canvasId, id) {
+      validateId(canvasId, 'canvasId')
+      validateId(id, 'id')
+      const deletedAtMs = readNowMs(nowMs)
+      return callRepository(() =>
+        repository.deleteCanvasNode({
+          canvasId,
+          id,
+          deletedAtMs,
+          updatedAtMs: deletedAtMs,
         }),
       )
     },
