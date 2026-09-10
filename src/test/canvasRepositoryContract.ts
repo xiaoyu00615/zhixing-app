@@ -12,6 +12,7 @@ import {
   type AddCanvasNodeBoxMemberInput,
   type CreateCanvasInput,
   type CreateCanvasEdgeInput,
+  type CreateCanvasSubgraphInput,
   type CreateTextNodeInput,
   type DeleteCanvasEdgeInput,
   type DeleteCanvasNodeInput,
@@ -208,6 +209,47 @@ export class CanvasContractBackend implements CanvasRepository {
     }
     this.edges.set(edge.id, edge)
     return edge
+  }
+
+  async createCanvasSubgraph(
+    input: CreateCanvasSubgraphInput,
+  ): Promise<{ readonly nodes: readonly CanvasNode[]; readonly edges: readonly CanvasEdge[] }> {
+    await this.getCanvas(input.canvasId)
+    const resultNodes: CanvasNode[] = []
+    const resultEdges: CanvasEdge[] = []
+    for (const nodeInput of input.nodes) {
+      if (nodeInput.canvasId !== input.canvasId) {
+        throw new CanvasRepositoryError('NOT_FOUND', 'createCanvasSubgraph')
+      }
+      const node: CanvasNode = {
+        ...nodeInput,
+        type: nodeInput.type as CanvasNode['type'],
+        updatedAtMs: nodeInput.createdAtMs,
+      } as CanvasNode
+      this.nodes.set(node.id, node)
+      resultNodes.push(node)
+    }
+    for (const edgeInput of input.edges) {
+      if (edgeInput.canvasId !== input.canvasId) {
+        throw new CanvasRepositoryError('NOT_FOUND', 'createCanvasSubgraph')
+      }
+      const source = this.nodes.get(edgeInput.sourceNodeId)
+      const target = this.nodes.get(edgeInput.targetNodeId)
+      if (source === undefined || target === undefined) {
+        // Roll back all previously created records in this batch.
+        for (const n of resultNodes) this.nodes.delete(n.id)
+        throw new CanvasRepositoryError('NOT_FOUND', 'createCanvasSubgraph')
+      }
+      const edge: CanvasEdge = {
+        ...edgeInput,
+        membershipPosition: null,
+        updatedAtMs: edgeInput.createdAtMs,
+        deletedAtMs: null,
+      }
+      this.edges.set(edge.id, edge)
+      resultEdges.push(edge)
+    }
+    return { nodes: resultNodes, edges: resultEdges }
   }
 
   async addCanvasNodeBoxMember(
@@ -759,6 +801,80 @@ export function defineCanvasRepositoryContract(
       await expect(repository.createCanvasEdge({ ...base, id: '00000000-0000-4000-8000-000000000618', sourceNodeId: CONTRACT_TARGET_NODE_ID, targetNodeId: CONTRACT_NODE_ID, direction: 'none' })).rejects.toMatchObject({ code: 'DUPLICATE' })
       await expect(repository.createCanvasEdge({ ...base, id: '00000000-0000-4000-8000-000000000619', sourceNodeId: CONTRACT_NODE_ID, targetNodeId: CONTRACT_TARGET_NODE_ID, direction: 'bidirectional' })).resolves.toMatchObject({ direction: 'bidirectional' })
       await expect(repository.createCanvasEdge({ ...base, id: '00000000-0000-4000-8000-000000000620', sourceNodeId: CONTRACT_TARGET_NODE_ID, targetNodeId: CONTRACT_NODE_ID, direction: 'bidirectional' })).rejects.toMatchObject({ code: 'DUPLICATE' })
+    })
+
+    test('creates a subgraph atomically with new IDs and preserved edge semantics', async () => {
+      const { repository } = createFixture()
+      await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+      const aId = '00000000-0000-4000-8000-000000000701'
+      const bId = '00000000-0000-4000-8000-000000000702'
+      const edgeId = '00000000-0000-4000-8000-000000000703'
+      await repository.createTextNode({ id: aId, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: 'A' }, x: 10, y: 10, createdAtMs: 20 })
+      await repository.createCanvasNode({ id: bId, canvasId: CONTRACT_CANVAS_ID, type: 'sticky', content: { type: 'sticky', text: 'B' }, x: 50, y: 50, createdAtMs: 21 })
+      await repository.createCanvasEdge({ id: edgeId, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: aId, targetNodeId: bId, relationType: 'hierarchy', direction: 'bidirectional', lineStyle: 'dashed', createdAtMs: 30 })
+
+      const batchIdA = '00000000-0000-4000-8000-000000000711'
+      const batchIdB = '00000000-0000-4000-8000-000000000712'
+      const batchEdgeId = '00000000-0000-4000-8000-000000000713'
+      const result = await repository.createCanvasSubgraph({
+        canvasId: CONTRACT_CANVAS_ID,
+        nodes: [
+          { id: batchIdA, canvasId: CONTRACT_CANVAS_ID, type: 'text', nodeName: '章节 A', content: { type: 'text', text: 'A' }, x: 10, y: 10, createdAtMs: 100 },
+          { id: batchIdB, canvasId: CONTRACT_CANVAS_ID, type: 'sticky', nodeName: '章节 B', content: { type: 'sticky', text: 'B' }, x: 50, y: 50, createdAtMs: 101 },
+        ],
+        edges: [
+          { id: batchEdgeId, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: batchIdA, targetNodeId: batchIdB, relationType: 'hierarchy', direction: 'bidirectional', lineStyle: 'dashed', createdAtMs: 102 },
+        ],
+        createdAtMs: 100,
+      })
+
+      expect(result.nodes).toHaveLength(2)
+      expect(result.nodes.map((n) => n.id)).toEqual([batchIdA, batchIdB])
+      expect(result.nodes[0]).toMatchObject({ type: 'text', nodeName: '章节 A', content: { type: 'text', text: 'A' }, x: 10, y: 10 })
+      expect(result.nodes[1]).toMatchObject({ type: 'sticky', nodeName: '章节 B', content: { type: 'sticky', text: 'B' }, x: 50, y: 50 })
+      expect(result.edges).toHaveLength(1)
+      expect(result.edges[0]).toMatchObject({ id: batchEdgeId, relationType: 'hierarchy', direction: 'bidirectional', lineStyle: 'dashed' })
+
+      // Source records untouched.
+      await expect(repository.listCanvasNodes(CONTRACT_CANVAS_ID)).resolves.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: aId }),
+          expect.objectContaining({ id: bId }),
+          expect.objectContaining({ id: batchIdA }),
+          expect.objectContaining({ id: batchIdB }),
+        ]),
+      )
+    })
+
+    test('rolls back entire subgraph when an edge references a missing node', async () => {
+      const { repository, backend } = createFixture()
+      await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+      const goodNodeId = '00000000-0000-4000-8000-000000000721'
+      const badNodeId = '00000000-0000-4000-8000-000000000722'
+      await repository.createTextNode({ id: goodNodeId, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: 'Good' }, x: 0, y: 0, createdAtMs: 20 })
+
+      const nodeA = '00000000-0000-4000-8000-000000000731'
+      const nodeB = '00000000-0000-4000-8000-000000000732'
+      const edgeAB = '00000000-0000-4000-8000-000000000733'
+      await expect(repository.createCanvasSubgraph({
+        canvasId: CONTRACT_CANVAS_ID,
+        nodes: [
+          { id: nodeA, canvasId: CONTRACT_CANVAS_ID, type: 'text', nodeName: 'A', content: { type: 'text', text: 'A' }, x: 0, y: 0, createdAtMs: 50 },
+          { id: nodeB, canvasId: CONTRACT_CANVAS_ID, type: 'sticky', nodeName: 'B', content: { type: 'sticky', text: 'B' }, x: 10, y: 10, createdAtMs: 51 },
+        ],
+        edges: [
+          { id: edgeAB, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: nodeA, targetNodeId: badNodeId, relationType: 'default', direction: 'forward', lineStyle: 'solid', createdAtMs: 52 },
+        ],
+        createdAtMs: 50,
+      })).rejects.toMatchObject({ code: 'NOT_FOUND', operation: 'createCanvasSubgraph' })
+
+      // All rolled back: only the original node remains.
+      await expect(repository.listCanvasNodes(CONTRACT_CANVAS_ID)).resolves.toEqual([
+        expect.objectContaining({ id: goodNodeId }),
+      ])
+      expect(backend.nodes.get(nodeA)).toBeUndefined()
+      expect(backend.nodes.get(nodeB)).toBeUndefined()
+      expect(backend.edges.get(edgeAB)).toBeUndefined()
     })
   })
 }

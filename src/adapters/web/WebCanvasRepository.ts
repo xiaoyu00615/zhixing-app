@@ -25,6 +25,7 @@ import {
   type CreateCanvasEdgeInput,
   type CreateCanvasInput,
   type CreateCanvasNodeInput,
+  type CreateCanvasSubgraphInput,
   type CreateTextNodeInput,
   type MoveCanvasNodeInput,
   type MoveCanvasNodesInput,
@@ -397,6 +398,51 @@ export class WebCanvasRepository implements CanvasRepository {
     }
     try {
       return parseEdge(await this.#client.createCanvasEdge(input), operation)
+    } catch (error: unknown) {
+      throw mapError(error, operation)
+    }
+  }
+
+  async createCanvasSubgraph(
+    input: CreateCanvasSubgraphInput,
+  ): Promise<{ readonly nodes: readonly CanvasNode[]; readonly edges: readonly CanvasEdge[] }> {
+    const operation = 'createCanvasSubgraph'
+    validateId(input.canvasId, operation)
+    validateTimestamp(input.createdAtMs, operation)
+    if (input.nodes.length === 0) {
+      throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+    }
+    for (const node of input.nodes) {
+      validateId(node.id, operation)
+      validateId(node.canvasId, operation)
+      validateTimestamp(node.createdAtMs, operation)
+      if (!isCanvasCoordinate(node.x) || !isCanvasCoordinate(node.y)) {
+        throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+      }
+    }
+    for (const edge of input.edges) {
+      validateId(edge.id, operation)
+      validateId(edge.canvasId, operation)
+      validateId(edge.sourceNodeId, operation)
+      validateId(edge.targetNodeId, operation)
+      validateTimestamp(edge.createdAtMs, operation)
+      if (edge.sourceNodeId === edge.targetNodeId) {
+        throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+      }
+    }
+    try {
+      const result = await this.#client.createCanvasSubgraph(input)
+      if (!isRecord(result)) {
+        throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+      }
+      const rawNodes = result.nodes
+      const rawEdges = result.edges
+      if (!Array.isArray(rawNodes) || !Array.isArray(rawEdges)) {
+        throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+      }
+      const nodes: CanvasNode[] = rawNodes.map((item) => parseNode(item, operation))
+      const edges: CanvasEdge[] = rawEdges.map((item) => parseEdge(item, operation))
+      return { nodes, edges }
     } catch (error: unknown) {
       throw mapError(error, operation)
     }

@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from 'vitest'
 
 import type { Canvas, CanvasEdge, CanvasNode } from '@/canvas/model'
+import type { CanvasClipboardSnapshot } from '@/canvas/clipboard'
 import {
   CanvasRepositoryError,
   type CanvasRepository,
@@ -114,6 +115,7 @@ function fixture(): {
       moveCanvasNodes: moveCanvasNodesMock,
       deleteCanvasNode: deleteCanvasNodeMock,
       createCanvasEdge: createCanvasEdgeMock,
+      createCanvasSubgraph: vi.fn(() => Promise.resolve({ nodes: [], edges: [] })),
       addCanvasNodeBoxMember: addCanvasNodeBoxMemberMock,
       reorderCanvasNodeBoxMemberships: reorderCanvasNodeBoxMembershipsMock,
       listCanvasEdges: vi.fn(() => Promise.resolve([edge])),
@@ -542,5 +544,74 @@ describe('CanvasService', () => {
         [],
       ),
     ).rejects.toMatchObject({ code: 'UNAVAILABLE' })
+  })
+
+  test('pastes a subgraph atomically with new IDs and preserved edge semantics', async () => {
+    const { repository } = fixture()
+    const service = createCanvasService({ repository })
+    const pastedNodeA = {
+      id: '00000000-0000-4000-8000-000000000701',
+      canvasId: CANVAS_ID,
+      type: 'text' as const,
+      nodeName: 'A',
+      content: { type: 'text', text: 'A' },
+      x: 32, y: 32,
+      createdAtMs: 200, updatedAtMs: 200,
+    }
+    const pastedNodeB = {
+      id: '00000000-0000-4000-8000-000000000702',
+      canvasId: CANVAS_ID,
+      type: 'sticky' as const,
+      nodeName: 'B',
+      content: { type: 'sticky', text: 'B' },
+      x: 42, y: 42,
+      createdAtMs: 201, updatedAtMs: 201,
+    }
+    const pastedEdge = {
+      id: '00000000-0000-4000-8000-000000000703',
+      canvasId: CANVAS_ID,
+      sourceNodeId: pastedNodeA.id,
+      targetNodeId: pastedNodeB.id,
+      relationType: 'hierarchy' as const,
+      direction: 'bidirectional' as const,
+      lineStyle: 'dashed' as const,
+      membershipPosition: null,
+      createdAtMs: 202, updatedAtMs: 202, deletedAtMs: null,
+    }
+    repository.createCanvasSubgraph = vi.fn(() =>
+      Promise.resolve({ nodes: [pastedNodeA, pastedNodeB] as CanvasNode[], edges: [pastedEdge] as CanvasEdge[] }),
+    )
+    const snapshot: CanvasClipboardSnapshot = {
+      sourceCanvasId: CANVAS_ID,
+      nodes: [
+        { id: NODE_ID, type: 'text', nodeName: 'A', content: { type: 'text', text: 'A' }, x: 0, y: 0 },
+        { id: TARGET_NODE_ID, type: 'sticky', nodeName: 'B', content: { type: 'sticky', text: 'B' }, x: 10, y: 10 },
+      ],
+      edges: [
+        { id: EDGE_ID, sourceNodeId: NODE_ID, targetNodeId: TARGET_NODE_ID, relationType: 'hierarchy', direction: 'bidirectional', lineStyle: 'dashed' },
+      ],
+    }
+    const result = await service.pasteCanvasSubgraph(CANVAS_ID, snapshot, 32)
+    expect(result.nodes).toHaveLength(2)
+    expect(result.nodes[0]).toMatchObject({ type: 'text', nodeName: 'A', content: { type: 'text', text: 'A' }, x: 32, y: 32 })
+    expect(result.nodes[1]).toMatchObject({ type: 'sticky', nodeName: 'B', content: { type: 'sticky', text: 'B' }, x: 42, y: 42 })
+    expect(result.edges).toHaveLength(1)
+    expect(result.edges[0]).toMatchObject({ relationType: 'hierarchy', direction: 'bidirectional', lineStyle: 'dashed' })
+    expect(result.oldToNewNodeId.get(NODE_ID)).toBeDefined()
+    expect(result.oldToNewNodeId.get(TARGET_NODE_ID)).toBeDefined()
+    expect(result.oldToNewNodeId.get(NODE_ID)).not.toBe(NODE_ID)
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    expect(repository.createCanvasSubgraph).toHaveBeenCalledOnce()
+  })
+
+  test('rejects paste across different canvases', async () => {
+    const { repository } = fixture()
+    const service = createCanvasService({ repository })
+    const snapshot = {
+      sourceCanvasId: '00000000-0000-4000-8000-000000009999',
+      nodes: [],
+      edges: [],
+    }
+    await expect(service.pasteCanvasSubgraph(CANVAS_ID, snapshot, 0)).rejects.toMatchObject({ code: 'CONFLICT', field: 'canvasId' })
   })
 })

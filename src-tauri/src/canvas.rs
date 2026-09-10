@@ -102,7 +102,7 @@ impl<'de> Deserialize<'de> for CanvasNodeContent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct CanvasNodeRecord {
     pub(crate) id: String,
     pub(crate) canvas_id: String,
@@ -169,7 +169,7 @@ impl CanvasEdgeLineStyle {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct CanvasEdgeRecord {
     pub(crate) id: String,
     pub(crate) canvas_id: String,
@@ -207,6 +207,7 @@ pub(crate) struct CreateCanvasNodeInput {
     pub(crate) id: String,
     pub(crate) canvas_id: String,
     pub(crate) node_type: String,
+    pub(crate) node_name: String,
     pub(crate) content: CanvasNodeContent,
     pub(crate) x: f64,
     pub(crate) y: f64,
@@ -322,6 +323,35 @@ pub(crate) struct DeleteCanvasEdgeInput {
     pub(crate) id: String,
     pub(crate) deleted_at_ms: i64,
     pub(crate) updated_at_ms: i64,
+}
+
+pub(crate) struct CreateCanvasSubgraphNodeInput {
+    pub(crate) id: String,
+    pub(crate) canvas_id: String,
+    pub(crate) node_type: String,
+    pub(crate) node_name: String,
+    pub(crate) content: String,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) created_at_ms: i64,
+}
+
+pub(crate) struct CreateCanvasSubgraphEdgeInput {
+    pub(crate) id: String,
+    pub(crate) canvas_id: String,
+    pub(crate) source_node_id: String,
+    pub(crate) target_node_id: String,
+    pub(crate) relation_type: String,
+    pub(crate) direction: CanvasEdgeDirection,
+    pub(crate) line_style: CanvasEdgeLineStyle,
+    pub(crate) created_at_ms: i64,
+}
+
+pub(crate) struct CreateCanvasSubgraphInput {
+    pub(crate) canvas_id: String,
+    pub(crate) nodes: Vec<CreateCanvasSubgraphNodeInput>,
+    pub(crate) edges: Vec<CreateCanvasSubgraphEdgeInput>,
+    pub(crate) created_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -659,6 +689,7 @@ impl CanvasDbService {
                 id: input.id,
                 canvas_id: input.canvas_id,
                 node_type,
+                node_name: String::new(),
                 content: input.content,
                 x: input.x,
                 y: input.y,
@@ -814,11 +845,12 @@ impl CanvasDbService {
             .execute(
                 "INSERT INTO canvas_nodes(\
                     id, canvas_id, type, node_name, content_json, x, y, created_at_ms, updated_at_ms\
-                 ) VALUES(?1, ?2, ?3, '', ?4, ?5, ?6, ?7, ?7)",
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
                 params![
                     input.id,
                     input.canvas_id,
                     input.node_type,
+                    input.node_name,
                     content,
                     input.x,
                     input.y,
@@ -1053,6 +1085,110 @@ impl CanvasDbService {
             )
             .map_err(map_edge_write_error)?;
         Self::get_active_edge(connection, &input.id)
+    }
+
+    pub(crate) fn create_canvas_subgraph(
+        connection: &Connection,
+        input: CreateCanvasSubgraphInput,
+    ) -> Result<(Vec<CanvasNodeRecord>, Vec<CanvasEdgeRecord>), CanvasError> {
+        validate_id(&input.canvas_id)?;
+        validate_timestamp(input.created_at_ms)?;
+        if input.nodes.is_empty() {
+            return Err(CanvasError::PersistenceFailed);
+        }
+        let mut node_ids = HashSet::with_capacity(input.nodes.len());
+        for node_input in &input.nodes {
+            validate_id(&node_input.id)?;
+            validate_id(&node_input.canvas_id)?;
+            if node_input.canvas_id != input.canvas_id {
+                return Err(CanvasError::PersistenceFailed);
+            }
+            validate_position(node_input.x, node_input.y)?;
+            validate_timestamp(node_input.created_at_ms)?;
+            if !node_ids.insert(&node_input.id) {
+                return Err(CanvasError::PersistenceFailed);
+            }
+        }
+        let mut edge_ids = HashSet::with_capacity(input.edges.len());
+        for edge_input in &input.edges {
+            validate_id(&edge_input.id)?;
+            validate_id(&edge_input.canvas_id)?;
+            validate_id(&edge_input.source_node_id)?;
+            validate_id(&edge_input.target_node_id)?;
+            if edge_input.canvas_id != input.canvas_id {
+                return Err(CanvasError::PersistenceFailed);
+            }
+            if edge_input.source_node_id == edge_input.target_node_id {
+                return Err(CanvasError::PersistenceFailed);
+            }
+            validate_relation_type(&edge_input.relation_type)?;
+            validate_timestamp(edge_input.created_at_ms)?;
+            if !edge_ids.insert(&edge_input.id) {
+                return Err(CanvasError::PersistenceFailed);
+            }
+        }
+
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|_| CanvasError::PersistenceFailed)?;
+        Self::get_canvas(&transaction, &input.canvas_id)?;
+
+        let mut created_nodes = Vec::with_capacity(input.nodes.len());
+        for node_input in &input.nodes {
+            let content = &node_input.content;
+            transaction.execute(
+                "INSERT INTO canvas_nodes(\
+                    id, canvas_id, type, node_name, content_json, x, y, created_at_ms, updated_at_ms\
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                params![
+                    node_input.id,
+                    node_input.canvas_id,
+                    node_input.node_type,
+                    &node_input.node_name,
+                    content,
+                    node_input.x,
+                    node_input.y,
+                    node_input.created_at_ms,
+                ],
+            ).map_err(|_| CanvasError::PersistenceFailed)?;
+            let record = Self::get_node(&transaction, &node_input.id)
+                .map_err(|_| CanvasError::PersistenceFailed)?;
+            created_nodes.push(record);
+        }
+
+        let mut created_edges = Vec::with_capacity(input.edges.len());
+        for edge_input in &input.edges {
+            Self::get_node(&transaction, &edge_input.source_node_id)
+                .map_err(|_| CanvasError::NotFound)?;
+            Self::get_node(&transaction, &edge_input.target_node_id)
+                .map_err(|_| CanvasError::NotFound)?;
+            transaction
+                .execute(
+                    "INSERT INTO canvas_edges(\
+                     id, canvas_id, source_node_id, target_node_id, relation_type, direction, \
+                     line_style, membership_position, created_at_ms, updated_at_ms, deleted_at_ms\
+                  ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?8, NULL)",
+                    params![
+                        edge_input.id,
+                        edge_input.canvas_id,
+                        edge_input.source_node_id,
+                        edge_input.target_node_id,
+                        edge_input.relation_type,
+                        edge_input.direction.as_str(),
+                        edge_input.line_style.as_str(),
+                        edge_input.created_at_ms,
+                    ],
+                )
+                .map_err(map_edge_write_error)?;
+            let record = Self::get_active_edge(&transaction, &edge_input.id)
+                .map_err(|_| CanvasError::PersistenceFailed)?;
+            created_edges.push(record);
+        }
+
+        transaction
+            .commit()
+            .map_err(|_| CanvasError::PersistenceFailed)?;
+        Ok((created_nodes, created_edges))
     }
 
     pub(crate) fn add_node_box_member(
@@ -2401,6 +2537,7 @@ mod tests {
                 id: TARGET_NODE_ID.into(),
                 canvas_id: CANVAS_ID.into(),
                 node_type: "sticky".into(),
+                node_name: String::new(),
                 content: CanvasNodeContent::Sticky {
                     text: "Sticky body".into(),
                 },
@@ -3185,6 +3322,7 @@ mod tests {
                 id: box_id.into(),
                 canvas_id: CANVAS_ID.into(),
                 node_type: "node_box".into(),
+                node_name: String::new(),
                 content: CanvasNodeContent::NodeBox,
                 x: 360.0,
                 y: 100.0,
@@ -3331,10 +3469,11 @@ mod tests {
                 id: box_id.into(),
                 canvas_id: CANVAS_ID.into(),
                 node_type: "node_box".into(),
+                node_name: String::new(),
                 content: CanvasNodeContent::NodeBox,
                 x: 360.0,
                 y: 100.0,
-                created_at_ms: 40,
+                created_at_ms: 12,
             },
         )
         .unwrap();
@@ -3473,6 +3612,7 @@ mod tests {
                 id: box_id.into(),
                 canvas_id: CANVAS_ID.into(),
                 node_type: "node_box".into(),
+                node_name: String::new(),
                 content: CanvasNodeContent::NodeBox,
                 x: 300.0,
                 y: 100.0,
@@ -3568,6 +3708,7 @@ mod tests {
                 id: box_id.into(),
                 canvas_id: CANVAS_ID.into(),
                 node_type: "node_box".into(),
+                node_name: String::new(),
                 content: CanvasNodeContent::NodeBox,
                 x: 300.0,
                 y: 100.0,
@@ -3841,10 +3982,11 @@ mod tests {
                 id: box_id.into(),
                 canvas_id: CANVAS_ID.into(),
                 node_type: "node_box".into(),
+                node_name: String::new(),
                 content: CanvasNodeContent::NodeBox,
                 x: 360.0,
                 y: 100.0,
-                created_at_ms: 40,
+                created_at_ms: 12,
             },
         )
         .unwrap();
@@ -4013,6 +4155,147 @@ mod tests {
                 )
                 .unwrap(),
             1
+        );
+    }
+
+    fn subgraph_node_input(
+        id: &str,
+        canvas_id: &str,
+        node_type: &str,
+        node_name: &str,
+    ) -> CreateCanvasSubgraphNodeInput {
+        CreateCanvasSubgraphNodeInput {
+            id: id.into(),
+            canvas_id: canvas_id.into(),
+            node_type: node_type.into(),
+            node_name: node_name.into(),
+            content: format!(
+                "{{\"type\":\"{}\",\"text\":\"{} body\"}}",
+                node_type, node_name
+            ),
+            x: 100.0,
+            y: 200.0,
+            created_at_ms: 100,
+        }
+    }
+
+    #[test]
+    fn creates_subgraph_with_one_node_and_zero_edges() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let node_id = "00000000-0000-4000-8000-000000002101";
+
+        let (nodes, edges) = CanvasDbService::create_canvas_subgraph(
+            &connection,
+            CreateCanvasSubgraphInput {
+                canvas_id: CANVAS_ID.into(),
+                nodes: vec![subgraph_node_input(node_id, CANVAS_ID, "text", "章节 A")],
+                edges: vec![],
+                created_at_ms: 100,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(edges.len(), 0);
+        assert_eq!(nodes[0].id, node_id);
+        assert_eq!(nodes[0].node_name, "章节 A");
+        assert_eq!(nodes[0].node_type, "text");
+    }
+
+    #[test]
+    fn creates_subgraph_with_two_nodes_and_one_edge_preserving_semantics() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let node_a = "00000000-0000-4000-8000-000000002201";
+        let node_b = "00000000-0000-4000-8000-000000002202";
+        let edge_ab = "00000000-0000-4000-8000-000000002203";
+
+        let (nodes, edges) = CanvasDbService::create_canvas_subgraph(
+            &connection,
+            CreateCanvasSubgraphInput {
+                canvas_id: CANVAS_ID.into(),
+                nodes: vec![
+                    subgraph_node_input(node_a, CANVAS_ID, "text", "Parent"),
+                    subgraph_node_input(node_b, CANVAS_ID, "sticky", "Child"),
+                ],
+                edges: vec![CreateCanvasSubgraphEdgeInput {
+                    id: edge_ab.into(),
+                    canvas_id: CANVAS_ID.into(),
+                    source_node_id: node_a.into(),
+                    target_node_id: node_b.into(),
+                    relation_type: "hierarchy".into(),
+                    direction: CanvasEdgeDirection::Bidirectional,
+                    line_style: CanvasEdgeLineStyle::Dashed,
+                    created_at_ms: 102,
+                }],
+                created_at_ms: 100,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].id, edge_ab);
+        assert_ne!(edges[0].id, EDGE_ID);
+        assert_eq!(edges[0].source_node_id, node_a);
+        assert_eq!(edges[0].target_node_id, node_b);
+        assert_eq!(edges[0].relation_type, "hierarchy");
+        assert_eq!(edges[0].direction, CanvasEdgeDirection::Bidirectional);
+        assert_eq!(edges[0].line_style, CanvasEdgeLineStyle::Dashed);
+    }
+
+    #[test]
+    fn rolls_back_entire_subgraph_when_edge_references_missing_node() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let node_a = "00000000-0000-4000-8000-000000002301";
+        let node_b = "00000000-0000-4000-8000-000000002302";
+        let bad_target = "00000000-0000-4000-8000-000000002399";
+        let edge_ab = "00000000-0000-4000-8000-000000002303";
+
+        let result = CanvasDbService::create_canvas_subgraph(
+            &connection,
+            CreateCanvasSubgraphInput {
+                canvas_id: CANVAS_ID.into(),
+                nodes: vec![
+                    subgraph_node_input(node_a, CANVAS_ID, "text", "A"),
+                    subgraph_node_input(node_b, CANVAS_ID, "sticky", "B"),
+                ],
+                edges: vec![CreateCanvasSubgraphEdgeInput {
+                    id: edge_ab.into(),
+                    canvas_id: CANVAS_ID.into(),
+                    source_node_id: node_a.into(),
+                    target_node_id: bad_target.into(),
+                    relation_type: "default".into(),
+                    direction: CanvasEdgeDirection::Forward,
+                    line_style: CanvasEdgeLineStyle::Solid,
+                    created_at_ms: 102,
+                }],
+                created_at_ms: 100,
+            },
+        );
+
+        assert_eq!(result.unwrap_err(), CanvasError::NotFound);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM canvas_nodes WHERE id IN (?1, ?2)",
+                    rusqlite::params![node_a, node_b],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM canvas_edges WHERE id = ?1",
+                    [edge_ab],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
         );
     }
 }

@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 
+import { getClipboardSnapshot, resetClipboardState, type CanvasClipboardSnapshot } from '@/canvas/clipboard'
 import { CanvasEditorPage } from '@/pages/CanvasEditorPage'
 import type { Canvas, CanvasEdge, CanvasNode } from '@/canvas/model'
 import { CanvasApplicationError, type CanvasService } from '@/canvas/service'
@@ -272,6 +273,7 @@ function fixture() {
     updateCanvasEdgeLineStyle: updateCanvasEdgeLineStyleMock,
     updateCanvasEdgeRelationType: updateCanvasEdgeRelationTypeMock,
     deleteCanvasEdge: deleteCanvasEdgeMock,
+    pasteCanvasSubgraph: vi.fn(() => Promise.resolve({ nodes: [], edges: [], oldToNewNodeId: new Map() })),
   }
   const openRuntime: OpenCanvasRuntime = vi.fn(() => Promise.resolve({ service, dispose: vi.fn() }))
   return { canvas, node, service, openRuntime, openCanvasMock, createTextNodeMock, editTextNodeMock, createCanvasNodeMock, updateCanvasNodeContentMock, renameCanvasNodeMock, deleteCanvasNodeMock, moveCanvasNodeMock, moveCanvasNodesMock, updateViewportMock, createCanvasEdgeMock, addNodeBoxMemberMock, reorderNodeBoxMembershipsMock, updateCanvasEdgeDirectionMock, updateCanvasEdgeLineStyleMock, updateCanvasEdgeRelationTypeMock, deleteCanvasEdgeMock }
@@ -293,6 +295,7 @@ describe('CanvasEditorPage', () => {
     reactFlowMocks.getViewport.mockClear()
     reactFlowMocks.setViewport.mockClear()
     reactFlowMocks.resetViewport()
+    resetClipboardState()
   })
 
   test('shows loading then restores the Canvas, text, position, and viewport', async () => {
@@ -1134,5 +1137,115 @@ describe('CanvasEditorPage', () => {
     await userEvent.click(screen.getByRole('button', { name: '重试' }))
     expect(await screen.findByRole('heading', { name: '产品构思' })).toBeInTheDocument()
     expect(openRuntime).toHaveBeenCalledTimes(2)
+  })
+
+  test('paste keeps originals deselected, marks pasted nodes selected, and calls the service exactly once', async () => {
+    const resolved = fixture()
+    const pastedNodeAId = '00000000-0000-4000-8000-000000000651'
+    const pastedNodeBId = '00000000-0000-4000-8000-000000000652'
+    const pastedA: CanvasNode = {
+      id: pastedNodeAId, canvasId: CANVAS_ID, type: 'text', nodeName: '',
+      content: { type: 'text', text: '初始文字' }, x: 52, y: 62, createdAtMs: 20, updatedAtMs: 20,
+    }
+    const pastedB: CanvasNode = {
+      id: pastedNodeBId, canvasId: CANVAS_ID, type: 'sticky', nodeName: '灵感记录',
+      content: { type: 'sticky', text: '目标文字' }, x: 452, y: 112, createdAtMs: 20, updatedAtMs: 20,
+    }
+    const pasteSubgraphMock = vi.fn<
+      (
+        canvasId: string,
+        snapshot: CanvasClipboardSnapshot,
+        offset: number,
+      ) => Promise<{ nodes: readonly CanvasNode[]; edges: readonly CanvasEdge[]; oldToNewNodeId: ReadonlyMap<string, string> }>
+    >(() => Promise.resolve({ nodes: [pastedA, pastedB], edges: [], oldToNewNodeId: new Map() }))
+    resolved.service.pasteCanvasSubgraph = pasteSubgraphMock
+    renderEditor(resolved.openRuntime)
+    await screen.findByRole('heading', { name: '产品构思' })
+
+    await userEvent.click(screen.getByRole('button', { name: '模拟框选' }))
+    expect(screen.getByLabelText(`测试文字节点 ${NODE_ID}`)).toHaveAttribute('data-selected', 'true')
+    expect(screen.getByLabelText(`测试文字节点 ${TARGET_NODE_ID}`)).toHaveAttribute('data-selected', 'true')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('已复制节点'))
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true }))
+
+    await waitFor(() => expect(pasteSubgraphMock).toHaveBeenCalledTimes(1))
+    const pasteCall = pasteSubgraphMock.mock.calls[0]
+    if (pasteCall === undefined) throw new Error('Expected one pasteCanvasSubgraph call.')
+    const [calledCanvasId, calledSnapshot, calledOffset] = pasteCall
+    expect(calledCanvasId).toBe(CANVAS_ID)
+    expect(calledOffset).toBe(32)
+    expect(calledSnapshot.sourceCanvasId).toBe(CANVAS_ID)
+    const snapshotNodeIds = calledSnapshot.nodes.map((node) => node.id)
+    expect(snapshotNodeIds).toContain(NODE_ID)
+    expect(snapshotNodeIds).toContain(TARGET_NODE_ID)
+
+    await waitFor(() => expect(
+      screen.getByTestId(`测试节点 ${pastedNodeAId}`),
+    ).toBeInTheDocument())
+    expect(screen.getByTestId(`测试节点 ${pastedNodeBId}`)).toBeInTheDocument()
+    expect(screen.getByTestId(`测试节点 ${NODE_ID}`)).toBeInTheDocument()
+    expect(screen.getByTestId(`测试节点 ${TARGET_NODE_ID}`)).toBeInTheDocument()
+
+    expect(screen.getByLabelText(`测试文字节点 ${NODE_ID}`)).toHaveAttribute('data-selected', 'false')
+    expect(screen.getByLabelText(`测试文字节点 ${TARGET_NODE_ID}`)).toHaveAttribute('data-selected', 'false')
+    expect(screen.getByLabelText(`测试文字节点 ${pastedNodeAId}`)).toHaveAttribute('data-selected', 'true')
+    expect(screen.getByLabelText(`测试文字节点 ${pastedNodeBId}`)).toHaveAttribute('data-selected', 'true')
+    expect(screen.getByRole('status')).toHaveTextContent('已粘贴 2 个节点')
+  })
+
+  test('rejects copying when the selection contains an unsupported node type', async () => {
+    const resolved = fixture()
+    const boxNode: CanvasNode = {
+      id: BOX_NODE_ID, canvasId: CANVAS_ID, type: 'node_box', nodeName: '收集盒',
+      content: { type: 'node_box' }, x: 620, y: 120, createdAtMs: 12, updatedAtMs: 12,
+    }
+    resolved.openCanvasMock.mockResolvedValueOnce({
+      canvas: resolved.canvas,
+      nodes: [resolved.node, boxNode],
+      edges: [],
+    })
+    renderEditor(resolved.openRuntime)
+    await screen.findByRole('heading', { name: '产品构思' })
+    await userEvent.click(screen.getByRole('button', { name: '模拟框选' }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true }))
+    expect(await screen.findByRole('status')).toHaveTextContent('无法复制：选中了不支持的节点类型。')
+  })
+
+  test('copies text/sticky selection on a legacy canvas containing membership edges', async () => {
+    const resolved = fixture()
+    const boxNode: CanvasNode = {
+      id: BOX_NODE_ID, canvasId: CANVAS_ID, type: 'node_box', nodeName: '收集盒',
+      content: { type: 'node_box' }, x: 620, y: 120, createdAtMs: 12, updatedAtMs: 12,
+    }
+    const membershipEdge: CanvasEdge = {
+      id: '00000000-0000-4000-8000-000000000609', canvasId: CANVAS_ID,
+      sourceNodeId: NODE_ID, targetNodeId: BOX_NODE_ID,
+      relationType: 'ordered_box_member', direction: 'forward', lineStyle: 'solid',
+      membershipPosition: 0, createdAtMs: 12, updatedAtMs: 12, deletedAtMs: null,
+    }
+    const stickyNode: CanvasNode = {
+      id: TARGET_NODE_ID, canvasId: CANVAS_ID, type: 'sticky', nodeName: '灵感记录',
+      content: { type: 'sticky', text: '目标文字' }, x: 420, y: 80, createdAtMs: 11, updatedAtMs: 11,
+    }
+    resolved.openCanvasMock.mockResolvedValueOnce({
+      canvas: resolved.canvas,
+      nodes: [resolved.node, stickyNode, boxNode],
+      edges: [membershipEdge],
+    })
+    renderEditor(resolved.openRuntime)
+    await screen.findByRole('heading', { name: '产品构思' })
+
+    // 框选只选中前两个节点（Text + Sticky），Node Box 不在选区内。
+    await userEvent.click(screen.getByRole('button', { name: '模拟框选' }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true }))
+    expect(await screen.findByRole('status')).toHaveTextContent('已复制节点')
+
+    const snapshot = getClipboardSnapshot()
+    expect(snapshot?.nodes.map((node) => node.id)).toEqual([NODE_ID, TARGET_NODE_ID])
+    // 选区外的 Membership Edge 被忽略，不进入快照。
+    expect(snapshot?.edges).toHaveLength(0)
   })
 })

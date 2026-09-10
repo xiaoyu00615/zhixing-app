@@ -219,6 +219,7 @@ pub fn run() {
             commands::canvas_node_move,
             commands::canvas_nodes_move,
             commands::canvas_edge_create,
+            commands::canvas_subgraph_create,
             commands::canvas_node_box_add_member,
             commands::canvas_node_box_reorder_memberships,
             commands::canvas_edge_list,

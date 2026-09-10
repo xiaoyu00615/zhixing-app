@@ -24,6 +24,8 @@ import { canvasEdgeRegistry } from '@/canvas/edgeRegistry'
 import {
   CanvasRepositoryError,
   type CanvasRepository,
+  type CreateCanvasSubgraphEdgeInput,
+  type CreateCanvasSubgraphNodeInput,
 } from '@/canvas/repository'
 
 export type CanvasApplicationErrorCode =
@@ -140,6 +142,15 @@ export interface CanvasService {
     relationType: CanvasOrdinaryEdgeRelationType,
   ): Promise<CanvasEdge>
   deleteCanvasEdge(id: string): Promise<CanvasEdge>
+  pasteCanvasSubgraph(
+    canvasId: string,
+    snapshot: import('@/canvas/clipboard').CanvasClipboardSnapshot,
+    offset: number,
+  ): Promise<{
+    readonly nodes: readonly CanvasNode[]
+    readonly edges: readonly CanvasEdge[]
+    readonly oldToNewNodeId: ReadonlyMap<string, string>
+  }>
 }
 
 interface CreateCanvasServiceOptions {
@@ -281,6 +292,7 @@ export function createCanvasService({
           id: readGeneratedId(generateId),
           canvasId,
           type,
+          nodeName: '',
           content,
           x: position.x,
           y: position.y,
@@ -520,6 +532,53 @@ export function createCanvasService({
           updatedAtMs: deletedAtMs,
         }),
       )
+    },
+    async pasteCanvasSubgraph(canvasId, snapshot, offset) {
+      validateId(canvasId, 'canvasId')
+      if (snapshot.sourceCanvasId !== canvasId) {
+        throw new CanvasApplicationError('CONFLICT', 'canvasId')
+      }
+      const createdAtMs = readNowMs(nowMs)
+      const oldToNewNodeId = new Map<string, string>()
+      const subgraphNodes: CreateCanvasSubgraphNodeInput[] =
+        snapshot.nodes.map((node) => {
+          const newId = readGeneratedId(generateId)
+          oldToNewNodeId.set(node.id, newId)
+          return {
+            id: newId,
+            canvasId,
+            type: node.type,
+            nodeName: node.nodeName,
+            content: node.content,
+            x: node.x + offset,
+            y: node.y + offset,
+            createdAtMs,
+          }
+        })
+      const subgraphEdges: CreateCanvasSubgraphEdgeInput[] =
+        snapshot.edges.map((edge) => ({
+          id: readGeneratedId(generateId),
+          canvasId,
+          sourceNodeId: oldToNewNodeId.get(edge.sourceNodeId)!,
+          targetNodeId: oldToNewNodeId.get(edge.targetNodeId)!,
+          relationType: edge.relationType,
+          direction: edge.direction,
+          lineStyle: edge.lineStyle,
+          createdAtMs,
+        }))
+      const result = await callRepository(() =>
+        repository.createCanvasSubgraph({
+          canvasId,
+          nodes: subgraphNodes,
+          edges: subgraphEdges,
+          createdAtMs,
+        }),
+      )
+      return {
+        nodes: result.nodes,
+        edges: result.edges,
+        oldToNewNodeId,
+      }
     },
   }
 }

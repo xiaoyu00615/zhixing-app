@@ -732,6 +732,8 @@ pub(crate) struct CreateCanvasNodeDto {
     canvas_id: String,
     #[serde(rename = "type")]
     node_type: String,
+    #[serde(default)]
+    node_name: String,
     content: CanvasNodeContent,
     x: f64,
     y: f64,
@@ -888,6 +890,29 @@ pub(crate) struct DeleteCanvasEdgeDto {
     id: String,
     deleted_at_ms: i64,
     updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CanvasSubgraphNodeDto {
+    id: String,
+    canvas_id: String,
+    #[serde(rename = "type")]
+    node_type: String,
+    node_name: String,
+    content: CanvasNodeContent,
+    x: f64,
+    y: f64,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreateCanvasSubgraphDto {
+    canvas_id: String,
+    nodes: Vec<CanvasSubgraphNodeDto>,
+    edges: Vec<CreateCanvasEdgeDto>,
+    created_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1047,6 +1072,7 @@ pub(crate) fn canvas_node_create(
             id: input.id,
             canvas_id: input.canvas_id,
             node_type: input.node_type,
+            node_name: input.node_name,
             content: input.content,
             x: input.x,
             y: input.y,
@@ -1197,6 +1223,65 @@ pub(crate) fn canvas_edge_create(
     )
     .map(CanvasEdgeDto::from)
     .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn canvas_subgraph_create(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: CreateCanvasSubgraphDto,
+) -> Result<serde_json::Value, CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    let nodes_input: Vec<_> = input
+        .nodes
+        .iter()
+        .map(|n| {
+            Ok(crate::canvas::CreateCanvasSubgraphNodeInput {
+                id: n.id.clone(),
+                canvas_id: n.canvas_id.clone(),
+                node_type: n.node_type.clone(),
+                node_name: n.node_name.clone(),
+                content: serde_json::to_string(&n.content)
+                    .map_err(|_| crate::canvas::CanvasError::PersistenceFailed)?,
+                x: n.x,
+                y: n.y,
+                created_at_ms: n.created_at_ms,
+            })
+        })
+        .collect::<Result<Vec<_>, CanvasCommandErrorDto>>()?;
+    let edges_input: Vec<_> = input
+        .edges
+        .iter()
+        .map(|e| crate::canvas::CreateCanvasSubgraphEdgeInput {
+            id: e.id.clone(),
+            canvas_id: e.canvas_id.clone(),
+            source_node_id: e.source_node_id.clone(),
+            target_node_id: e.target_node_id.clone(),
+            relation_type: e.relation_type.clone(),
+            direction: e.direction.clone(),
+            line_style: e.line_style.clone(),
+            created_at_ms: e.created_at_ms,
+        })
+        .collect();
+    let (node_records, edge_records) = CanvasDbService::create_canvas_subgraph(
+        &connection,
+        crate::canvas::CreateCanvasSubgraphInput {
+            canvas_id: input.canvas_id,
+            nodes: nodes_input,
+            edges: edges_input,
+            created_at_ms: input.created_at_ms,
+        },
+    )
+    .map_err(|e: crate::canvas::CanvasError| CanvasCommandErrorDto::from(e))?;
+    let nodes_value: Vec<serde_json::Value> = node_records
+        .iter()
+        .map(|r| serde_json::to_value(r).unwrap())
+        .collect();
+    let edges_value: Vec<serde_json::Value> = edge_records
+        .iter()
+        .map(|r| serde_json::to_value(r).unwrap())
+        .collect();
+    Ok(serde_json::json!({ "nodes": nodes_value, "edges": edges_value }))
 }
 
 #[tauri::command]
@@ -1526,5 +1611,109 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "PERSISTENCE_FAILED");
         assert_eq!(error.message, "Task persistence operation failed.");
+    }
+
+    #[test]
+    fn canvas_subgraph_dto_accepts_exact_adapter_payload() {
+        let single_node_payload = serde_json::json!({
+            "canvasId": "00000000-0000-4000-8000-000000000601",
+            "nodes": [
+                {
+                    "id": "00000000-0000-4000-8000-000000002101",
+                    "canvasId": "00000000-0000-4000-8000-000000000601",
+                    "type": "text",
+                    "nodeName": "章节 A",
+                    "content": { "type": "text", "text": "章节 A body" },
+                    "x": 100.0,
+                    "y": 200.0,
+                    "createdAtMs": 100
+                }
+            ],
+            "edges": [],
+            "createdAtMs": 100
+        });
+        let single_node: CreateCanvasSubgraphDto =
+            serde_json::from_value(single_node_payload).unwrap();
+        assert_eq!(single_node.nodes.len(), 1);
+        assert_eq!(single_node.edges.len(), 0);
+        assert_eq!(single_node.nodes[0].node_type, "text");
+        assert_eq!(single_node.nodes[0].node_name, "章节 A");
+        assert_eq!(
+            single_node.nodes[0].content,
+            CanvasNodeContent::Text {
+                text: "章节 A body".into()
+            }
+        );
+
+        let two_nodes_payload = serde_json::json!({
+            "canvasId": "00000000-0000-4000-8000-000000000601",
+            "nodes": [
+                {
+                    "id": "00000000-0000-4000-8000-000000002201",
+                    "canvasId": "00000000-0000-4000-8000-000000000601",
+                    "type": "text",
+                    "nodeName": "Parent",
+                    "content": { "type": "text", "text": "Parent body" },
+                    "x": 100.0,
+                    "y": 200.0,
+                    "createdAtMs": 100
+                },
+                {
+                    "id": "00000000-0000-4000-8000-000000002202",
+                    "canvasId": "00000000-0000-4000-8000-000000000601",
+                    "type": "sticky",
+                    "nodeName": "Child",
+                    "content": { "type": "sticky", "text": "Child body" },
+                    "x": 300.0,
+                    "y": 240.0,
+                    "createdAtMs": 100
+                }
+            ],
+            "edges": [
+                {
+                    "id": "00000000-0000-4000-8000-000000002203",
+                    "canvasId": "00000000-0000-4000-8000-000000000601",
+                    "sourceNodeId": "00000000-0000-4000-8000-000000002201",
+                    "targetNodeId": "00000000-0000-4000-8000-000000002202",
+                    "relationType": "hierarchy",
+                    "direction": "bidirectional",
+                    "lineStyle": "dashed",
+                    "createdAtMs": 102
+                }
+            ],
+            "createdAtMs": 100
+        });
+        let two_nodes: CreateCanvasSubgraphDto = serde_json::from_value(two_nodes_payload).unwrap();
+        assert_eq!(two_nodes.nodes.len(), 2);
+        assert_eq!(two_nodes.edges.len(), 1);
+        assert_eq!(
+            two_nodes.edges[0].source_node_id,
+            "00000000-0000-4000-8000-000000002201"
+        );
+        assert_eq!(
+            two_nodes.edges[0].target_node_id,
+            "00000000-0000-4000-8000-000000002202"
+        );
+        assert_eq!(two_nodes.edges[0].relation_type, "hierarchy");
+        assert_eq!(
+            two_nodes.edges[0].direction,
+            CanvasEdgeDirection::Bidirectional
+        );
+        assert_eq!(two_nodes.edges[0].line_style, CanvasEdgeLineStyle::Dashed);
+    }
+
+    #[test]
+    fn create_canvas_node_dto_defaults_missing_node_name() {
+        let payload = serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000602",
+            "canvasId": "00000000-0000-4000-8000-000000000601",
+            "type": "text",
+            "content": { "type": "text", "text": "Idea" },
+            "x": 50.0,
+            "y": 80.0,
+            "createdAtMs": 30
+        });
+        let dto: CreateCanvasNodeDto = serde_json::from_value(payload).unwrap();
+        assert_eq!(dto.node_name, "");
     }
 }

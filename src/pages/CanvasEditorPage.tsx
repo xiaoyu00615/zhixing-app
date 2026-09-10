@@ -37,9 +37,15 @@ import {
   createCanvasNodeContextMenuModel,
 } from '@/canvas/contextMenuRegistry'
 import { getCanvasEdgeTypeDefinition, UNKNOWN_CANVAS_EDGE_RENDER } from '@/canvas/edgeRegistry'
-import { canvasNodeRegistry, orderedMembershipDisplayNumbers, toCanvasFlowNode, withCanvasNodeRuntimeData, type CanvasFlowNode } from '@/canvas/nodeRegistry'
+import { canvasNodeRegistry, canvasFlowNodeToCanvasNode, orderedMembershipDisplayNumbers, toCanvasFlowNode, withCanvasNodeRuntimeData, type CanvasFlowNode } from '@/canvas/nodeRegistry'
 import { openCanvasRuntime } from '@/canvas/runtime'
 import type { OpenCanvasRuntime } from '@/canvas/runtime.types'
+import {
+  copyToClipboard,
+  getClipboardSnapshot,
+  isClipboardEmpty,
+  requestPasteOffset,
+} from '@/canvas/clipboard'
 import type { CanvasService } from '@/canvas/service'
 import { PATHS } from '@/routes/paths'
 
@@ -422,6 +428,73 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
       keyboardPanActive.current = false
     }
   }, [getViewport, persistViewport, setViewport])
+
+  const flowNodesRef = useRef(flowNodes)
+  useEffect(() => {
+    flowNodesRef.current = flowNodes
+  }, [flowNodes])
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isEditableTarget(event.target)) return
+      const isCopy = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c'
+      const isPaste = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v'
+      if (!isCopy && !isPaste) return
+      event.preventDefault()
+      const currentService = serviceRef.current
+      if (currentService === null || canvasId === '' || canvas === null) return
+
+      if (isCopy) {
+        const selectedFlowNodes = flowNodesRef.current.filter((node) => node.selected)
+        if (selectedFlowNodes.length === 0) return
+        try {
+          const selectedNodes = selectedFlowNodes.map((fn) => canvasFlowNodeToCanvasNode(fn, canvas.id, Date.now()))
+          copyToClipboard(selectedNodes, canvasEdgesRef.current, canvas.id)
+          setFeedback('已复制节点')
+        } catch {
+          setFeedback('无法复制：选中了不支持的节点类型。')
+        }
+        return
+      }
+
+      if (isPaste) {
+        const snapshot = getClipboardSnapshot()
+        if (snapshot === null || isClipboardEmpty()) return
+        void (async () => {
+          const offset = requestPasteOffset()
+          setNodeBusy(true)
+          try {
+            const result = await currentService.pasteCanvasSubgraph(canvas.id, snapshot, offset)
+            const newFlowNodes = result.nodes.map((node) =>
+              toCanvasFlowNode(
+                node,
+                (id, nodeType, text) => void commitNodeContent(id, nodeType, text),
+                commitNodeName,
+              ),
+            )
+            setFlowNodes((nodes) => [
+              ...nodes.map((node) => (node.selected ? { ...node, selected: false } : node)),
+              ...newFlowNodes.map((n) => ({ ...n, selected: true })),
+            ])
+            setSelectedEdgeId(null)
+            setCanvasEdges((edges) => [...edges, ...result.edges])
+            canvasEdgesRef.current = [...canvasEdgesRef.current, ...result.edges]
+            for (const node of result.nodes) {
+              nodeTargets.current.set(node.id, { id: node.id, type: node.type })
+            }
+            setFeedback(`已粘贴 ${result.nodes.length} 个节点`)
+          } catch {
+            setFeedback('粘贴失败，请重试。')
+          } finally {
+            setNodeBusy(false)
+          }
+        })()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [canvas, canvasId, commitNodeContent, commitNodeName, serviceRef])
 
   async function leaveCanvas(): Promise<void> {
     if (latestViewport.current !== null) await persistViewport(latestViewport.current)

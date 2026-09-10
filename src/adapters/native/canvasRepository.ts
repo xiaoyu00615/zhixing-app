@@ -22,10 +22,11 @@ import {
   CanvasRepositoryError,
   type CanvasRepository,
   type CanvasRepositoryOperation,
-  type CreateCanvasInput,
   type AddCanvasNodeBoxMemberInput,
   type CreateCanvasEdgeInput,
+  type CreateCanvasInput,
   type CreateCanvasNodeInput,
+  type CreateCanvasSubgraphInput,
   type CreateTextNodeInput,
   type DeleteCanvasEdgeInput,
   type DeleteCanvasNodeInput,
@@ -289,6 +290,23 @@ export class NativeCanvasRepository implements CanvasRepository {
       await invokeCanvas('canvas_edge_create', 'createCanvasEdge', { input }),
       'createCanvasEdge',
     )
+  }
+
+  async createCanvasSubgraph(
+    input: CreateCanvasSubgraphInput,
+  ): Promise<{ readonly nodes: readonly CanvasNode[]; readonly edges: readonly CanvasEdge[] }> {
+    const operation = 'createCanvasSubgraph'
+    try {
+      const raw = await invokeCanvas('canvas_subgraph_create', operation, { input })
+      if (!isRecord(raw) || !Array.isArray(raw.nodes) || !Array.isArray(raw.edges)) {
+        throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+      }
+      const nodes: CanvasNode[] = raw.nodes.map((item) => parseNode(item, operation))
+      const edges: CanvasEdge[] = raw.edges.map((item) => parseEdge(item, operation))
+      return { nodes, edges }
+    } catch (error: unknown) {
+      throw mapError(error, operation)
+    }
   }
 
   async addCanvasNodeBoxMember(

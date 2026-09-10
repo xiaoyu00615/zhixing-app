@@ -34,6 +34,7 @@ export interface CreateCanvasNodeInput {
   readonly id: string
   readonly canvasId: string
   readonly type: RegisteredCanvasNodeType
+  readonly nodeName?: string
   readonly content: RegisteredCanvasNodeContent
   readonly x: number
   readonly y: number
@@ -99,6 +100,35 @@ export interface CreateCanvasEdgeInput {
   readonly createdAtMs: number
 }
 
+export interface CreateCanvasSubgraphNodeInput {
+  readonly id: string
+  readonly canvasId: string
+  readonly type: RegisteredCanvasNodeType
+  readonly nodeName: string
+  readonly content: RegisteredCanvasNodeContent
+  readonly x: number
+  readonly y: number
+  readonly createdAtMs: number
+}
+
+export interface CreateCanvasSubgraphEdgeInput {
+  readonly id: string
+  readonly canvasId: string
+  readonly sourceNodeId: string
+  readonly targetNodeId: string
+  readonly relationType: CanvasOrdinaryEdgeRelationType
+  readonly direction: CanvasEdgeDirection
+  readonly lineStyle: CanvasEdgeLineStyle
+  readonly createdAtMs: number
+}
+
+export interface CreateCanvasSubgraphInput {
+  readonly canvasId: string
+  readonly nodes: readonly CreateCanvasSubgraphNodeInput[]
+  readonly edges: readonly CreateCanvasSubgraphEdgeInput[]
+  readonly createdAtMs: number
+}
+
 export interface AddCanvasNodeBoxMemberInput {
   readonly id: string
   readonly canvasId: string
@@ -158,6 +188,10 @@ export interface CanvasRepository {
   moveCanvasNodes(input: MoveCanvasNodesInput): Promise<readonly CanvasNode[]>
   deleteCanvasNode(input: DeleteCanvasNodeInput): Promise<void>
   createCanvasEdge(input: CreateCanvasEdgeInput): Promise<CanvasEdge>
+  createCanvasSubgraph(input: CreateCanvasSubgraphInput): Promise<{
+    readonly nodes: readonly CanvasNode[]
+    readonly edges: readonly CanvasEdge[]
+  }>
   addCanvasNodeBoxMember(input: AddCanvasNodeBoxMemberInput): Promise<CanvasEdge>
   reorderCanvasNodeBoxMemberships(
     input: ReorderCanvasNodeBoxMembershipsInput,

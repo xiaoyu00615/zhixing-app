@@ -260,6 +260,11 @@ export type TaskWorkerRequest =
       readonly type: 'canvas.edge.delete'
       readonly input: DeleteCanvasEdgeInput
     }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.subgraph.create'
+      readonly input: import('@/canvas/repository').CreateCanvasSubgraphInput
+    }
   | { readonly requestId: number; readonly type: 'shutdown' }
 
 export interface TaskWorkerSuccessResponse {
@@ -794,6 +799,18 @@ export function parseTaskWorkerRequest(
             requestId: value.requestId,
             type: value.type,
             input: value.input as unknown as DeleteCanvasEdgeInput,
+          }
+        : null
+    case 'canvas.subgraph.create':
+      return isRecord(value.input) &&
+        isCanonicalCanvasId(value.input.canvasId) &&
+        isCanvasTimestamp(value.input.createdAtMs) &&
+        Array.isArray(value.input.nodes) &&
+        Array.isArray(value.input.edges)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input as unknown as import('@/canvas/repository').CreateCanvasSubgraphInput,
           }
         : null
     default:

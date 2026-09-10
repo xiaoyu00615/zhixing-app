@@ -53,6 +53,7 @@ import type {
   CreateCanvasInput,
   CreateCanvasEdgeInput,
   CreateCanvasNodeInput,
+  CreateCanvasSubgraphInput,
   CreateTextNodeInput,
   DeleteCanvasEdgeInput,
   DeleteCanvasNodeInput,
@@ -810,11 +811,12 @@ export class WebTaskDatabase {
           sql: `INSERT INTO canvas_nodes
                 (id, canvas_id, type, node_name, content_json, x, y,
                  created_at_ms, updated_at_ms)
-                VALUES (?, ?, ?, '', ?, ?, ?, ?, ?)`,
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           bind: [
             input.id,
             input.canvasId,
             input.type,
+            input.nodeName ?? '',
             JSON.stringify(input.content),
             input.x,
             input.y,
@@ -1059,6 +1061,108 @@ export class WebTaskDatabase {
           ],
         })
         return this.requireCanvasEdge(input.id, false)
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  createCanvasSubgraph(input: CreateCanvasSubgraphInput): {
+    readonly nodes: readonly CanvasNode[]
+    readonly edges: readonly CanvasEdge[]
+  } {
+    if (!isCanonicalCanvasId(input.canvasId) || !isNonNegativeSafeIntegerMilliseconds(input.createdAtMs)) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    if (input.nodes.length === 0) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    const nodeIdSet = new Set<string>()
+    for (const node of input.nodes) {
+      if (
+        !isCanonicalCanvasId(node.id) ||
+        node.canvasId !== input.canvasId ||
+        !isPersistedCanvasNodeName(node.nodeName) ||
+        !isCanvasCoordinate(node.x) ||
+        !isCanvasCoordinate(node.y) ||
+        !isNonNegativeSafeIntegerMilliseconds(node.createdAtMs)
+      ) {
+        throw new TaskDatabaseError('PERSISTENCE_FAILED')
+      }
+      if (nodeIdSet.has(node.id)) {
+        throw new TaskDatabaseError('PERSISTENCE_FAILED')
+      }
+      nodeIdSet.add(node.id)
+    }
+    const edgeIdSet = new Set<string>()
+    for (const edge of input.edges) {
+      if (
+        !isCanonicalCanvasId(edge.id) ||
+        edge.canvasId !== input.canvasId ||
+        !isCanonicalCanvasId(edge.sourceNodeId) ||
+        !isCanonicalCanvasId(edge.targetNodeId) ||
+        edge.sourceNodeId === edge.targetNodeId ||
+        !isCanvasOrdinaryEdgeRelationType(edge.relationType) ||
+        !isCanvasEdgeDirection(edge.direction) ||
+        !isCanvasEdgeLineStyle(edge.lineStyle) ||
+        !isNonNegativeSafeIntegerMilliseconds(edge.createdAtMs)
+      ) {
+        throw new TaskDatabaseError('PERSISTENCE_FAILED')
+      }
+      if (edgeIdSet.has(edge.id)) {
+        throw new TaskDatabaseError('PERSISTENCE_FAILED')
+      }
+      edgeIdSet.add(edge.id)
+    }
+
+    try {
+      return this.#database.transaction(() => {
+        this.requireCanvas(input.canvasId)
+        const resultNodes: CanvasNode[] = []
+        for (const nodeInput of input.nodes) {
+          this.#database.exec({
+            sql: `INSERT INTO canvas_nodes
+                  (id, canvas_id, type, node_name, content_json, x, y,
+                   created_at_ms, updated_at_ms)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            bind: [
+              nodeInput.id,
+              nodeInput.canvasId,
+              nodeInput.type,
+              nodeInput.nodeName,
+              JSON.stringify(nodeInput.content),
+              nodeInput.x,
+              nodeInput.y,
+              nodeInput.createdAtMs,
+              nodeInput.createdAtMs,
+            ],
+          })
+          resultNodes.push(this.requireCanvasNode(nodeInput.id))
+        }
+        const resultEdges: CanvasEdge[] = []
+        for (const edgeInput of input.edges) {
+          this.#database.exec({
+            sql: `INSERT INTO canvas_edges
+                  (id, canvas_id, source_node_id, target_node_id, relation_type,
+                   direction, line_style, membership_position, created_at_ms, updated_at_ms,
+                   deleted_at_ms)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)`,
+            bind: [
+              edgeInput.id,
+              edgeInput.canvasId,
+              edgeInput.sourceNodeId,
+              edgeInput.targetNodeId,
+              edgeInput.relationType,
+              edgeInput.direction,
+              edgeInput.lineStyle,
+              edgeInput.createdAtMs,
+              edgeInput.createdAtMs,
+            ],
+          })
+          resultEdges.push(this.requireCanvasEdge(edgeInput.id, false))
+        }
+        return { nodes: resultNodes, edges: resultEdges }
       })
     } catch (error: unknown) {
       if (error instanceof TaskDatabaseError) throw error

@@ -45,6 +45,7 @@ class CanvasWorker implements TaskWorkerEndpoint {
       case 'canvas.edge.setLineStyle': return this.backend.updateCanvasEdgeLineStyle(request.input)
       case 'canvas.edge.setRelationType': return this.backend.updateCanvasEdgeRelationType(request.input)
       case 'canvas.edge.delete': return this.backend.deleteCanvasEdge(request.input)
+      case 'canvas.subgraph.create': return this.backend.createCanvasSubgraph(request.input)
       default: throw new Error(`Unexpected request ${request.type}`)
     }
   }

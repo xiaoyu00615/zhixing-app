@@ -36,6 +36,53 @@ export const canvasNodeRegistry = createCanvasNodeRegistry([
 
 export type CanvasFlowNode = Node<Record<string, unknown>, string>
 
+export function canvasFlowNodeToCanvasNode(
+  fn: CanvasFlowNode,
+  canvasId: string,
+  nowMs: number,
+): CanvasNode {
+  const flowType = fn.type
+  let domainType: CanvasNode['type']
+  if (flowType === 'textCanvas') domainType = 'text'
+  else if (flowType === 'stickyCanvas') domainType = 'sticky'
+  else if (flowType === 'nodeBoxCanvas') domainType = 'node_box'
+  else if (flowType === 'unsupportedCanvas') domainType = 'unknown'
+  else domainType = 'unknown'
+
+  const nodeData = fn.data
+  if (domainType === 'text') {
+    return {
+      id: fn.id, canvasId, type: 'text',
+      nodeName: nodeData.nodeName as string,
+      content: { type: 'text' as const, text: nodeData.text as string },
+      x: fn.position.x, y: fn.position.y, createdAtMs: nowMs, updatedAtMs: nowMs,
+    }
+  }
+  if (domainType === 'sticky') {
+    return {
+      id: fn.id, canvasId, type: 'sticky',
+      nodeName: nodeData.nodeName as string,
+      content: { type: 'sticky' as const, text: nodeData.text as string },
+      x: fn.position.x, y: fn.position.y, createdAtMs: nowMs, updatedAtMs: nowMs,
+    }
+  }
+  if (domainType === 'node_box') {
+    return {
+      id: fn.id, canvasId, type: 'node_box',
+      nodeName: nodeData.nodeName as string,
+      content: { type: 'node_box' as const },
+      x: fn.position.x, y: fn.position.y, createdAtMs: nowMs, updatedAtMs: nowMs,
+    } as unknown as CanvasNode
+  }
+  return {
+    id: fn.id, canvasId, type: 'unknown',
+    originalType: nodeData.originalType as string,
+    nodeName: nodeData.nodeName as string,
+    content: { type: 'unknown' as const, raw: nodeData.originalType },
+    x: fn.position.x, y: fn.position.y, createdAtMs: nowMs, updatedAtMs: nowMs,
+  } as unknown as CanvasNode
+}
+
 export function toCanvasFlowNode(
   node: CanvasNode,
   onCommit: (id: string, type: RegisteredCanvasNodeType, text: string) => void,

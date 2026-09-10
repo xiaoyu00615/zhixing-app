@@ -431,6 +431,14 @@ export class TaskWorkerClient {
     }))
   }
 
+  createCanvasSubgraph(input: import('@/canvas/repository').CreateCanvasSubgraphInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.subgraph.create',
+      input,
+    }))
+  }
+
   async shutdown(): Promise<void> {
     if (this.#terminated) {
       return
