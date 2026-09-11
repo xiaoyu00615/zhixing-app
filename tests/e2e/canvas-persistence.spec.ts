@@ -39,6 +39,10 @@ interface CanvasHarness {
   moveCanvasNode(input: object): Promise<unknown>
   moveCanvasNodes(input: object): Promise<readonly Record<string, unknown>[]>
   createCanvasEdge(input: object): Promise<Record<string, unknown>>
+  createCanvasSubgraph(input: object): Promise<{
+    readonly nodes: readonly Record<string, unknown>[]
+    readonly edges: readonly Record<string, unknown>[]
+  }>
   addCanvasNodeBoxMember(input: object): Promise<Record<string, unknown>>
   reorderCanvasNodeBoxMemberships(input: object): Promise<readonly Record<string, unknown>[]>
   listCanvasEdges(canvasId: string): Promise<readonly Record<string, unknown>[]>
@@ -120,6 +124,15 @@ const NODE_MENU_BOX_ID = '00000000-0000-4000-8000-000000001304'
 const NODE_MENU_EDGE_ID = '00000000-0000-4000-8000-000000001305'
 const NODE_MENU_ORDERED_ID = '00000000-0000-4000-8000-000000001306'
 const NODE_MENU_UNORDERED_ID = '00000000-0000-4000-8000-000000001307'
+const SUBGRAPH_CANVAS_ID = '00000000-0000-4000-8000-000000001401'
+const SUBGRAPH_BOX_ID = '00000000-0000-4000-8000-000000001402'
+const SUBGRAPH_TEXT_ID = '00000000-0000-4000-8000-000000001403'
+const SUBGRAPH_STICKY_ID = '00000000-0000-4000-8000-000000001404'
+const SUBGRAPH_ORDINARY_EDGE_ID = '00000000-0000-4000-8000-000000001405'
+const SUBGRAPH_ORDERED_EDGE_ID = '00000000-0000-4000-8000-000000001406'
+const SUBGRAPH_UNORDERED_EDGE_ID = '00000000-0000-4000-8000-000000001407'
+const ROLLBACK_CANVAS_ID = '00000000-0000-4000-8000-000000001411'
+const ROLLBACK_SURVIVOR_ID = '00000000-0000-4000-8000-000000001412'
 
 async function openHarnessPage(context: BrowserContext, baseURL: string): Promise<Page> {
   const page = context.pages()[0] ?? await context.newPage()
@@ -1466,6 +1479,185 @@ test('opens Node context menus and persists atomic soft delete across restart', 
     await expect(node(NODE_MENU_TEXT_ID)).toHaveCount(0)
     await expect(node(NODE_MENU_BOX_ID)).toHaveCount(0)
     await page.screenshot({ path: testInfo.outputPath('07-restart-soft-delete-restored.png') })
+  } finally {
+    await context?.close()
+    await rm(profilePath, { recursive: true, force: true })
+  }
+})
+
+test('Slice 10B: Web subgraph batch persists Node Box memberships atomically', async ({ browserName }, testInfo) => {
+  test.setTimeout(150_000)
+  expect(browserName).toBe('chromium')
+  const baseURL = testInfo.project.use.baseURL
+  if (typeof baseURL !== 'string') throw new Error('Playwright baseURL is required.')
+  const profilePath = testInfo.outputPath('canvas-10b-subgraph-browser-profile')
+  const outputRoot = resolve(testInfo.outputDir)
+  const resolvedProfile = resolve(profilePath)
+  if (!resolvedProfile.startsWith(`${outputRoot}${sep}`)) throw new Error('Unsafe test profile path.')
+
+  let context: BrowserContext | null = null
+  try {
+    context = await chromium.launchPersistentContext(profilePath, {
+      channel: 'chromium',
+      headless: true,
+      viewport: { width: 1920, height: 1080 },
+    })
+    const page = await openHarnessPage(context, baseURL)
+    const result = await page.evaluate(async (ids) => {
+      const harness = (window as unknown as HarnessWindow).__taskPersistenceHarness
+      await harness.createCanvas({ id: ids.canvasId, title: '10B Subgraph', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 700 })
+      return harness.createCanvasSubgraph({
+        canvasId: ids.canvasId,
+        nodes: [
+          { id: ids.boxId, canvasId: ids.canvasId, type: 'node_box', nodeName: '研究盒', content: { type: 'node_box' }, x: 300, y: 120, createdAtMs: 710 },
+          { id: ids.textId, canvasId: ids.canvasId, type: 'text', nodeName: '问题', content: { type: 'text', text: '问题' }, x: 80, y: 300, createdAtMs: 711 },
+          { id: ids.stickyId, canvasId: ids.canvasId, type: 'sticky', nodeName: '参考', content: { type: 'sticky', text: '参考' }, x: 520, y: 300, createdAtMs: 712 },
+        ],
+        edges: [
+          { id: ids.ordinaryEdgeId, canvasId: ids.canvasId, sourceNodeId: ids.textId, targetNodeId: ids.boxId, relationType: 'hierarchy', direction: 'forward', lineStyle: 'solid', createdAtMs: 720 },
+        ],
+        memberships: [
+          { id: ids.orderedEdgeId, canvasId: ids.canvasId, sourceNodeId: ids.textId, targetNodeId: ids.boxId, relationType: 'ordered_box_member', membershipPosition: 0, createdAtMs: 721 },
+          { id: ids.unorderedEdgeId, canvasId: ids.canvasId, sourceNodeId: ids.stickyId, targetNodeId: ids.boxId, relationType: 'unordered_box_member', membershipPosition: 0, createdAtMs: 722 },
+        ],
+        createdAtMs: 710,
+      })
+    }, {
+      canvasId: SUBGRAPH_CANVAS_ID,
+      boxId: SUBGRAPH_BOX_ID,
+      textId: SUBGRAPH_TEXT_ID,
+      stickyId: SUBGRAPH_STICKY_ID,
+      ordinaryEdgeId: SUBGRAPH_ORDINARY_EDGE_ID,
+      orderedEdgeId: SUBGRAPH_ORDERED_EDGE_ID,
+      unorderedEdgeId: SUBGRAPH_UNORDERED_EDGE_ID,
+    })
+    expect(result.nodes).toHaveLength(3)
+    expect(result.edges).toHaveLength(3)
+    expect(result.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: SUBGRAPH_ORDINARY_EDGE_ID, relationType: 'hierarchy', membershipPosition: null }),
+      expect.objectContaining({ id: SUBGRAPH_ORDERED_EDGE_ID, relationType: 'ordered_box_member', direction: 'forward', lineStyle: 'solid', membershipPosition: 0 }),
+      expect.objectContaining({ id: SUBGRAPH_UNORDERED_EDGE_ID, relationType: 'unordered_box_member', direction: 'forward', lineStyle: 'solid', membershipPosition: 0 }),
+    ]))
+
+    const persisted = await page.evaluate(async (canvasId) => {
+      const harness = (window as unknown as HarnessWindow).__taskPersistenceHarness
+      return {
+        nodes: await harness.listCanvasNodes(canvasId),
+        edges: await harness.listCanvasEdges(canvasId),
+      }
+    }, SUBGRAPH_CANVAS_ID)
+    expect(persisted.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: SUBGRAPH_BOX_ID, type: 'node_box', content: { type: 'node_box' } }),
+      expect.objectContaining({ id: SUBGRAPH_TEXT_ID }),
+      expect.objectContaining({ id: SUBGRAPH_STICKY_ID }),
+    ]))
+    expect(persisted.edges).toHaveLength(3)
+
+    // Reload persistence: everything must survive restart.
+    await page.evaluate(() =>
+      (window as unknown as HarnessWindow).__taskPersistenceHarness.shutdown(),
+    )
+    await page.reload()
+    await page.waitForFunction(() => '__taskPersistenceHarness' in window)
+    const afterRestart = await page.evaluate(async (canvasId) => {
+      const harness = (window as unknown as HarnessWindow).__taskPersistenceHarness
+      return {
+        nodes: await harness.listCanvasNodes(canvasId),
+        edges: await harness.listCanvasEdges(canvasId),
+      }
+    }, SUBGRAPH_CANVAS_ID)
+    expect(afterRestart.nodes).toHaveLength(3)
+    expect(afterRestart.edges).toHaveLength(3)
+    expect(afterRestart.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: SUBGRAPH_ORDERED_EDGE_ID, membershipPosition: 0 }),
+      expect.objectContaining({ id: SUBGRAPH_UNORDERED_EDGE_ID, membershipPosition: 0 }),
+    ]))
+  } finally {
+    await context?.close()
+    await rm(profilePath, { recursive: true, force: true })
+  }
+})
+
+test('Slice 10B: failed Web membership batches roll back every node and edge', async ({ browserName }, testInfo) => {
+  test.setTimeout(150_000)
+  expect(browserName).toBe('chromium')
+  const baseURL = testInfo.project.use.baseURL
+  if (typeof baseURL !== 'string') throw new Error('Playwright baseURL is required.')
+  const profilePath = testInfo.outputPath('canvas-10b-rollback-browser-profile')
+  const outputRoot = resolve(testInfo.outputDir)
+  const resolvedProfile = resolve(profilePath)
+  if (!resolvedProfile.startsWith(`${outputRoot}${sep}`)) throw new Error('Unsafe test profile path.')
+
+  let context: BrowserContext | null = null
+  try {
+    context = await chromium.launchPersistentContext(profilePath, {
+      channel: 'chromium',
+      headless: true,
+      viewport: { width: 1920, height: 1080 },
+    })
+    const page = await openHarnessPage(context, baseURL)
+    const audit = await page.evaluate(async (ids) => {
+      const harness = (window as unknown as HarnessWindow).__taskPersistenceHarness
+      await harness.createCanvas({ id: ids.canvasId, title: '10B Rollback', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 800 })
+      await harness.createTextNode({ id: ids.survivorId, canvasId: ids.canvasId, content: { type: 'text', text: 'Survivor' }, x: 0, y: 0, createdAtMs: 801 })
+
+      const baseBatch = {
+        canvasId: ids.canvasId,
+        nodes: [
+          { id: '00000000-0000-4000-8000-000000001421', canvasId: ids.canvasId, type: 'node_box' as const, nodeName: '盒', content: { type: 'node_box' as const }, x: 100, y: 100, createdAtMs: 810 },
+          { id: '00000000-0000-4000-8000-000000001422', canvasId: ids.canvasId, type: 'text' as const, nodeName: '成员', content: { type: 'text' as const, text: '成员' }, x: 200, y: 200, createdAtMs: 811 },
+        ],
+        edges: [
+          { id: '00000000-0000-4000-8000-000000001423', canvasId: ids.canvasId, sourceNodeId: '00000000-0000-4000-8000-000000001422', targetNodeId: '00000000-0000-4000-8000-000000001421', relationType: 'hierarchy' as const, direction: 'forward' as const, lineStyle: 'solid' as const, createdAtMs: 812 },
+        ],
+        createdAtMs: 810,
+      }
+      const failureCodes: string[] = []
+      // Batch one: the same member+box pair appears in two sections.
+      try {
+        await harness.createCanvasSubgraph({
+          ...baseBatch,
+          memberships: [
+            { id: '00000000-0000-4000-8000-000000001424', canvasId: ids.canvasId, sourceNodeId: '00000000-0000-4000-8000-000000001422', targetNodeId: '00000000-0000-4000-8000-000000001421', relationType: 'ordered_box_member', membershipPosition: 0, createdAtMs: 813 },
+            { id: '00000000-0000-4000-8000-000000001425', canvasId: ids.canvasId, sourceNodeId: '00000000-0000-4000-8000-000000001422', targetNodeId: '00000000-0000-4000-8000-000000001421', relationType: 'unordered_box_member', membershipPosition: 0, createdAtMs: 814 },
+          ],
+        })
+      } catch (error) {
+        failureCodes.push((error as { code?: string }).code ?? 'UNKNOWN')
+      }
+      // Batch two: non-contiguous positions 0 and 2 must also roll back.
+      try {
+        await harness.createCanvasSubgraph({
+          ...baseBatch,
+          nodes: [
+            ...baseBatch.nodes,
+            { id: '00000000-0000-4000-8000-000000001442', canvasId: ids.canvasId, type: 'text' as const, nodeName: '成员二', content: { type: 'text' as const, text: '成员二' }, x: 240, y: 240, createdAtMs: 817 },
+          ],
+          edges: [
+            { ...baseBatch.edges[0]!, id: '00000000-0000-4000-8000-000000001433' },
+          ],
+          memberships: [
+            { id: '00000000-0000-4000-8000-000000001434', canvasId: ids.canvasId, sourceNodeId: '00000000-0000-4000-8000-000000001422', targetNodeId: '00000000-0000-4000-8000-000000001421', relationType: 'ordered_box_member', membershipPosition: 0, createdAtMs: 815 },
+            { id: '00000000-0000-4000-8000-000000001435', canvasId: ids.canvasId, sourceNodeId: '00000000-0000-4000-8000-000000001442', targetNodeId: '00000000-0000-4000-8000-000000001421', relationType: 'ordered_box_member', membershipPosition: 2, createdAtMs: 816 },
+          ],
+        })
+      } catch (error) {
+        failureCodes.push((error as { code?: string }).code ?? 'UNKNOWN')
+      }
+      return {
+        failureCodes,
+        nodes: await harness.listCanvasNodes(ids.canvasId),
+        edges: await harness.listCanvasEdges(ids.canvasId),
+      }
+    }, {
+      canvasId: ROLLBACK_CANVAS_ID,
+      survivorId: ROLLBACK_SURVIVOR_ID,
+    })
+    expect(audit.failureCodes).toEqual(['PERSISTENCE_FAILED', 'PERSISTENCE_FAILED'])
+    expect(audit.nodes).toEqual([
+      expect.objectContaining({ id: ROLLBACK_SURVIVOR_ID }),
+    ])
+    expect(audit.edges).toEqual([])
   } finally {
     await context?.close()
     await rm(profilePath, { recursive: true, force: true })

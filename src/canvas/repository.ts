@@ -122,10 +122,21 @@ export interface CreateCanvasSubgraphEdgeInput {
   readonly createdAtMs: number
 }
 
+export interface CreateCanvasSubgraphMembershipInput {
+  readonly id: string
+  readonly canvasId: string
+  readonly sourceNodeId: string
+  readonly targetNodeId: string
+  readonly relationType: CanvasMembershipRelationType
+  readonly membershipPosition: number
+  readonly createdAtMs: number
+}
+
 export interface CreateCanvasSubgraphInput {
   readonly canvasId: string
   readonly nodes: readonly CreateCanvasSubgraphNodeInput[]
   readonly edges: readonly CreateCanvasSubgraphEdgeInput[]
+  readonly memberships: readonly CreateCanvasSubgraphMembershipInput[]
   readonly createdAtMs: number
 }
 

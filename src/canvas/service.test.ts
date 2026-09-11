@@ -590,6 +590,7 @@ describe('CanvasService', () => {
       edges: [
         { id: EDGE_ID, sourceNodeId: NODE_ID, targetNodeId: TARGET_NODE_ID, relationType: 'hierarchy', direction: 'bidirectional', lineStyle: 'dashed' },
       ],
+      memberships: [],
     }
     const result = await service.pasteCanvasSubgraph(CANVAS_ID, snapshot, 32)
     expect(result.nodes).toHaveLength(2)
@@ -611,7 +612,174 @@ describe('CanvasService', () => {
       sourceCanvasId: '00000000-0000-4000-8000-000000009999',
       nodes: [],
       edges: [],
+      memberships: [],
     }
     await expect(service.pasteCanvasSubgraph(CANVAS_ID, snapshot, 0)).rejects.toMatchObject({ code: 'CONFLICT', field: 'canvasId' })
+  })
+
+  describe('Slice 10B Node Box paste', () => {
+    type SubgraphInput = Parameters<CanvasRepository['createCanvasSubgraph']>[0]
+    const echoSubgraph = (repository: CanvasRepository) => {
+      const mock = vi.fn((input: SubgraphInput) => {
+        const nodes: CanvasNode[] = input.nodes.map((node) => ({
+          ...node,
+          updatedAtMs: node.createdAtMs,
+        }) as CanvasNode)
+        const edges: CanvasEdge[] = [
+          ...input.edges.map((edge) => ({
+            ...edge,
+            membershipPosition: null,
+            updatedAtMs: edge.createdAtMs,
+            deletedAtMs: null,
+          })),
+          ...input.memberships.map((membership) => ({
+            id: membership.id,
+            canvasId: membership.canvasId,
+            sourceNodeId: membership.sourceNodeId,
+            targetNodeId: membership.targetNodeId,
+            relationType: membership.relationType,
+            direction: 'forward' as const,
+            lineStyle: 'solid' as const,
+            membershipPosition: membership.membershipPosition,
+            createdAtMs: membership.createdAtMs,
+            updatedAtMs: membership.createdAtMs,
+            deletedAtMs: null,
+          })),
+        ]
+        return Promise.resolve({ nodes, edges })
+      })
+      repository.createCanvasSubgraph = mock
+      return mock
+    }
+
+    test('pastes an empty Node Box with an empty memberships batch', async () => {
+      const { repository } = fixture()
+      const service = createCanvasService({
+        repository,
+        nowMs: () => 200,
+        generateId: () => '00000000-0000-4000-8000-000000000a01',
+      })
+      const createSubgraph = echoSubgraph(repository)
+      const snapshot: CanvasClipboardSnapshot = {
+        sourceCanvasId: CANVAS_ID,
+        nodes: [
+          { id: SECOND_BOX_ID, type: 'node_box', nodeName: '盒子', content: { type: 'node_box' }, x: 10, y: 20 },
+        ],
+        edges: [],
+        memberships: [],
+      }
+      const result = await service.pasteCanvasSubgraph(CANVAS_ID, snapshot, 32)
+      expect(result.nodes).toEqual([
+        expect.objectContaining({ type: 'node_box', nodeName: '盒子', content: { type: 'node_box' }, x: 42, y: 52 }),
+      ])
+      expect(result.edges).toEqual([])
+      const batch = createSubgraph.mock.calls[0]![0]
+      expect(batch.memberships).toEqual([])
+    })
+
+    test('remaps memberships to new nodes and normalizes gapped positions to 0..N-1', async () => {
+      const { repository } = fixture()
+      const ids = [
+        '00000000-0000-4000-8000-000000000a11', // new box
+        '00000000-0000-4000-8000-000000000a12', // new member A
+        '00000000-0000-4000-8000-000000000a13', // new member C
+        '00000000-0000-4000-8000-000000000a14', // new membership A
+        '00000000-0000-4000-8000-000000000a15', // new membership C
+      ]
+      const service = createCanvasService({
+        repository,
+        nowMs: () => 200,
+        generateId: () => ids.shift()!,
+      })
+      const createSubgraph = echoSubgraph(repository)
+      const boxId = '00000000-0000-4000-8000-000000000a21'
+      const memberA = '00000000-0000-4000-8000-000000000a22'
+      const memberC = '00000000-0000-4000-8000-000000000a23'
+      const edgeA = '00000000-0000-4000-8000-000000000a24'
+      const edgeC = '00000000-0000-4000-8000-000000000a25'
+      const snapshot: CanvasClipboardSnapshot = {
+        sourceCanvasId: CANVAS_ID,
+        nodes: [
+          { id: boxId, type: 'node_box', nodeName: '', content: { type: 'node_box' }, x: 0, y: 0 },
+          { id: memberA, type: 'text', nodeName: 'A', content: { type: 'text', text: 'A' }, x: 10, y: 10 },
+          { id: memberC, type: 'sticky', nodeName: 'C', content: { type: 'sticky', text: 'C' }, x: 20, y: 20 },
+        ],
+        edges: [],
+        memberships: [
+          { id: edgeA, sourceNodeId: memberA, targetNodeId: boxId, relationType: 'ordered_box_member', membershipPosition: 0 },
+          { id: edgeC, sourceNodeId: memberC, targetNodeId: boxId, relationType: 'ordered_box_member', membershipPosition: 5 },
+        ],
+      }
+      const result = await service.pasteCanvasSubgraph(CANVAS_ID, snapshot, 0)
+      const batch = createSubgraph.mock.calls[0]![0]
+      expect(batch.memberships).toHaveLength(2)
+      expect(batch.memberships).toEqual([
+        expect.objectContaining({
+          id: '00000000-0000-4000-8000-000000000a14',
+          sourceNodeId: '00000000-0000-4000-8000-000000000a12',
+          targetNodeId: '00000000-0000-4000-8000-000000000a11',
+          relationType: 'ordered_box_member',
+          membershipPosition: 0,
+        }),
+        expect.objectContaining({
+          id: '00000000-0000-4000-8000-000000000a15',
+          sourceNodeId: '00000000-0000-4000-8000-000000000a13',
+          targetNodeId: '00000000-0000-4000-8000-000000000a11',
+          membershipPosition: 1,
+        }),
+      ])
+      // Membership endpoints never reference the original nodes.
+      for (const membership of batch.memberships) {
+        expect(membership.sourceNodeId).not.toBe(memberA)
+        expect(membership.sourceNodeId).not.toBe(memberC)
+        expect(membership.targetNodeId).not.toBe(boxId)
+        expect(new Set(batch.nodes.map((node) => node.id)).has(membership.sourceNodeId)).toBe(true)
+        expect(new Set(batch.nodes.map((node) => node.id)).has(membership.targetNodeId)).toBe(true)
+      }
+      expect(result.edges).toHaveLength(2)
+      expect(result.edges.map((edge) => edge.membershipPosition).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([0, 1])
+      expect(createSubgraph).toHaveBeenCalledOnce()
+      // Source snapshot keeps its original gapped positions.
+      expect(snapshot.memberships.map((membership) => membership.membershipPosition)).toEqual([0, 5])
+    })
+
+    test('normalizes membership positions independently for multiple target Boxes', async () => {
+      const { repository } = fixture()
+      const ids = [
+        '00000000-0000-4000-8000-000000000a31', // box X
+        '00000000-0000-4000-8000-000000000a32', // box Y
+        '00000000-0000-4000-8000-000000000a33', // member A
+        '00000000-0000-4000-8000-000000000a34', // membership A->X
+        '00000000-0000-4000-8000-000000000a35', // membership A->Y
+      ]
+      const service = createCanvasService({
+        repository,
+        nowMs: () => 200,
+        generateId: () => ids.shift()!,
+      })
+      const createSubgraph = echoSubgraph(repository)
+      const boxX = '00000000-0000-4000-8000-000000000a41'
+      const boxY = '00000000-0000-4000-8000-000000000a42'
+      const memberA = '00000000-0000-4000-8000-000000000a43'
+      const snapshot: CanvasClipboardSnapshot = {
+        sourceCanvasId: CANVAS_ID,
+        nodes: [
+          { id: boxX, type: 'node_box', nodeName: 'X', content: { type: 'node_box' }, x: 0, y: 0 },
+          { id: boxY, type: 'node_box', nodeName: 'Y', content: { type: 'node_box' }, x: 100, y: 0 },
+          { id: memberA, type: 'text', nodeName: 'A', content: { type: 'text', text: 'A' }, x: 0, y: 100 },
+        ],
+        edges: [],
+        memberships: [
+          { id: '00000000-0000-4000-8000-000000000a44', sourceNodeId: memberA, targetNodeId: boxX, relationType: 'ordered_box_member', membershipPosition: 2 },
+          { id: '00000000-0000-4000-8000-000000000a45', sourceNodeId: memberA, targetNodeId: boxY, relationType: 'ordered_box_member', membershipPosition: 4 },
+        ],
+      }
+      await service.pasteCanvasSubgraph(CANVAS_ID, snapshot, 0)
+      const batch = createSubgraph.mock.calls[0]![0]
+      expect(batch.memberships).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: '00000000-0000-4000-8000-000000000a34', targetNodeId: '00000000-0000-4000-8000-000000000a31', membershipPosition: 0 }),
+        expect.objectContaining({ id: '00000000-0000-4000-8000-000000000a35', targetNodeId: '00000000-0000-4000-8000-000000000a32', membershipPosition: 0 }),
+      ]))
+    })
   })
 })

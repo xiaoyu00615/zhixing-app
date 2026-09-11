@@ -28,6 +28,7 @@ import type {
   CreateCanvasInput,
   CreateCanvasNodeInput,
   CreateCanvasEdgeInput,
+  CreateCanvasSubgraphInput,
   CreateTextNodeInput,
   DeleteCanvasEdgeInput,
   DeleteCanvasNodeInput,
@@ -105,6 +106,9 @@ interface PersistenceHarness {
   moveCanvasNode(input: MoveCanvasNodeInput): Promise<CanvasNode>
   moveCanvasNodes(input: MoveCanvasNodesInput): Promise<readonly CanvasNode[]>
   createCanvasEdge(input: CreateCanvasEdgeInput): Promise<CanvasEdge>
+  createCanvasSubgraph(
+    input: CreateCanvasSubgraphInput,
+  ): Promise<{ readonly nodes: readonly CanvasNode[]; readonly edges: readonly CanvasEdge[] }>
   addCanvasNodeBoxMember(input: AddCanvasNodeBoxMemberInput): Promise<CanvasEdge>
   reorderCanvasNodeBoxMemberships(
     input: ReorderCanvasNodeBoxMembershipsInput,
@@ -460,6 +464,9 @@ window.__taskPersistenceHarness = {
   },
   async createCanvasEdge(input) {
     return (await requireCanvasRepository()).createCanvasEdge(input)
+  },
+  async createCanvasSubgraph(input) {
+    return (await requireCanvasRepository()).createCanvasSubgraph(input)
   },
   async addCanvasNodeBoxMember(input) {
     return (await requireCanvasRepository()).addCanvasNodeBoxMember(input)

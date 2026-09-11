@@ -217,6 +217,10 @@ export class CanvasContractBackend implements CanvasRepository {
     await this.getCanvas(input.canvasId)
     const resultNodes: CanvasNode[] = []
     const resultEdges: CanvasEdge[] = []
+    const rollBack = (): void => {
+      for (const edge of resultEdges) this.edges.delete(edge.id)
+      for (const node of resultNodes) this.nodes.delete(node.id)
+    }
     for (const nodeInput of input.nodes) {
       if (nodeInput.canvasId !== input.canvasId) {
         throw new CanvasRepositoryError('NOT_FOUND', 'createCanvasSubgraph')
@@ -229,21 +233,88 @@ export class CanvasContractBackend implements CanvasRepository {
       this.nodes.set(node.id, node)
       resultNodes.push(node)
     }
+    const batchNodeIds = new Set(resultNodes.map((node) => node.id))
     for (const edgeInput of input.edges) {
       if (edgeInput.canvasId !== input.canvasId) {
+        rollBack()
         throw new CanvasRepositoryError('NOT_FOUND', 'createCanvasSubgraph')
       }
       const source = this.nodes.get(edgeInput.sourceNodeId)
       const target = this.nodes.get(edgeInput.targetNodeId)
       if (source === undefined || target === undefined) {
-        // Roll back all previously created records in this batch.
-        for (const n of resultNodes) this.nodes.delete(n.id)
+        rollBack()
         throw new CanvasRepositoryError('NOT_FOUND', 'createCanvasSubgraph')
       }
       const edge: CanvasEdge = {
         ...edgeInput,
         membershipPosition: null,
         updatedAtMs: edgeInput.createdAtMs,
+        deletedAtMs: null,
+      }
+      this.edges.set(edge.id, edge)
+      resultEdges.push(edge)
+    }
+    const membershipPairs = new Set<string>()
+    const membershipGroups = new Map<string, number[]>()
+    for (const membershipInput of input.memberships) {
+      if (membershipInput.canvasId !== input.canvasId) {
+        rollBack()
+        throw new CanvasRepositoryError('NOT_FOUND', 'createCanvasSubgraph')
+      }
+      if (
+        !batchNodeIds.has(membershipInput.sourceNodeId) ||
+        !batchNodeIds.has(membershipInput.targetNodeId)
+      ) {
+        rollBack()
+        throw new CanvasRepositoryError('PERSISTENCE_FAILED', 'createCanvasSubgraph')
+      }
+      const source = this.nodes.get(membershipInput.sourceNodeId)
+      const target = this.nodes.get(membershipInput.targetNodeId)
+      if (source === undefined || target === undefined) {
+        rollBack()
+        throw new CanvasRepositoryError('NOT_FOUND', 'createCanvasSubgraph')
+      }
+      if (source.type === 'node_box' || target.type !== 'node_box') {
+        rollBack()
+        throw new CanvasRepositoryError('PERSISTENCE_FAILED', 'createCanvasSubgraph')
+      }
+      if (!Number.isSafeInteger(membershipInput.membershipPosition) || membershipInput.membershipPosition < 0) {
+        rollBack()
+        throw new CanvasRepositoryError('PERSISTENCE_FAILED', 'createCanvasSubgraph')
+      }
+      const pairKey = `${membershipInput.sourceNodeId} ${membershipInput.targetNodeId}`
+      if (membershipPairs.has(pairKey)) {
+        rollBack()
+        throw new CanvasRepositoryError('PERSISTENCE_FAILED', 'createCanvasSubgraph')
+      }
+      membershipPairs.add(pairKey)
+      const groupKey = `${membershipInput.targetNodeId}|${membershipInput.relationType}`
+      const group = membershipGroups.get(groupKey)
+      if (group === undefined) {
+        membershipGroups.set(groupKey, [membershipInput.membershipPosition])
+      } else {
+        group.push(membershipInput.membershipPosition)
+      }
+    }
+    for (const positions of membershipGroups.values()) {
+      const sorted = [...positions].sort((left, right) => left - right)
+      if (sorted.some((position, expected) => position !== expected)) {
+        rollBack()
+        throw new CanvasRepositoryError('PERSISTENCE_FAILED', 'createCanvasSubgraph')
+      }
+    }
+    for (const membershipInput of input.memberships) {
+      const edge: CanvasEdge = {
+        id: membershipInput.id,
+        canvasId: membershipInput.canvasId,
+        sourceNodeId: membershipInput.sourceNodeId,
+        targetNodeId: membershipInput.targetNodeId,
+        relationType: membershipInput.relationType,
+        direction: 'forward',
+        lineStyle: 'solid',
+        membershipPosition: membershipInput.membershipPosition,
+        createdAtMs: membershipInput.createdAtMs,
+        updatedAtMs: membershipInput.createdAtMs,
         deletedAtMs: null,
       }
       this.edges.set(edge.id, edge)
@@ -825,6 +896,7 @@ export function defineCanvasRepositoryContract(
         edges: [
           { id: batchEdgeId, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: batchIdA, targetNodeId: batchIdB, relationType: 'hierarchy', direction: 'bidirectional', lineStyle: 'dashed', createdAtMs: 102 },
         ],
+        memberships: [],
         createdAtMs: 100,
       })
 
@@ -865,6 +937,7 @@ export function defineCanvasRepositoryContract(
         edges: [
           { id: edgeAB, canvasId: CONTRACT_CANVAS_ID, sourceNodeId: nodeA, targetNodeId: badNodeId, relationType: 'default', direction: 'forward', lineStyle: 'solid', createdAtMs: 52 },
         ],
+        memberships: [],
         createdAtMs: 50,
       })).rejects.toMatchObject({ code: 'NOT_FOUND', operation: 'createCanvasSubgraph' })
 
@@ -875,6 +948,316 @@ export function defineCanvasRepositoryContract(
       expect(backend.nodes.get(nodeA)).toBeUndefined()
       expect(backend.nodes.get(nodeB)).toBeUndefined()
       expect(backend.edges.get(edgeAB)).toBeUndefined()
+    })
+
+    describe('Slice 10B Node Box membership subgraphs', () => {
+      type SubgraphNode = CreateCanvasSubgraphInput['nodes'][number]
+      type SubgraphEdge = CreateCanvasSubgraphInput['edges'][number]
+      type SubgraphMembership = CreateCanvasSubgraphInput['memberships'][number]
+      const textNode = (id: string, x = 0, y = 0): SubgraphNode => ({
+        id, canvasId: CONTRACT_CANVAS_ID, type: 'text', nodeName: '',
+        content: { type: 'text', text: id }, x, y, createdAtMs: 100,
+      })
+      const boxNode = (id: string, x = 0, y = 0): SubgraphNode => ({
+        id, canvasId: CONTRACT_CANVAS_ID, type: 'node_box', nodeName: '',
+        content: { type: 'node_box' }, x, y, createdAtMs: 100,
+      })
+      const ordinaryEdge = (id: string, sourceNodeId: string, targetNodeId: string): SubgraphEdge => ({
+        id, canvasId: CONTRACT_CANVAS_ID, sourceNodeId, targetNodeId,
+        relationType: 'hierarchy', direction: 'forward', lineStyle: 'solid', createdAtMs: 200,
+      })
+      const membership = (
+        id: string,
+        sourceNodeId: string,
+        targetNodeId: string,
+        relationType: SubgraphMembership['relationType'],
+        membershipPosition: number,
+      ): SubgraphMembership => ({
+        id, canvasId: CONTRACT_CANVAS_ID, sourceNodeId, targetNodeId,
+        relationType, membershipPosition, createdAtMs: 200,
+      })
+
+      test('pastes an empty Node Box without memberships', async () => {
+        const { repository } = createFixture()
+        await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+        const boxId = '00000000-0000-4000-8000-000000000801'
+        const result = await repository.createCanvasSubgraph({
+          canvasId: CONTRACT_CANVAS_ID,
+          nodes: [boxNode(boxId)],
+          edges: [],
+          memberships: [],
+          createdAtMs: 100,
+        })
+        expect(result.nodes).toEqual([expect.objectContaining({ id: boxId, type: 'node_box' })])
+        expect(result.edges).toEqual([])
+      })
+
+      test('pastes a Node Box with ordered members and canonical fields', async () => {
+        const { repository } = createFixture()
+        await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+        const boxId = '00000000-0000-4000-8000-000000000811'
+        const memberA = '00000000-0000-4000-8000-000000000812'
+        const memberB = '00000000-0000-4000-8000-000000000813'
+        const edgeA = '00000000-0000-4000-8000-000000000814'
+        const edgeB = '00000000-0000-4000-8000-000000000815'
+        const result = await repository.createCanvasSubgraph({
+          canvasId: CONTRACT_CANVAS_ID,
+          nodes: [boxNode(boxId), textNode(memberA), textNode(memberB)],
+          edges: [],
+          memberships: [
+            membership(edgeA, memberA, boxId, 'ordered_box_member', 0),
+            membership(edgeB, memberB, boxId, 'ordered_box_member', 1),
+          ],
+          createdAtMs: 100,
+        })
+        expect(result.edges).toHaveLength(2)
+        expect(result.edges).toEqual(expect.arrayContaining([
+          expect.objectContaining({ id: edgeA, relationType: 'ordered_box_member', direction: 'forward', lineStyle: 'solid', membershipPosition: 0 }),
+          expect.objectContaining({ id: edgeB, relationType: 'ordered_box_member', membershipPosition: 1 }),
+        ]))
+      })
+
+      test('pastes a Node Box with unordered members', async () => {
+        const { repository } = createFixture()
+        await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+        const boxId = '00000000-0000-4000-8000-000000000821'
+        const memberA = '00000000-0000-4000-8000-000000000822'
+        const edgeA = '00000000-0000-4000-8000-000000000823'
+        const result = await repository.createCanvasSubgraph({
+          canvasId: CONTRACT_CANVAS_ID,
+          nodes: [boxNode(boxId), textNode(memberA)],
+          edges: [],
+          memberships: [membership(edgeA, memberA, boxId, 'unordered_box_member', 0)],
+          createdAtMs: 100,
+        })
+        expect(result.edges).toEqual([
+          expect.objectContaining({ id: edgeA, relationType: 'unordered_box_member', membershipPosition: 0 }),
+        ])
+      })
+
+      test('pastes mixed ordered and unordered sections in one batch', async () => {
+        const { repository } = createFixture()
+        await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+        const boxId = '00000000-0000-4000-8000-000000000831'
+        const orderedId = '00000000-0000-4000-8000-000000000832'
+        const unorderedId = '00000000-0000-4000-8000-000000000833'
+        const orderedEdgeId = '00000000-0000-4000-8000-000000000834'
+        const unorderedEdgeId = '00000000-0000-4000-8000-000000000835'
+        const result = await repository.createCanvasSubgraph({
+          canvasId: CONTRACT_CANVAS_ID,
+          nodes: [boxNode(boxId), textNode(orderedId), textNode(unorderedId)],
+          edges: [],
+          memberships: [
+            membership(orderedEdgeId, orderedId, boxId, 'ordered_box_member', 0),
+            membership(unorderedEdgeId, unorderedId, boxId, 'unordered_box_member', 0),
+          ],
+          createdAtMs: 100,
+        })
+        expect(result.edges).toHaveLength(2)
+        expect(result.edges).toEqual(expect.arrayContaining([
+          expect.objectContaining({ id: orderedEdgeId, relationType: 'ordered_box_member', membershipPosition: 0 }),
+          expect.objectContaining({ id: unorderedEdgeId, relationType: 'unordered_box_member', membershipPosition: 0 }),
+        ]))
+      })
+
+      test('keeps ordinary Edges to a Node Box alongside the membership', async () => {
+        const { repository } = createFixture()
+        await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+        const boxId = '00000000-0000-4000-8000-000000000841'
+        const memberId = '00000000-0000-4000-8000-000000000842'
+        const ordinaryEdgeId = '00000000-0000-4000-8000-000000000843'
+        const membershipEdgeId = '00000000-0000-4000-8000-000000000844'
+        const result = await repository.createCanvasSubgraph({
+          canvasId: CONTRACT_CANVAS_ID,
+          nodes: [boxNode(boxId), textNode(memberId)],
+          edges: [ordinaryEdge(ordinaryEdgeId, memberId, boxId)],
+          memberships: [membership(membershipEdgeId, memberId, boxId, 'ordered_box_member', 0)],
+          createdAtMs: 100,
+        })
+        expect(result.edges).toHaveLength(2)
+        expect(result.edges).toEqual(expect.arrayContaining([
+          expect.objectContaining({ id: ordinaryEdgeId, relationType: 'hierarchy' }),
+          expect.objectContaining({ id: membershipEdgeId, relationType: 'ordered_box_member', membershipPosition: 0 }),
+        ]))
+      })
+
+      test('normalizes membership positions independently for multiple Boxes', async () => {
+        const { repository } = createFixture()
+        await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+        const boxX = '00000000-0000-4000-8000-000000000851'
+        const boxY = '00000000-0000-4000-8000-000000000852'
+        const memberA = '00000000-0000-4000-8000-000000000853'
+        const memberB = '00000000-0000-4000-8000-000000000854'
+        const edgeA = '00000000-0000-4000-8000-000000000855'
+        const edgeB = '00000000-0000-4000-8000-000000000856'
+        const result = await repository.createCanvasSubgraph({
+          canvasId: CONTRACT_CANVAS_ID,
+          nodes: [boxNode(boxX), boxNode(boxY), textNode(memberA), textNode(memberB)],
+          edges: [],
+          memberships: [
+            membership(edgeA, memberA, boxX, 'ordered_box_member', 0),
+            membership(edgeB, memberB, boxY, 'ordered_box_member', 0),
+          ],
+          createdAtMs: 100,
+        })
+        expect(result.edges).toEqual(expect.arrayContaining([
+          expect.objectContaining({ id: edgeA, targetNodeId: boxX, membershipPosition: 0 }),
+          expect.objectContaining({ id: edgeB, targetNodeId: boxY, membershipPosition: 0 }),
+        ]))
+      })
+
+      test('allows one member to belong to two different Boxes', async () => {
+        const { repository } = createFixture()
+        await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+        const boxX = '00000000-0000-4000-8000-000000000861'
+        const boxY = '00000000-0000-4000-8000-000000000862'
+        const memberA = '00000000-0000-4000-8000-000000000863'
+        const edgeX = '00000000-0000-4000-8000-000000000864'
+        const edgeY = '00000000-0000-4000-8000-000000000865'
+        const result = await repository.createCanvasSubgraph({
+          canvasId: CONTRACT_CANVAS_ID,
+          nodes: [boxNode(boxX), boxNode(boxY), textNode(memberA)],
+          edges: [],
+          memberships: [
+            membership(edgeX, memberA, boxX, 'ordered_box_member', 0),
+            membership(edgeY, memberA, boxY, 'ordered_box_member', 0),
+          ],
+          createdAtMs: 100,
+        })
+        expect(result.edges).toHaveLength(2)
+      })
+
+      test('rejects a membership whose target is not a Node Box', async () => {
+        const { repository } = createFixture()
+        await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+        const memberA = '00000000-0000-4000-8000-000000000871'
+        const memberB = '00000000-0000-4000-8000-000000000872'
+        const edgeId = '00000000-0000-4000-8000-000000000873'
+        await expect(repository.createCanvasSubgraph({
+          canvasId: CONTRACT_CANVAS_ID,
+          nodes: [textNode(memberA), textNode(memberB)],
+          edges: [],
+          memberships: [membership(edgeId, memberA, memberB, 'ordered_box_member', 0)],
+          createdAtMs: 100,
+        })).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })
+      })
+
+      test('rejects Node Box nesting memberships', async () => {
+        const { repository } = createFixture()
+        await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+        const boxX = '00000000-0000-4000-8000-000000000881'
+        const boxY = '00000000-0000-4000-8000-000000000882'
+        const edgeId = '00000000-0000-4000-8000-000000000883'
+        await expect(repository.createCanvasSubgraph({
+          canvasId: CONTRACT_CANVAS_ID,
+          nodes: [boxNode(boxX), boxNode(boxY)],
+          edges: [],
+          memberships: [membership(edgeId, boxX, boxY, 'ordered_box_member', 0)],
+          createdAtMs: 100,
+        })).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })
+      })
+
+      test('rejects duplicate member+box memberships', async () => {
+        const { repository } = createFixture()
+        await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+        const boxId = '00000000-0000-4000-8000-000000000891'
+        const memberId = '00000000-0000-4000-8000-000000000892'
+        const edgeA = '00000000-0000-4000-8000-000000000893'
+        const edgeB = '00000000-0000-4000-8000-000000000894'
+        await expect(repository.createCanvasSubgraph({
+          canvasId: CONTRACT_CANVAS_ID,
+          nodes: [boxNode(boxId), textNode(memberId)],
+          edges: [],
+          memberships: [
+            membership(edgeA, memberId, boxId, 'ordered_box_member', 0),
+            membership(edgeB, memberId, boxId, 'unordered_box_member', 0),
+          ],
+          createdAtMs: 100,
+        })).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })
+      })
+
+      test('rejects duplicate membership positions within a Box section', async () => {
+        const { repository } = createFixture()
+        await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+        const boxId = '00000000-0000-4000-8000-0000000008a1'
+        const memberA = '00000000-0000-4000-8000-0000000008a2'
+        const memberB = '00000000-0000-4000-8000-0000000008a3'
+        const edgeA = '00000000-0000-4000-8000-0000000008a4'
+        const edgeB = '00000000-0000-4000-8000-0000000008a5'
+        await expect(repository.createCanvasSubgraph({
+          canvasId: CONTRACT_CANVAS_ID,
+          nodes: [boxNode(boxId), textNode(memberA), textNode(memberB)],
+          edges: [],
+          memberships: [
+            membership(edgeA, memberA, boxId, 'ordered_box_member', 0),
+            membership(edgeB, memberB, boxId, 'ordered_box_member', 0),
+          ],
+          createdAtMs: 100,
+        })).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })
+      })
+
+      test('rejects non-contiguous batch membership positions', async () => {
+        const { repository } = createFixture()
+        await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+        const boxId = '00000000-0000-4000-8000-0000000008b1'
+        const memberA = '00000000-0000-4000-8000-0000000008b2'
+        const memberB = '00000000-0000-4000-8000-0000000008b3'
+        const edgeA = '00000000-0000-4000-8000-0000000008b4'
+        const edgeB = '00000000-0000-4000-8000-0000000008b5'
+        await expect(repository.createCanvasSubgraph({
+          canvasId: CONTRACT_CANVAS_ID,
+          nodes: [boxNode(boxId), textNode(memberA), textNode(memberB)],
+          edges: [],
+          memberships: [
+            membership(edgeA, memberA, boxId, 'ordered_box_member', 0),
+            membership(edgeB, memberB, boxId, 'ordered_box_member', 2),
+          ],
+          createdAtMs: 100,
+        })).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })
+      })
+
+      test('rejects memberships referencing nodes outside the batch', async () => {
+        const { repository } = createFixture()
+        await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+        const existingBox = '00000000-0000-4000-8000-0000000008c1'
+        await repository.createCanvasNode({ id: existingBox, canvasId: CONTRACT_CANVAS_ID, type: 'node_box', content: { type: 'node_box' }, x: 0, y: 0, createdAtMs: 20 })
+        const memberId = '00000000-0000-4000-8000-0000000008c2'
+        const edgeId = '00000000-0000-4000-8000-0000000008c3'
+        await expect(repository.createCanvasSubgraph({
+          canvasId: CONTRACT_CANVAS_ID,
+          nodes: [textNode(memberId)],
+          edges: [],
+          memberships: [membership(edgeId, memberId, existingBox, 'ordered_box_member', 0)],
+          createdAtMs: 100,
+        })).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })
+        await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toEqual([])
+      })
+
+      test('rolls back all nodes and edges when a membership is invalid', async () => {
+        const { repository } = createFixture()
+        await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+        const survivingId = '00000000-0000-4000-8000-0000000008d0'
+        await repository.createTextNode({ id: survivingId, canvasId: CONTRACT_CANVAS_ID, content: { type: 'text', text: 'Keep' }, x: 0, y: 0, createdAtMs: 20 })
+        const boxId = '00000000-0000-4000-8000-0000000008d1'
+        const memberId = '00000000-0000-4000-8000-0000000008d2'
+        const ordinaryEdgeId = '00000000-0000-4000-8000-0000000008d3'
+        const membershipEdgeA = '00000000-0000-4000-8000-0000000008d4'
+        const membershipEdgeB = '00000000-0000-4000-8000-0000000008d5'
+        await expect(repository.createCanvasSubgraph({
+          canvasId: CONTRACT_CANVAS_ID,
+          nodes: [boxNode(boxId), textNode(memberId)],
+          edges: [ordinaryEdge(ordinaryEdgeId, memberId, boxId)],
+          memberships: [
+            membership(membershipEdgeA, memberId, boxId, 'ordered_box_member', 0),
+            membership(membershipEdgeB, memberId, boxId, 'unordered_box_member', 0),
+          ],
+          createdAtMs: 100,
+        })).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })
+        await expect(repository.listCanvasNodes(CONTRACT_CANVAS_ID)).resolves.toEqual([
+          expect.objectContaining({ id: survivingId }),
+        ])
+        await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toEqual([])
+      })
     })
   })
 }

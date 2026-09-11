@@ -912,6 +912,20 @@ pub(crate) struct CreateCanvasSubgraphDto {
     canvas_id: String,
     nodes: Vec<CanvasSubgraphNodeDto>,
     edges: Vec<CreateCanvasEdgeDto>,
+    #[serde(default)]
+    memberships: Vec<CanvasSubgraphMembershipDto>,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CanvasSubgraphMembershipDto {
+    id: String,
+    canvas_id: String,
+    source_node_id: String,
+    target_node_id: String,
+    relation_type: String,
+    membership_position: i64,
     created_at_ms: i64,
 }
 
@@ -1263,12 +1277,26 @@ pub(crate) fn canvas_subgraph_create(
             created_at_ms: e.created_at_ms,
         })
         .collect();
+    let memberships_input: Vec<_> = input
+        .memberships
+        .iter()
+        .map(|m| crate::canvas::CreateCanvasSubgraphMembershipInput {
+            id: m.id.clone(),
+            canvas_id: m.canvas_id.clone(),
+            source_node_id: m.source_node_id.clone(),
+            target_node_id: m.target_node_id.clone(),
+            relation_type: m.relation_type.clone(),
+            membership_position: m.membership_position,
+            created_at_ms: m.created_at_ms,
+        })
+        .collect();
     let (node_records, edge_records) = CanvasDbService::create_canvas_subgraph(
         &connection,
         crate::canvas::CreateCanvasSubgraphInput {
             canvas_id: input.canvas_id,
             nodes: nodes_input,
             edges: edges_input,
+            memberships: memberships_input,
             created_at_ms: input.created_at_ms,
         },
     )

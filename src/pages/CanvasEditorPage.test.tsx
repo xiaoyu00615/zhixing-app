@@ -1196,22 +1196,197 @@ describe('CanvasEditorPage', () => {
     expect(screen.getByRole('status')).toHaveTextContent('已粘贴 2 个节点')
   })
 
-  test('rejects copying when the selection contains an unsupported node type', async () => {
+  test('Slice 10B: copies and pastes a selected Node Box with its selected member and membership edge', async () => {
     const resolved = fixture()
+    const memberNode: CanvasNode = {
+      ...resolved.node,
+      id: NODE_ID,
+      nodeName: '研究问题',
+      x: 120,
+      y: 260,
+    }
     const boxNode: CanvasNode = {
-      id: BOX_NODE_ID, canvasId: CANVAS_ID, type: 'node_box', nodeName: '收集盒',
+      id: BOX_NODE_ID, canvasId: CANVAS_ID, type: 'node_box', nodeName: '研究盒',
       content: { type: 'node_box' }, x: 620, y: 120, createdAtMs: 12, updatedAtMs: 12,
+    }
+    const membershipEdge: CanvasEdge = {
+      id: '00000000-0000-4000-8000-000000000610', canvasId: CANVAS_ID,
+      sourceNodeId: NODE_ID, targetNodeId: BOX_NODE_ID,
+      relationType: 'ordered_box_member', direction: 'forward', lineStyle: 'solid',
+      membershipPosition: 0, createdAtMs: 13, updatedAtMs: 13, deletedAtMs: null,
+    }
+    const ordinaryEdge: CanvasEdge = {
+      id: '00000000-0000-4000-8000-000000000611', canvasId: CANVAS_ID,
+      sourceNodeId: NODE_ID, targetNodeId: BOX_NODE_ID,
+      relationType: 'hierarchy', direction: 'forward', lineStyle: 'solid',
+      membershipPosition: null, createdAtMs: 14, updatedAtMs: 14, deletedAtMs: null,
     }
     resolved.openCanvasMock.mockResolvedValueOnce({
       canvas: resolved.canvas,
-      nodes: [resolved.node, boxNode],
-      edges: [],
+      nodes: [memberNode, boxNode],
+      edges: [membershipEdge, ordinaryEdge],
     })
+    const pastedMemberId = '00000000-0000-4000-8000-000000000653'
+    const pastedBoxId = '00000000-0000-4000-8000-000000000654'
+    const pastedMembershipEdgeId = '00000000-0000-4000-8000-000000000655'
+    const pastedOrdinaryEdgeId = '00000000-0000-4000-8000-000000000656'
+    const pastedMember: CanvasNode = {
+      ...memberNode,
+      id: pastedMemberId,
+      x: memberNode.x + 32,
+      y: memberNode.y + 32,
+    }
+    const pastedBox: CanvasNode = {
+      ...boxNode,
+      id: pastedBoxId,
+      x: boxNode.x + 32,
+      y: boxNode.y + 32,
+    }
+    const pastedMembershipEdge: CanvasEdge = {
+      ...membershipEdge,
+      id: pastedMembershipEdgeId,
+      sourceNodeId: pastedMemberId,
+      targetNodeId: pastedBoxId,
+      membershipPosition: 0,
+      createdAtMs: 90,
+      updatedAtMs: 90,
+    }
+    const pastedOrdinaryEdge: CanvasEdge = {
+      ...ordinaryEdge,
+      id: pastedOrdinaryEdgeId,
+      sourceNodeId: pastedMemberId,
+      targetNodeId: pastedBoxId,
+      createdAtMs: 91,
+      updatedAtMs: 91,
+    }
+    const pasteSubgraphMock = vi.fn<
+      CanvasService['pasteCanvasSubgraph']
+    >(() => Promise.resolve({
+      nodes: [pastedMember, pastedBox],
+      edges: [pastedMembershipEdge, pastedOrdinaryEdge],
+      oldToNewNodeId: new Map([
+        [NODE_ID, pastedMemberId],
+        [BOX_NODE_ID, pastedBoxId],
+      ]),
+    }))
+    resolved.service.pasteCanvasSubgraph = pasteSubgraphMock
     renderEditor(resolved.openRuntime)
     await screen.findByRole('heading', { name: '产品构思' })
+
+    await userEvent.click(screen.getByRole('button', { name: '模拟框选' }))
+    expect(screen.getByLabelText(`测试文字节点 ${NODE_ID}`)).toHaveAttribute('data-selected', 'true')
+    expect(screen.getByLabelText(`测试文字节点 ${BOX_NODE_ID}`)).toHaveAttribute('data-selected', 'true')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('已复制节点'))
+    const snapshot = getClipboardSnapshot()
+    expect(snapshot?.nodes.map((node) => node.type)).toEqual(['text', 'node_box'])
+    expect(snapshot?.memberships).toEqual([
+      expect.objectContaining({
+        sourceNodeId: NODE_ID,
+        targetNodeId: BOX_NODE_ID,
+        relationType: 'ordered_box_member',
+        membershipPosition: 0,
+      }),
+    ])
+    expect(snapshot?.edges).toEqual([
+      expect.objectContaining({ id: ordinaryEdge.id, relationType: 'hierarchy' }),
+    ])
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true }))
+    await waitFor(() => expect(pasteSubgraphMock).toHaveBeenCalledTimes(1))
+    const batchSnapshot = pasteSubgraphMock.mock.calls[0]?.[1]
+    expect(batchSnapshot?.memberships).toHaveLength(1)
+
+    await waitFor(() => expect(
+      screen.getByTestId(`测试节点 ${pastedBoxId}`),
+    ).toBeInTheDocument())
+    expect(screen.getByTestId(`测试节点 ${pastedMemberId}`)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: `测试连线 ${pastedMembershipEdgeId}` })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: `测试连线 ${pastedOrdinaryEdgeId}` })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: `测试连线 ${membershipEdge.id}` })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: `测试连线 ${ordinaryEdge.id}` })).toBeInTheDocument()
+    expect(screen.getByLabelText(`测试文字节点 ${NODE_ID}`)).toHaveAttribute('data-selected', 'false')
+    expect(screen.getByLabelText(`测试文字节点 ${BOX_NODE_ID}`)).toHaveAttribute('data-selected', 'false')
+    expect(screen.getByLabelText(`测试文字节点 ${pastedMemberId}`)).toHaveAttribute('data-selected', 'true')
+    expect(screen.getByLabelText(`测试文字节点 ${pastedBoxId}`)).toHaveAttribute('data-selected', 'true')
+    expect(screen.getByRole('status')).toHaveTextContent('已粘贴 2 个节点')
+  })
+
+  test('Slice 10B: copying only a Node Box pastes an empty box without memberships', async () => {
+    const resolved = fixture()
+    const memberNode: CanvasNode = { ...resolved.node, id: NODE_ID, x: 120, y: 260 }
+    const boxNode: CanvasNode = {
+      id: BOX_NODE_ID, canvasId: CANVAS_ID, type: 'node_box', nodeName: '研究盒',
+      content: { type: 'node_box' }, x: 620, y: 120, createdAtMs: 12, updatedAtMs: 12,
+    }
+    const membershipEdge: CanvasEdge = {
+      id: '00000000-0000-4000-8000-0000000000612', canvasId: CANVAS_ID,
+      sourceNodeId: NODE_ID, targetNodeId: BOX_NODE_ID,
+      relationType: 'ordered_box_member', direction: 'forward', lineStyle: 'solid',
+      membershipPosition: 0, createdAtMs: 13, updatedAtMs: 13, deletedAtMs: null,
+    }
+    resolved.openCanvasMock.mockResolvedValueOnce({
+      canvas: resolved.canvas,
+      nodes: [boxNode, memberNode],
+      edges: [membershipEdge],
+    })
+    const pastedBoxId = '00000000-0000-4000-8000-000000000657'
+    const pasteSubgraphMock = vi.fn<CanvasService['pasteCanvasSubgraph']>(() =>
+      Promise.resolve({
+        nodes: [{ ...boxNode, id: pastedBoxId, x: boxNode.x + 32, y: boxNode.y + 32 }],
+        edges: [],
+        oldToNewNodeId: new Map([[BOX_NODE_ID, pastedBoxId]]),
+      }),
+    )
+    resolved.service.pasteCanvasSubgraph = pasteSubgraphMock
+    renderEditor(resolved.openRuntime)
+    await screen.findByRole('heading', { name: '产品构思' })
+
+    // 模拟单选只选中第一个节点，即 Node Box；成员不在选区内。
+    await userEvent.click(screen.getByRole('button', { name: '模拟单选' }))
+    expect(screen.getByLabelText(`测试文字节点 ${BOX_NODE_ID}`)).toHaveAttribute('data-selected', 'true')
+    expect(screen.getByLabelText(`测试文字节点 ${NODE_ID}`)).toHaveAttribute('data-selected', 'false')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('已复制节点'))
+    const snapshot = getClipboardSnapshot()
+    expect(snapshot?.nodes.map((node) => node.id)).toEqual([BOX_NODE_ID])
+    expect(snapshot?.memberships).toEqual([])
+    expect(snapshot?.edges).toEqual([])
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true }))
+    await waitFor(() => expect(pasteSubgraphMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(
+      screen.getByTestId(`测试节点 ${pastedBoxId}`),
+    ).toBeInTheDocument())
+    expect(screen.getByTestId(`测试节点 ${BOX_NODE_ID}`)).toBeInTheDocument()
+    expect(screen.getByTestId(`测试节点 ${NODE_ID}`)).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /测试连线/ })).toHaveLength(1)
+    expect(screen.getByRole('status')).toHaveTextContent('已粘贴 1 个节点')
+  })
+
+  test('Slice 10B: a failed paste leaves nodes, edges, and selection unchanged', async () => {
+    const resolved = fixture()
+    resolved.service.pasteCanvasSubgraph = vi.fn(() =>
+      Promise.reject(new CanvasApplicationError('CONFLICT')),
+    )
+    renderEditor(resolved.openRuntime)
+    await screen.findByRole('heading', { name: '产品构思' })
+
     await userEvent.click(screen.getByRole('button', { name: '模拟框选' }))
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true }))
-    expect(await screen.findByRole('status')).toHaveTextContent('无法复制：选中了不支持的节点类型。')
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('已复制节点'))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true }))
+
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('粘贴失败，请重试。'))
+    expect(screen.getByTestId(`测试节点 ${NODE_ID}`)).toBeInTheDocument()
+    expect(screen.getByTestId(`测试节点 ${TARGET_NODE_ID}`)).toBeInTheDocument()
+    expect(screen.getAllByTestId(/测试节点/)).toHaveLength(2)
+    expect(screen.getByRole('button', { name: `测试连线 ${EDGE_ID}` })).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /测试连线/ })).toHaveLength(1)
+    expect(screen.getByLabelText(`测试文字节点 ${NODE_ID}`)).toHaveAttribute('data-selected', 'true')
+    expect(screen.getByLabelText(`测试文字节点 ${TARGET_NODE_ID}`)).toHaveAttribute('data-selected', 'true')
   })
 
   test('copies text/sticky selection on a legacy canvas containing membership edges', async () => {

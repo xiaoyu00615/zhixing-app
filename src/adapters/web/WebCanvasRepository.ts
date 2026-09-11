@@ -430,6 +430,21 @@ export class WebCanvasRepository implements CanvasRepository {
         throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
       }
     }
+    for (const membership of input.memberships) {
+      validateId(membership.id, operation)
+      validateId(membership.canvasId, operation)
+      validateId(membership.sourceNodeId, operation)
+      validateId(membership.targetNodeId, operation)
+      validateTimestamp(membership.createdAtMs, operation)
+      if (
+        membership.sourceNodeId === membership.targetNodeId ||
+        !isCanvasMembershipRelationType(membership.relationType) ||
+        !Number.isSafeInteger(membership.membershipPosition) ||
+        membership.membershipPosition < 0
+      ) {
+        throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+      }
+    }
     try {
       const result = await this.#client.createCanvasSubgraph(input)
       if (!isRecord(result)) {

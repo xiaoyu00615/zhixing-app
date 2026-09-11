@@ -17,6 +17,7 @@ const INTERNAL_EDGE_ID = '00000000-0000-4000-8000-000000000006'
 const EXTERNAL_EDGE_ID = '00000000-0000-4000-8000-000000000007'
 const MEMBERSHIP_EDGE_ID = '00000000-0000-4000-8000-000000000008'
 const UNKNOWN_RELATION_EDGE_ID = '00000000-0000-4000-8000-000000000009'
+const BOX_Y_ID = '00000000-0000-4000-8000-000000000010'
 
 function makeTextNode(id: string, nodeName: string, text: string, x: number, y: number): CanvasNode {
   return { id, canvasId: CANVAS_ID, type: 'text', nodeName, content: { type: 'text', text }, x, y, createdAtMs: 1, updatedAtMs: 1 }
@@ -36,6 +37,29 @@ function makeUnknownNode(id: string): CanvasNode {
 
 function makeEdge(id: string, source: string, target: string, relationType: string, direction: string, lineStyle: string): CanvasEdge {
   return { id, canvasId: CANVAS_ID, sourceNodeId: source, targetNodeId: target, relationType: relationType as CanvasEdge['relationType'], direction: direction as CanvasEdge['direction'], lineStyle: lineStyle as CanvasEdge['lineStyle'], membershipPosition: null, createdAtMs: 1, updatedAtMs: 1, deletedAtMs: null }
+}
+
+function makeMembership(
+  id: string,
+  source: string,
+  target: string,
+  relationType: 'ordered_box_member' | 'unordered_box_member',
+  position: number,
+  overrides?: { readonly direction?: string; readonly lineStyle?: string; readonly membershipPosition?: number | null },
+): CanvasEdge {
+  return {
+    id,
+    canvasId: CANVAS_ID,
+    sourceNodeId: source,
+    targetNodeId: target,
+    relationType,
+    direction: (overrides?.direction ?? 'forward') as CanvasEdge['direction'],
+    lineStyle: (overrides?.lineStyle ?? 'solid') as CanvasEdge['lineStyle'],
+    membershipPosition: overrides?.membershipPosition === undefined ? position : overrides.membershipPosition,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+    deletedAtMs: null,
+  }
 }
 
 beforeEach(() => {
@@ -123,14 +147,14 @@ describe('clipboard copy', () => {
     expect(snap.edges[0]!.id).toBe(INTERNAL_EDGE_ID)
   })
 
-  test('fails-closed on Node Box selection, preserves existing clipboard', () => {
+  test('copies a single Node Box snapshot with no edges or memberships', () => {
     const box = makeBoxNode(BOX_NODE_ID)
-    const existing = makeTextNode(TEXT_NODE_ID, 'Existing', 'e', 0, 0)
-    copyToClipboard([existing], [], CANVAS_ID)
-    expect(getClipboardSnapshot()).not.toBeNull()
-    expect(() => copyToClipboard([box], [], CANVAS_ID)).toThrow(expect.objectContaining({ code: 'UNSUPPORTED_NODE' }))
+    copyToClipboard([box], [], CANVAS_ID)
     const snap = assertSnapshot()
-    expect(snap.nodes[0]!.id).toBe(TEXT_NODE_ID)
+    expect(snap.nodes).toHaveLength(1)
+    expect(snap.nodes[0]!).toMatchObject({ id: BOX_NODE_ID, type: 'node_box', content: { type: 'node_box' } })
+    expect(snap.edges).toEqual([])
+    expect(snap.memberships).toEqual([])
   })
 
   test('fails-closed on Unknown Node, preserves existing clipboard', () => {
@@ -142,17 +166,25 @@ describe('clipboard copy', () => {
     expect(snap.nodes[0]!.id).toBe(TEXT_NODE_ID)
   })
 
-  test('fails-closed on membership edge in selected subgraph, preserves clipboard', () => {
+  test('copies an internal ordered membership edge into memberships', () => {
     const a = makeTextNode(TEXT_NODE_ID, 'A', 'a', 0, 0)
     const box = makeBoxNode(BOX_NODE_ID)
     const allEdges: CanvasEdge[] = [
-      makeEdge(MEMBERSHIP_EDGE_ID, BOX_NODE_ID, TEXT_NODE_ID, 'ordered_box_member', 'forward', 'solid'),
+      makeMembership(MEMBERSHIP_EDGE_ID, TEXT_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 0),
     ]
-    copyToClipboard([a], [], CANVAS_ID)
-    expect(() => copyToClipboard([a, box], allEdges, CANVAS_ID)).toThrow()
+    copyToClipboard([a, box], allEdges, CANVAS_ID)
     const snap = assertSnapshot()
-    expect(snap.nodes).toHaveLength(1)
-    expect(snap.nodes[0]!.id).toBe(TEXT_NODE_ID)
+    expect(snap.nodes.map((n) => n.id)).toEqual([TEXT_NODE_ID, BOX_NODE_ID])
+    expect(snap.edges).toEqual([])
+    expect(snap.memberships).toEqual([
+      {
+        id: MEMBERSHIP_EDGE_ID,
+        sourceNodeId: TEXT_NODE_ID,
+        targetNodeId: BOX_NODE_ID,
+        relationType: 'ordered_box_member',
+        membershipPosition: 0,
+      },
+    ])
   })
 
   test('fails-closed on unknown relation edge in selected subgraph', () => {
@@ -171,6 +203,236 @@ describe('clipboard copy', () => {
     copyToClipboard([], [], CANVAS_ID)
     const snap = assertSnapshot()
     expect(snap.nodes[0]!.id).toBe(TEXT_NODE_ID)
+  })
+})
+
+describe('Slice 10B: Node Box and membership copy', () => {
+  function seedExistingClipboard() {
+    copyToClipboard([makeTextNode(TEXT_NODE_ID, 'Existing', 'e', 0, 0)], [], CANVAS_ID)
+  }
+
+  function expectExistingClipboardPreserved() {
+    const snap = assertSnapshot()
+    expect(snap.nodes).toHaveLength(1)
+    expect(snap.nodes[0]!.id).toBe(TEXT_NODE_ID)
+    expect(snap.memberships).toEqual([])
+  }
+
+  test('10B-1: Box only copies the box name and content, no members, no memberships', () => {
+    const box: CanvasNode = { ...makeBoxNode(BOX_NODE_ID), nodeName: '收集盒' }
+    copyToClipboard([box], [
+      makeMembership(MEMBERSHIP_EDGE_ID, TEXT_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 0),
+    ], CANVAS_ID)
+    const snap = assertSnapshot()
+    expect(snap.nodes).toEqual([
+      expect.objectContaining({ id: BOX_NODE_ID, type: 'node_box', nodeName: '收集盒', content: { type: 'node_box' } }),
+    ])
+    expect(snap.edges).toEqual([])
+    expect(snap.memberships).toEqual([])
+  })
+
+  test('10B-2: Box + ordered members snapshots memberships keeping original positions', () => {
+    const box = makeBoxNode(BOX_NODE_ID)
+    const a = makeTextNode(TEXT_NODE_ID, 'A', 'a', 0, 0)
+    const c = makeStickyNode(STICKY_NODE_ID, 'C', 'c', 10, 10)
+    const allEdges: CanvasEdge[] = [
+      makeMembership('00000000-0000-4000-8000-000000000101', TEXT_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 0),
+      makeMembership('00000000-0000-4000-8000-000000000102', STICKY_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 5),
+    ]
+    copyToClipboard([box, a, c], allEdges, CANVAS_ID)
+    const snap = assertSnapshot()
+    expect(snap.nodes.map((n) => n.id).sort()).toEqual([TEXT_NODE_ID, STICKY_NODE_ID, BOX_NODE_ID])
+    expect(snap.memberships).toHaveLength(2)
+    expect(snap.memberships).toContainEqual(expect.objectContaining({ sourceNodeId: TEXT_NODE_ID, membershipPosition: 0 }))
+    expect(snap.memberships).toContainEqual(expect.objectContaining({ sourceNodeId: STICKY_NODE_ID, membershipPosition: 5 }))
+  })
+
+  test('10B-3: Box + unordered member snapshots an unordered membership', () => {
+    const box = makeBoxNode(BOX_NODE_ID)
+    const c = makeStickyNode(STICKY_NODE_ID, 'C', 'c', 10, 10)
+    const allEdges: CanvasEdge[] = [
+      makeMembership('00000000-0000-4000-8000-000000000103', STICKY_NODE_ID, BOX_NODE_ID, 'unordered_box_member', 0),
+    ]
+    copyToClipboard([box, c], allEdges, CANVAS_ID)
+    const snap = assertSnapshot()
+    expect(snap.memberships).toEqual([
+      expect.objectContaining({ relationType: 'unordered_box_member', membershipPosition: 0 }),
+    ])
+  })
+
+  test('10B-4: Box + mixed ordered and unordered members preserves sections', () => {
+    const box = makeBoxNode(BOX_NODE_ID)
+    const a = makeTextNode(TEXT_NODE_ID, 'A', 'a', 0, 0)
+    const c = makeStickyNode(STICKY_NODE_ID, 'C', 'c', 10, 10)
+    const allEdges: CanvasEdge[] = [
+      makeMembership('00000000-0000-4000-8000-000000000104', TEXT_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 0),
+      makeMembership('00000000-0000-4000-8000-000000000105', STICKY_NODE_ID, BOX_NODE_ID, 'unordered_box_member', 0),
+    ]
+    copyToClipboard([box, a, c], allEdges, CANVAS_ID)
+    const snap = assertSnapshot()
+    expect(snap.memberships).toHaveLength(2)
+    expect(snap.memberships).toContainEqual(expect.objectContaining({ sourceNodeId: TEXT_NODE_ID, relationType: 'ordered_box_member' }))
+    expect(snap.memberships).toContainEqual(expect.objectContaining({ sourceNodeId: STICKY_NODE_ID, relationType: 'unordered_box_member' }))
+  })
+
+  test('10B-5: member copied without its box keeps zero memberships', () => {
+    const a = makeTextNode(TEXT_NODE_ID, 'A', 'a', 0, 0)
+    const allEdges: CanvasEdge[] = [
+      makeMembership('00000000-0000-4000-8000-000000000106', TEXT_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 0),
+    ]
+    copyToClipboard([a], allEdges, CANVAS_ID)
+    const snap = assertSnapshot()
+    expect(snap.nodes.map((n) => n.id)).toEqual([TEXT_NODE_ID])
+    expect(snap.memberships).toEqual([])
+  })
+
+  test('10B-6: box copied without its member keeps zero memberships and no reference', () => {
+    const box = makeBoxNode(BOX_NODE_ID)
+    const allEdges: CanvasEdge[] = [
+      makeMembership('00000000-0000-4000-8000-000000000107', TEXT_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 0),
+    ]
+    copyToClipboard([box], allEdges, CANVAS_ID)
+    const snap = assertSnapshot()
+    expect(snap.nodes.map((n) => n.id)).toEqual([BOX_NODE_ID])
+    expect(snap.memberships).toEqual([])
+  })
+
+  test('10B-7: ordinary edge from a node to a Node Box is copied as an ordinary edge', () => {
+    const a = makeTextNode(TEXT_NODE_ID, 'A', 'a', 0, 0)
+    const box = makeBoxNode(BOX_NODE_ID)
+    const allEdges: CanvasEdge[] = [
+      makeEdge(INTERNAL_EDGE_ID, TEXT_NODE_ID, BOX_NODE_ID, 'hierarchy', 'bidirectional', 'dashed'),
+    ]
+    copyToClipboard([a, box], allEdges, CANVAS_ID)
+    const snap = assertSnapshot()
+    expect(snap.edges).toHaveLength(1)
+    expect(snap.edges[0]!).toMatchObject({
+      id: INTERNAL_EDGE_ID,
+      sourceNodeId: TEXT_NODE_ID,
+      targetNodeId: BOX_NODE_ID,
+      relationType: 'hierarchy',
+      direction: 'bidirectional',
+      lineStyle: 'dashed',
+    })
+    expect(snap.memberships).toEqual([])
+  })
+
+  test('10B-8: two boxes with members rebuild both memberships independently', () => {
+    const boxX = makeBoxNode(BOX_NODE_ID)
+    const boxY = makeBoxNode(BOX_Y_ID)
+    const a = makeTextNode(TEXT_NODE_ID, 'A', 'a', 0, 0)
+    const b = makeStickyNode(STICKY_NODE_ID, 'B', 'b', 10, 10)
+    const allEdges: CanvasEdge[] = [
+      makeMembership('00000000-0000-4000-8000-000000000108', TEXT_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 0),
+      makeMembership('00000000-0000-4000-8000-000000000109', STICKY_NODE_ID, BOX_Y_ID, 'ordered_box_member', 0),
+    ]
+    copyToClipboard([boxX, boxY, a, b], allEdges, CANVAS_ID)
+    const snap = assertSnapshot()
+    expect(snap.memberships).toHaveLength(2)
+    expect(snap.memberships).toContainEqual(expect.objectContaining({ sourceNodeId: TEXT_NODE_ID, targetNodeId: BOX_NODE_ID }))
+    expect(snap.memberships).toContainEqual(expect.objectContaining({ sourceNodeId: STICKY_NODE_ID, targetNodeId: BOX_Y_ID }))
+  })
+
+  test('10B-9: same member in two boxes rebuilds both memberships when all selected', () => {
+    const a = makeTextNode(TEXT_NODE_ID, 'A', 'a', 0, 0)
+    const boxX = makeBoxNode(BOX_NODE_ID)
+    const boxY = makeBoxNode(BOX_Y_ID)
+    const allEdges: CanvasEdge[] = [
+      makeMembership('00000000-0000-4000-8000-00000000010a', TEXT_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 0),
+      makeMembership('00000000-0000-4000-8000-00000000010b', TEXT_NODE_ID, BOX_Y_ID, 'ordered_box_member', 0),
+    ]
+    copyToClipboard([a, boxX, boxY], allEdges, CANVAS_ID)
+    const snap = assertSnapshot()
+    expect(snap.memberships).toHaveLength(2)
+    expect(snap.memberships).toContainEqual(expect.objectContaining({ sourceNodeId: TEXT_NODE_ID, targetNodeId: BOX_NODE_ID }))
+    expect(snap.memberships).toContainEqual(expect.objectContaining({ sourceNodeId: TEXT_NODE_ID, targetNodeId: BOX_Y_ID }))
+  })
+
+  test('10B-9b: membership to an unselected second box is external and ignored', () => {
+    const a = makeTextNode(TEXT_NODE_ID, 'A', 'a', 0, 0)
+    const boxX = makeBoxNode(BOX_NODE_ID)
+    const allEdges: CanvasEdge[] = [
+      makeMembership('00000000-0000-4000-8000-00000000010c', TEXT_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 0),
+      makeMembership('00000000-0000-4000-8000-00000000010d', TEXT_NODE_ID, BOX_Y_ID, 'ordered_box_member', 0),
+    ]
+    copyToClipboard([a, boxX], allEdges, CANVAS_ID)
+    const snap = assertSnapshot()
+    expect(snap.memberships).toEqual([
+      expect.objectContaining({ targetNodeId: BOX_NODE_ID }),
+    ])
+  })
+
+  test('10B-10: non-canonical internal membership fails-closed and preserves the old clipboard', () => {
+    seedExistingClipboard()
+    const a = makeTextNode(TEXT_NODE_ID, 'A', 'a', 0, 0)
+    const box = makeBoxNode(BOX_NODE_ID)
+    const bad: CanvasEdge[] = [
+      makeMembership('00000000-0000-4000-8000-00000000010e', TEXT_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 0, { direction: 'bidirectional' }),
+    ]
+    expect(() => copyToClipboard([a, box], bad, CANVAS_ID)).toThrow(expect.objectContaining({ code: 'UNSUPPORTED_EDGE' }))
+    expectExistingClipboardPreserved()
+
+    const dashed: CanvasEdge[] = [
+      makeMembership('00000000-0000-4000-8000-00000000010f', TEXT_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 0, { lineStyle: 'dashed' }),
+    ]
+    expect(() => copyToClipboard([a, box], dashed, CANVAS_ID)).toThrow(expect.objectContaining({ code: 'UNSUPPORTED_EDGE' }))
+    expectExistingClipboardPreserved()
+
+    const nullPosition: CanvasEdge[] = [
+      makeMembership('00000000-0000-4000-8000-000000000110', TEXT_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 0, { membershipPosition: null }),
+    ]
+    expect(() => copyToClipboard([a, box], nullPosition, CANVAS_ID)).toThrow(expect.objectContaining({ code: 'UNSUPPORTED_EDGE' }))
+    expectExistingClipboardPreserved()
+  })
+
+  test('10B-11: Box to Box membership fails-closed and preserves the old clipboard', () => {
+    seedExistingClipboard()
+    const boxX = makeBoxNode(BOX_NODE_ID)
+    const boxY = makeBoxNode(BOX_Y_ID)
+    const allEdges: CanvasEdge[] = [
+      makeMembership('00000000-0000-4000-8000-000000000111', BOX_NODE_ID, BOX_Y_ID, 'ordered_box_member', 0),
+    ]
+    expect(() => copyToClipboard([boxX, boxY], allEdges, CANVAS_ID)).toThrow(expect.objectContaining({ code: 'UNSUPPORTED_EDGE' }))
+    expectExistingClipboardPreserved()
+  })
+
+  test('10B-12: duplicate active memberships for the same member and box fail-closed', () => {
+    seedExistingClipboard()
+    const a = makeTextNode(TEXT_NODE_ID, 'A', 'a', 0, 0)
+    const box = makeBoxNode(BOX_NODE_ID)
+    const allEdges: CanvasEdge[] = [
+      makeMembership('00000000-0000-4000-8000-000000000112', TEXT_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 0),
+      makeMembership('00000000-0000-4000-8000-000000000113', TEXT_NODE_ID, BOX_NODE_ID, 'unordered_box_member', 0),
+    ]
+    expect(() => copyToClipboard([a, box], allEdges, CANVAS_ID)).toThrow(expect.objectContaining({ code: 'UNSUPPORTED_EDGE' }))
+    expectExistingClipboardPreserved()
+  })
+
+  test('10B-13: duplicate position inside the same box and section fails-closed', () => {
+    seedExistingClipboard()
+    const a = makeTextNode(TEXT_NODE_ID, 'A', 'a', 0, 0)
+    const c = makeStickyNode(STICKY_NODE_ID, 'C', 'c', 10, 10)
+    const box = makeBoxNode(BOX_NODE_ID)
+    const allEdges: CanvasEdge[] = [
+      makeMembership('00000000-0000-4000-8000-000000000114', TEXT_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 2),
+      makeMembership('00000000-0000-4000-8000-000000000115', STICKY_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 2),
+    ]
+    expect(() => copyToClipboard([a, c, box], allEdges, CANVAS_ID)).toThrow(expect.objectContaining({ code: 'UNSUPPORTED_EDGE' }))
+    expectExistingClipboardPreserved()
+  })
+
+  test('10B-14: gapped but unique positions copy successfully and keep original positions', () => {
+    const box = makeBoxNode(BOX_NODE_ID)
+    const a = makeTextNode(TEXT_NODE_ID, 'A', 'a', 0, 0)
+    const c = makeStickyNode(STICKY_NODE_ID, 'C', 'c', 10, 10)
+    const allEdges: CanvasEdge[] = [
+      makeMembership('00000000-0000-4000-8000-000000000116', TEXT_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 0),
+      makeMembership('00000000-0000-4000-8000-000000000117', STICKY_NODE_ID, BOX_NODE_ID, 'ordered_box_member', 5),
+    ]
+    expect(() => copyToClipboard([box, a, c], allEdges, CANVAS_ID)).not.toThrow()
+    const snap = assertSnapshot()
+    const positions = snap.memberships.map((m) => m.membershipPosition).sort((x, y) => x - y)
+    expect(positions).toEqual([0, 5])
   })
 })
 

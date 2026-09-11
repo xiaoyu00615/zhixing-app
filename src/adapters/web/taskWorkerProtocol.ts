@@ -806,7 +806,8 @@ export function parseTaskWorkerRequest(
         isCanonicalCanvasId(value.input.canvasId) &&
         isCanvasTimestamp(value.input.createdAtMs) &&
         Array.isArray(value.input.nodes) &&
-        Array.isArray(value.input.edges)
+        Array.isArray(value.input.edges) &&
+        Array.isArray(value.input.memberships)
         ? {
             requestId: value.requestId,
             type: value.type,

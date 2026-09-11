@@ -1115,6 +1115,25 @@ export class WebTaskDatabase {
       }
       edgeIdSet.add(edge.id)
     }
+    for (const membership of input.memberships) {
+      if (
+        !isCanonicalCanvasId(membership.id) ||
+        membership.canvasId !== input.canvasId ||
+        !isCanonicalCanvasId(membership.sourceNodeId) ||
+        !isCanonicalCanvasId(membership.targetNodeId) ||
+        membership.sourceNodeId === membership.targetNodeId ||
+        !isCanvasMembershipRelationType(membership.relationType) ||
+        !Number.isSafeInteger(membership.membershipPosition) ||
+        membership.membershipPosition < 0 ||
+        !isNonNegativeSafeIntegerMilliseconds(membership.createdAtMs)
+      ) {
+        throw new TaskDatabaseError('PERSISTENCE_FAILED')
+      }
+      if (edgeIdSet.has(membership.id)) {
+        throw new TaskDatabaseError('PERSISTENCE_FAILED')
+      }
+      edgeIdSet.add(membership.id)
+    }
 
     try {
       return this.#database.transaction(() => {
@@ -1161,6 +1180,62 @@ export class WebTaskDatabase {
             ],
           })
           resultEdges.push(this.requireCanvasEdge(edgeInput.id, false))
+        }
+
+        // Memberships may only reference nodes created by this same batch.
+        const membershipPairs = new Set<string>()
+        const membershipGroups = new Map<string, number[]>()
+        for (const membershipInput of input.memberships) {
+          if (
+            !nodeIdSet.has(membershipInput.sourceNodeId) ||
+            !nodeIdSet.has(membershipInput.targetNodeId)
+          ) {
+            throw new TaskDatabaseError('PERSISTENCE_FAILED')
+          }
+          const source = this.requireNodeInCanvas(input.canvasId, membershipInput.sourceNodeId)
+          const target = this.requireNodeInCanvas(input.canvasId, membershipInput.targetNodeId)
+          if (source.type === 'node_box' || target.type !== 'node_box') {
+            throw new TaskDatabaseError('PERSISTENCE_FAILED')
+          }
+          const pairKey = `${membershipInput.sourceNodeId} ${membershipInput.targetNodeId}`
+          if (membershipPairs.has(pairKey)) {
+            throw new TaskDatabaseError('PERSISTENCE_FAILED')
+          }
+          membershipPairs.add(pairKey)
+          const groupKey = `${membershipInput.targetNodeId}|${membershipInput.relationType}`
+          const group = membershipGroups.get(groupKey)
+          if (group === undefined) {
+            membershipGroups.set(groupKey, [membershipInput.membershipPosition])
+          } else {
+            group.push(membershipInput.membershipPosition)
+          }
+        }
+        // Each target box/section must carry a continuous 0..N-1 sequence.
+        for (const positions of membershipGroups.values()) {
+          const sorted = [...positions].sort((left, right) => left - right)
+          if (sorted.some((position, expected) => position !== expected)) {
+            throw new TaskDatabaseError('PERSISTENCE_FAILED')
+          }
+        }
+        for (const membershipInput of input.memberships) {
+          this.#database.exec({
+            sql: `INSERT INTO canvas_edges
+                  (id, canvas_id, source_node_id, target_node_id, relation_type,
+                   direction, line_style, membership_position, created_at_ms,
+                   updated_at_ms, deleted_at_ms)
+                  VALUES (?, ?, ?, ?, ?, 'forward', 'solid', ?, ?, ?, NULL)`,
+            bind: [
+              membershipInput.id,
+              membershipInput.canvasId,
+              membershipInput.sourceNodeId,
+              membershipInput.targetNodeId,
+              membershipInput.relationType,
+              membershipInput.membershipPosition,
+              membershipInput.createdAtMs,
+              membershipInput.createdAtMs,
+            ],
+          })
+          resultEdges.push(this.requireCanvasEdge(membershipInput.id, false))
         }
         return { nodes: resultNodes, edges: resultEdges }
       })

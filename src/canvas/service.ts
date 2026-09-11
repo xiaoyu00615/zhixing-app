@@ -25,6 +25,7 @@ import {
   CanvasRepositoryError,
   type CanvasRepository,
   type CreateCanvasSubgraphEdgeInput,
+  type CreateCanvasSubgraphMembershipInput,
   type CreateCanvasSubgraphNodeInput,
 } from '@/canvas/repository'
 
@@ -566,11 +567,53 @@ export function createCanvasService({
           lineStyle: edge.lineStyle,
           createdAtMs,
         }))
+      // Memberships are rebuilt only when both endpoints were copied. Each
+      // target Node Box gets its own continuous 0..N-1 sequence per section,
+      // preserving the original relative order while removing any gaps.
+      const membershipGroups = new Map<
+      string,
+      import('@/canvas/clipboard').CanvasClipboardMembershipSnapshot[]
+      >()
+      for (const membership of snapshot.memberships) {
+        const groupKey = `${membership.targetNodeId}|${membership.relationType}`
+        const group = membershipGroups.get(groupKey)
+        if (group === undefined) {
+          membershipGroups.set(groupKey, [membership])
+        } else {
+          group.push(membership)
+        }
+      }
+      const subgraphMemberships: CreateCanvasSubgraphMembershipInput[] = []
+      for (const group of membershipGroups.values()) {
+        const orderedGroup = [...group].sort((left, right) => {
+          if (left.membershipPosition !== right.membershipPosition) {
+            return left.membershipPosition - right.membershipPosition
+          }
+          return left.id < right.id ? -1 : left.id > right.id ? 1 : 0
+        })
+        orderedGroup.forEach((membership, nextPosition) => {
+          const newSourceNodeId = oldToNewNodeId.get(membership.sourceNodeId)
+          const newTargetNodeId = oldToNewNodeId.get(membership.targetNodeId)
+          if (newSourceNodeId === undefined || newTargetNodeId === undefined) {
+            throw new CanvasApplicationError('VALIDATION', 'sourceNodeId')
+          }
+          subgraphMemberships.push({
+            id: readGeneratedId(generateId),
+            canvasId,
+            sourceNodeId: newSourceNodeId,
+            targetNodeId: newTargetNodeId,
+            relationType: membership.relationType,
+            membershipPosition: nextPosition,
+            createdAtMs,
+          })
+        })
+      }
       const result = await callRepository(() =>
         repository.createCanvasSubgraph({
           canvasId,
           nodes: subgraphNodes,
           edges: subgraphEdges,
+          memberships: subgraphMemberships,
           createdAtMs,
         }),
       )

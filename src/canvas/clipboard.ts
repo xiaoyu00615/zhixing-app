@@ -1,4 +1,14 @@
-import type { CanvasEdge, CanvasNode } from '@/canvas/model'
+import {
+  isCanvasMembershipRelationType,
+  isCanvasOrdinaryEdgeRelationType,
+  type CanvasEdge,
+  type CanvasNode,
+  type CanvasNodeBoxNode,
+  type CanvasStickyNode,
+  type CanvasTextNode,
+  type RegisteredCanvasNodeContent,
+  type RegisteredCanvasNodeType,
+} from '@/canvas/model'
 
 const PASTE_OFFSET_STEP = 32
 
@@ -8,9 +18,12 @@ const PASTE_OFFSET_STEP = 32
  * Snapshot captures the data at copy time; subsequent mutations to source
  * nodes do not affect what Ctrl+V produces.
  *
- * Supported node types: text, sticky.
- * Node Box, unknown nodes, membership edges, and unknown ordinary edges
- * are all fail-closed — existing snapshot is preserved on failed copy.
+ * Supported node types: text, sticky, node_box. Unknown nodes are
+ * fail-closed. Ordinary edges (default/hierarchy/peer) and membership edges
+ * (ordered_box_member/unordered_box_member) are kept in separate sections.
+ * External edges (either endpoint outside the selection) are ignored.
+ * Internal unknown relations and non-canonical memberships are fail-closed.
+ * The existing snapshot is preserved on every failed copy.
  *
  * Paste offset increments by PASTE_OFFSET_STEP per consecutive paste.
  * A new Ctrl+C resets the sequence to 0.
@@ -18,10 +31,9 @@ const PASTE_OFFSET_STEP = 32
 
 export interface CanvasClipboardNodeSnapshot {
   readonly id: string
-  readonly type: 'text' | 'sticky'
+  readonly type: RegisteredCanvasNodeType
   readonly nodeName: string
-  readonly content: { readonly type: 'text'; readonly text: string }
-    | { readonly type: 'sticky'; readonly text: string }
+  readonly content: RegisteredCanvasNodeContent
   readonly x: number
   readonly y: number
 }
@@ -35,10 +47,19 @@ export interface CanvasClipboardEdgeSnapshot {
   readonly lineStyle: 'solid' | 'dashed' | 'dotted'
 }
 
+export interface CanvasClipboardMembershipSnapshot {
+  readonly id: string
+  readonly sourceNodeId: string
+  readonly targetNodeId: string
+  readonly relationType: 'ordered_box_member' | 'unordered_box_member'
+  readonly membershipPosition: number
+}
+
 export interface CanvasClipboardSnapshot {
   readonly sourceCanvasId: string
   readonly nodes: readonly CanvasClipboardNodeSnapshot[]
   readonly edges: readonly CanvasClipboardEdgeSnapshot[]
+  readonly memberships: readonly CanvasClipboardMembershipSnapshot[]
 }
 
 export class CanvasClipboardEmptyError extends Error {
@@ -65,16 +86,27 @@ export class CanvasClipboardUnsupportedEdgeError extends Error {
   }
 }
 
-function isSupportedNodeType(
-  node: CanvasNode,
-): boolean {
-  return node.type === 'text' || node.type === 'sticky'
+type SupportedClipboardNode = CanvasTextNode | CanvasStickyNode | CanvasNodeBoxNode
+
+function isSupportedNodeType(node: CanvasNode): node is SupportedClipboardNode {
+  return node.type === 'text' || node.type === 'sticky' || node.type === 'node_box'
 }
 
-function isOrdinaryEdgeRelationType(
-  type: string,
-): type is 'default' | 'hierarchy' | 'peer' {
-  return type === 'default' || type === 'hierarchy' || type === 'peer'
+/**
+ * Membership presentation is canonical at the schema level: direction is
+ * always forward, line style is always solid, and membership_position is a
+ * non-negative integer. A copy must never normalize a non-canonical row.
+ */
+function isCanonicalMembership(
+  edge: CanvasEdge,
+): edge is CanvasEdge & { readonly membershipPosition: number } {
+  return (
+    edge.direction === 'forward' &&
+    edge.lineStyle === 'solid' &&
+    typeof edge.membershipPosition === 'number' &&
+    Number.isSafeInteger(edge.membershipPosition) &&
+    edge.membershipPosition >= 0
+  )
 }
 
 let currentSnapshot: CanvasClipboardSnapshot | null = null
@@ -92,49 +124,95 @@ export function copyToClipboard(
 ): void {
   if (selectedNodes.length === 0) return
 
+  const supportedNodes: SupportedClipboardNode[] = []
   for (const node of selectedNodes) {
     if (!isSupportedNodeType(node)) {
-      // Node box or unknown node: fail-closed, preserve existing snapshot.
+      // Unknown node: fail-closed, preserve existing snapshot.
       throw new CanvasClipboardUnsupportedNodeError()
     }
+    supportedNodes.push(node)
   }
 
-  const nodeIdSet = new Set(selectedNodes.map((n) => n.id))
-  const snapshotNodes: CanvasClipboardNodeSnapshot[] = selectedNodes
-    .map((node) => ({
-      id: node.id,
-      type: node.type as 'text' | 'sticky',
-      nodeName: node.nodeName,
-      content: node.content as Exclude<typeof node.content, { type: 'node_box' } | { type: 'unknown' }>,
-      x: node.x,
-      y: node.y,
-    }))
+  const nodeIdSet = new Set(supportedNodes.map((n) => n.id))
+  const nodeById = new Map<string, SupportedClipboardNode>(
+    supportedNodes.map((node) => [node.id, node]),
+  )
+  const snapshotNodes: CanvasClipboardNodeSnapshot[] = supportedNodes.map((node) => ({
+    id: node.id,
+    type: node.type,
+    nodeName: node.nodeName,
+    content: node.content,
+    x: node.x,
+    y: node.y,
+  }))
 
   // Edge scope: only edges fully inside the copied selection are considered.
   // External edges (either endpoint outside the selection) are ignored
-  // regardless of relation type, so legacy canvases containing membership
-  // edges elsewhere are not blocked from copying supported selections.
+  // regardless of relation type, so canvases containing membership edges
+  // elsewhere are not blocked from copying supported selections.
   const snapshotEdges: CanvasClipboardEdgeSnapshot[] = []
+  const snapshotMemberships: CanvasClipboardMembershipSnapshot[] = []
+  const membershipPairs = new Set<string>()
+  const membershipPositionKeys = new Set<string>()
+
   for (const edge of allEdges) {
     if (edge.deletedAtMs !== null) continue
     if (!nodeIdSet.has(edge.sourceNodeId) || !nodeIdSet.has(edge.targetNodeId)) {
       continue
     }
-    if (!isOrdinaryEdgeRelationType(edge.relationType)) {
-      // Internal unsupported relation (membership or unknown): fail-closed.
-      throw new CanvasClipboardUnsupportedEdgeError()
+
+    if (isCanvasOrdinaryEdgeRelationType(edge.relationType)) {
+      snapshotEdges.push({
+        id: edge.id,
+        sourceNodeId: edge.sourceNodeId,
+        targetNodeId: edge.targetNodeId,
+        relationType: edge.relationType,
+        direction: edge.direction,
+        lineStyle: edge.lineStyle,
+      })
+      continue
     }
-    snapshotEdges.push({
-      id: edge.id,
-      sourceNodeId: edge.sourceNodeId,
-      targetNodeId: edge.targetNodeId,
-      relationType: edge.relationType,
-      direction: edge.direction,
-      lineStyle: edge.lineStyle,
-    })
+
+    if (isCanvasMembershipRelationType(edge.relationType)) {
+      const source = nodeById.get(edge.sourceNodeId)
+      const target = nodeById.get(edge.targetNodeId)
+      // Membership must run member -> Node Box; Node Box nesting is rejected.
+      if (
+        source === undefined ||
+        target === undefined ||
+        source.type === 'node_box' ||
+        target.type !== 'node_box' ||
+        !isCanonicalMembership(edge)
+      ) {
+        throw new CanvasClipboardUnsupportedEdgeError()
+      }
+      const pairKey = `${edge.sourceNodeId} ${edge.targetNodeId}`
+      const positionKey = `${edge.targetNodeId} ${edge.relationType} ${edge.membershipPosition}`
+      if (membershipPairs.has(pairKey) || membershipPositionKeys.has(positionKey)) {
+        throw new CanvasClipboardUnsupportedEdgeError()
+      }
+      membershipPairs.add(pairKey)
+      membershipPositionKeys.add(positionKey)
+      snapshotMemberships.push({
+        id: edge.id,
+        sourceNodeId: edge.sourceNodeId,
+        targetNodeId: edge.targetNodeId,
+        relationType: edge.relationType,
+        membershipPosition: edge.membershipPosition,
+      })
+      continue
+    }
+
+    // Internal unknown relation: fail-closed.
+    throw new CanvasClipboardUnsupportedEdgeError()
   }
 
-  currentSnapshot = { sourceCanvasId: canvasId, nodes: snapshotNodes, edges: snapshotEdges }
+  currentSnapshot = {
+    sourceCanvasId: canvasId,
+    nodes: snapshotNodes,
+    edges: snapshotEdges,
+    memberships: snapshotMemberships,
+  }
   pasteOffsetSequence = 0
 }
 

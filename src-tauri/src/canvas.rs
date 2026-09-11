@@ -347,10 +347,21 @@ pub(crate) struct CreateCanvasSubgraphEdgeInput {
     pub(crate) created_at_ms: i64,
 }
 
+pub(crate) struct CreateCanvasSubgraphMembershipInput {
+    pub(crate) id: String,
+    pub(crate) canvas_id: String,
+    pub(crate) source_node_id: String,
+    pub(crate) target_node_id: String,
+    pub(crate) relation_type: String,
+    pub(crate) membership_position: i64,
+    pub(crate) created_at_ms: i64,
+}
+
 pub(crate) struct CreateCanvasSubgraphInput {
     pub(crate) canvas_id: String,
     pub(crate) nodes: Vec<CreateCanvasSubgraphNodeInput>,
     pub(crate) edges: Vec<CreateCanvasSubgraphEdgeInput>,
+    pub(crate) memberships: Vec<CreateCanvasSubgraphMembershipInput>,
     pub(crate) created_at_ms: i64,
 }
 
@@ -1109,7 +1120,7 @@ impl CanvasDbService {
                 return Err(CanvasError::PersistenceFailed);
             }
         }
-        let mut edge_ids = HashSet::with_capacity(input.edges.len());
+        let mut edge_ids = HashSet::with_capacity(input.edges.len() + input.memberships.len());
         for edge_input in &input.edges {
             validate_id(&edge_input.id)?;
             validate_id(&edge_input.canvas_id)?;
@@ -1124,6 +1135,26 @@ impl CanvasDbService {
             validate_relation_type(&edge_input.relation_type)?;
             validate_timestamp(edge_input.created_at_ms)?;
             if !edge_ids.insert(&edge_input.id) {
+                return Err(CanvasError::PersistenceFailed);
+            }
+        }
+        for membership_input in &input.memberships {
+            validate_id(&membership_input.id)?;
+            validate_id(&membership_input.canvas_id)?;
+            validate_id(&membership_input.source_node_id)?;
+            validate_id(&membership_input.target_node_id)?;
+            if membership_input.canvas_id != input.canvas_id {
+                return Err(CanvasError::PersistenceFailed);
+            }
+            if membership_input.source_node_id == membership_input.target_node_id {
+                return Err(CanvasError::PersistenceFailed);
+            }
+            validate_membership_relation_type(&membership_input.relation_type)?;
+            if membership_input.membership_position < 0 {
+                return Err(CanvasError::PersistenceFailed);
+            }
+            validate_timestamp(membership_input.created_at_ms)?;
+            if !edge_ids.insert(&membership_input.id) {
                 return Err(CanvasError::PersistenceFailed);
             }
         }
@@ -1156,7 +1187,7 @@ impl CanvasDbService {
             created_nodes.push(record);
         }
 
-        let mut created_edges = Vec::with_capacity(input.edges.len());
+        let mut created_edges = Vec::with_capacity(input.edges.len() + input.memberships.len());
         for edge_input in &input.edges {
             Self::get_node(&transaction, &edge_input.source_node_id)
                 .map_err(|_| CanvasError::NotFound)?;
@@ -1181,6 +1212,71 @@ impl CanvasDbService {
                 )
                 .map_err(map_edge_write_error)?;
             let record = Self::get_active_edge(&transaction, &edge_input.id)
+                .map_err(|_| CanvasError::PersistenceFailed)?;
+            created_edges.push(record);
+        }
+
+        // Memberships may only reference nodes created by this same batch.
+        let batch_node_ids: HashSet<&String> = input.nodes.iter().map(|node| &node.id).collect();
+        let mut membership_pairs: HashSet<(&String, &String)> = HashSet::new();
+        let mut membership_groups: HashMap<(&String, &str), Vec<i64>> = HashMap::new();
+        for membership_input in &input.memberships {
+            if !batch_node_ids.contains(&membership_input.source_node_id)
+                || !batch_node_ids.contains(&membership_input.target_node_id)
+            {
+                return Err(CanvasError::PersistenceFailed);
+            }
+            let source = Self::get_node(&transaction, &membership_input.source_node_id)
+                .map_err(|_| CanvasError::NotFound)?;
+            let target = Self::get_node(&transaction, &membership_input.target_node_id)
+                .map_err(|_| CanvasError::NotFound)?;
+            if source.node_type == "node_box" || target.node_type != "node_box" {
+                return Err(CanvasError::PersistenceFailed);
+            }
+            if !membership_pairs.insert((
+                &membership_input.source_node_id,
+                &membership_input.target_node_id,
+            )) {
+                return Err(CanvasError::PersistenceFailed);
+            }
+            membership_groups
+                .entry((
+                    &membership_input.target_node_id,
+                    membership_input.relation_type.as_str(),
+                ))
+                .or_default()
+                .push(membership_input.membership_position);
+        }
+        // Each target box/section must carry a continuous 0..N-1 sequence.
+        for positions in membership_groups.values_mut() {
+            positions.sort_unstable();
+            for (expected, actual) in positions.iter().enumerate() {
+                let expected =
+                    i64::try_from(expected).map_err(|_| CanvasError::PersistenceFailed)?;
+                if *actual != expected {
+                    return Err(CanvasError::PersistenceFailed);
+                }
+            }
+        }
+        for membership_input in &input.memberships {
+            transaction
+                .execute(
+                    "INSERT INTO canvas_edges(\
+                     id, canvas_id, source_node_id, target_node_id, relation_type, direction, \
+                     line_style, membership_position, created_at_ms, updated_at_ms, deleted_at_ms\
+                  ) VALUES(?1, ?2, ?3, ?4, ?5, 'forward', 'solid', ?6, ?7, ?7, NULL)",
+                    params![
+                        membership_input.id,
+                        membership_input.canvas_id,
+                        membership_input.source_node_id,
+                        membership_input.target_node_id,
+                        membership_input.relation_type,
+                        membership_input.membership_position,
+                        membership_input.created_at_ms,
+                    ],
+                )
+                .map_err(map_edge_write_error)?;
+            let record = Self::get_active_edge(&transaction, &membership_input.id)
                 .map_err(|_| CanvasError::PersistenceFailed)?;
             created_edges.push(record);
         }
@@ -4179,6 +4275,42 @@ mod tests {
         }
     }
 
+    fn subgraph_box_input(
+        id: &str,
+        canvas_id: &str,
+        node_name: &str,
+    ) -> CreateCanvasSubgraphNodeInput {
+        CreateCanvasSubgraphNodeInput {
+            id: id.into(),
+            canvas_id: canvas_id.into(),
+            node_type: "node_box".into(),
+            node_name: node_name.into(),
+            content: "{\"type\":\"node_box\"}".into(),
+            x: 300.0,
+            y: 300.0,
+            created_at_ms: 100,
+        }
+    }
+
+    fn subgraph_membership_input(
+        id: &str,
+        canvas_id: &str,
+        source_node_id: &str,
+        target_node_id: &str,
+        relation_type: &str,
+        membership_position: i64,
+    ) -> CreateCanvasSubgraphMembershipInput {
+        CreateCanvasSubgraphMembershipInput {
+            id: id.into(),
+            canvas_id: canvas_id.into(),
+            source_node_id: source_node_id.into(),
+            target_node_id: target_node_id.into(),
+            relation_type: relation_type.into(),
+            membership_position,
+            created_at_ms: 102,
+        }
+    }
+
     #[test]
     fn creates_subgraph_with_one_node_and_zero_edges() {
         let (_sandbox, _database_path, connection) = migrated_database();
@@ -4191,6 +4323,7 @@ mod tests {
                 canvas_id: CANVAS_ID.into(),
                 nodes: vec![subgraph_node_input(node_id, CANVAS_ID, "text", "章节 A")],
                 edges: vec![],
+                memberships: vec![],
                 created_at_ms: 100,
             },
         )
@@ -4229,6 +4362,7 @@ mod tests {
                     line_style: CanvasEdgeLineStyle::Dashed,
                     created_at_ms: 102,
                 }],
+                memberships: vec![],
                 created_at_ms: 100,
             },
         )
@@ -4272,6 +4406,7 @@ mod tests {
                     line_style: CanvasEdgeLineStyle::Solid,
                     created_at_ms: 102,
                 }],
+                memberships: vec![],
                 created_at_ms: 100,
             },
         );
@@ -4292,6 +4427,367 @@ mod tests {
                 .query_row(
                     "SELECT COUNT(*) FROM canvas_edges WHERE id = ?1",
                     [edge_ab],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn subgraph_creates_an_empty_node_box() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let box_id = "00000000-0000-4000-8000-000000002401";
+
+        let (nodes, edges) = CanvasDbService::create_canvas_subgraph(
+            &connection,
+            CreateCanvasSubgraphInput {
+                canvas_id: CANVAS_ID.into(),
+                nodes: vec![subgraph_box_input(box_id, CANVAS_ID, "收集盒")],
+                edges: vec![],
+                memberships: vec![],
+                created_at_ms: 100,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_type, "node_box");
+        assert_eq!(nodes[0].node_name, "收集盒");
+        assert_eq!(edges.len(), 0);
+    }
+
+    #[test]
+    fn subgraph_rebuilds_memberships_with_canonical_fields_and_positions() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let box_x = "00000000-0000-4000-8000-000000002501";
+        let member_a = "00000000-0000-4000-8000-000000002502";
+        let member_c = "00000000-0000-4000-8000-000000002503";
+        let membership_a = "00000000-0000-4000-8000-000000002504";
+        let membership_c = "00000000-0000-4000-8000-000000002505";
+
+        let (_nodes, edges) = CanvasDbService::create_canvas_subgraph(
+            &connection,
+            CreateCanvasSubgraphInput {
+                canvas_id: CANVAS_ID.into(),
+                nodes: vec![
+                    subgraph_box_input(box_x, CANVAS_ID, "X"),
+                    subgraph_node_input(member_a, CANVAS_ID, "text", "A"),
+                    subgraph_node_input(member_c, CANVAS_ID, "sticky", "C"),
+                ],
+                edges: vec![],
+                memberships: vec![
+                    subgraph_membership_input(
+                        membership_a,
+                        CANVAS_ID,
+                        member_a,
+                        box_x,
+                        "ordered_box_member",
+                        0,
+                    ),
+                    subgraph_membership_input(
+                        membership_c,
+                        CANVAS_ID,
+                        member_c,
+                        box_x,
+                        "unordered_box_member",
+                        0,
+                    ),
+                ],
+                created_at_ms: 100,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(edges.len(), 2);
+        let ordered = edges
+            .iter()
+            .find(|edge| edge.id == membership_a)
+            .expect("ordered membership");
+        assert_eq!(ordered.relation_type, "ordered_box_member");
+        assert_eq!(ordered.direction, CanvasEdgeDirection::Forward);
+        assert_eq!(ordered.line_style, CanvasEdgeLineStyle::Solid);
+        assert_eq!(ordered.membership_position, Some(0));
+        let unordered = edges
+            .iter()
+            .find(|edge| edge.id == membership_c)
+            .expect("unordered membership");
+        assert_eq!(unordered.relation_type, "unordered_box_member");
+        assert_eq!(unordered.membership_position, Some(0));
+    }
+
+    #[test]
+    fn subgraph_normalizes_each_box_section_independently() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let box_x = "00000000-0000-4000-8000-000000002601";
+        let box_y = "00000000-0000-4000-8000-000000002602";
+        let member_a = "00000000-0000-4000-8000-000000002603";
+        let member_b = "00000000-0000-4000-8000-000000002604";
+        let membership_a = "00000000-0000-4000-8000-000000002605";
+        let membership_b = "00000000-0000-4000-8000-000000002606";
+
+        let result = CanvasDbService::create_canvas_subgraph(
+            &connection,
+            CreateCanvasSubgraphInput {
+                canvas_id: CANVAS_ID.into(),
+                nodes: vec![
+                    subgraph_box_input(box_x, CANVAS_ID, "X"),
+                    subgraph_box_input(box_y, CANVAS_ID, "Y"),
+                    subgraph_node_input(member_a, CANVAS_ID, "text", "A"),
+                    subgraph_node_input(member_b, CANVAS_ID, "text", "B"),
+                ],
+                edges: vec![],
+                memberships: vec![
+                    subgraph_membership_input(
+                        membership_a,
+                        CANVAS_ID,
+                        member_a,
+                        box_x,
+                        "ordered_box_member",
+                        0,
+                    ),
+                    subgraph_membership_input(
+                        membership_b,
+                        CANVAS_ID,
+                        member_b,
+                        box_y,
+                        "ordered_box_member",
+                        0,
+                    ),
+                ],
+                created_at_ms: 100,
+            },
+        );
+
+        let (_nodes, edges) = result.unwrap();
+        assert_eq!(edges.len(), 2);
+        for edge in &edges {
+            assert_eq!(edge.membership_position, Some(0));
+        }
+    }
+
+    #[test]
+    fn subgraph_rejects_non_contiguous_membership_positions() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let box_x = "00000000-0000-4000-8000-000000002701";
+        let member_a = "00000000-0000-4000-8000-000000002702";
+        let member_c = "00000000-0000-4000-8000-000000002703";
+        let membership_a = "00000000-0000-4000-8000-000000002704";
+        let membership_c = "00000000-0000-4000-8000-000000002705";
+
+        let result = CanvasDbService::create_canvas_subgraph(
+            &connection,
+            CreateCanvasSubgraphInput {
+                canvas_id: CANVAS_ID.into(),
+                nodes: vec![
+                    subgraph_box_input(box_x, CANVAS_ID, "X"),
+                    subgraph_node_input(member_a, CANVAS_ID, "text", "A"),
+                    subgraph_node_input(member_c, CANVAS_ID, "text", "C"),
+                ],
+                edges: vec![],
+                memberships: vec![
+                    subgraph_membership_input(
+                        membership_a,
+                        CANVAS_ID,
+                        member_a,
+                        box_x,
+                        "ordered_box_member",
+                        0,
+                    ),
+                    subgraph_membership_input(
+                        membership_c,
+                        CANVAS_ID,
+                        member_c,
+                        box_x,
+                        "ordered_box_member",
+                        2,
+                    ),
+                ],
+                created_at_ms: 100,
+            },
+        );
+
+        assert_eq!(result.unwrap_err(), CanvasError::PersistenceFailed);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM canvas_nodes WHERE id IN (?1, ?2, ?3)",
+                    rusqlite::params![box_x, member_a, member_c],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn subgraph_rejects_node_box_membership_sources_and_non_box_targets() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let box_x = "00000000-0000-4000-8000-000000002801";
+        let box_y = "00000000-0000-4000-8000-000000002802";
+        let text_target = "00000000-0000-4000-8000-000000002803";
+        let nested_membership = "00000000-0000-4000-8000-000000002804";
+        let wrong_target_membership = "00000000-0000-4000-8000-000000002805";
+
+        let nested = CanvasDbService::create_canvas_subgraph(
+            &connection,
+            CreateCanvasSubgraphInput {
+                canvas_id: CANVAS_ID.into(),
+                nodes: vec![
+                    subgraph_box_input(box_x, CANVAS_ID, "X"),
+                    subgraph_box_input(box_y, CANVAS_ID, "Y"),
+                ],
+                edges: vec![],
+                memberships: vec![subgraph_membership_input(
+                    nested_membership,
+                    CANVAS_ID,
+                    box_x,
+                    box_y,
+                    "ordered_box_member",
+                    0,
+                )],
+                created_at_ms: 100,
+            },
+        );
+        assert_eq!(nested.unwrap_err(), CanvasError::PersistenceFailed);
+
+        let wrong_target = CanvasDbService::create_canvas_subgraph(
+            &connection,
+            CreateCanvasSubgraphInput {
+                canvas_id: CANVAS_ID.into(),
+                nodes: vec![
+                    subgraph_box_input(box_x, CANVAS_ID, "X"),
+                    subgraph_node_input(text_target, CANVAS_ID, "text", "T"),
+                ],
+                edges: vec![],
+                memberships: vec![subgraph_membership_input(
+                    wrong_target_membership,
+                    CANVAS_ID,
+                    box_x,
+                    text_target,
+                    "ordered_box_member",
+                    0,
+                )],
+                created_at_ms: 100,
+            },
+        );
+        assert_eq!(wrong_target.unwrap_err(), CanvasError::PersistenceFailed);
+    }
+
+    #[test]
+    fn subgraph_rejects_memberships_referencing_nodes_outside_the_batch() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let existing_box = "00000000-0000-4000-8000-000000002901";
+        CanvasDbService::create_node(
+            &connection,
+            CreateCanvasNodeInput {
+                id: existing_box.into(),
+                canvas_id: CANVAS_ID.into(),
+                node_type: "node_box".into(),
+                node_name: "Existing".into(),
+                content: CanvasNodeContent::NodeBox,
+                x: 10.0,
+                y: 10.0,
+                created_at_ms: 90,
+            },
+        )
+        .unwrap();
+        let member_a = "00000000-0000-4000-8000-000000002902";
+        let membership_a = "00000000-0000-4000-8000-000000002903";
+
+        let result = CanvasDbService::create_canvas_subgraph(
+            &connection,
+            CreateCanvasSubgraphInput {
+                canvas_id: CANVAS_ID.into(),
+                nodes: vec![subgraph_node_input(member_a, CANVAS_ID, "text", "A")],
+                edges: vec![],
+                memberships: vec![subgraph_membership_input(
+                    membership_a,
+                    CANVAS_ID,
+                    member_a,
+                    existing_box,
+                    "ordered_box_member",
+                    0,
+                )],
+                created_at_ms: 100,
+            },
+        );
+
+        assert_eq!(result.unwrap_err(), CanvasError::PersistenceFailed);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM canvas_edges WHERE id = ?1",
+                    [membership_a],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn subgraph_membership_failure_rolls_back_nodes_and_ordinary_edges() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let box_x = "00000000-0000-4000-8000-000000002a01";
+        let member_a = "00000000-0000-4000-8000-000000002a02";
+        let ordinary_edge = "00000000-0000-4000-8000-000000002a03";
+        let bad_membership = "00000000-0000-4000-8000-000000002a04";
+
+        let result = CanvasDbService::create_canvas_subgraph(
+            &connection,
+            CreateCanvasSubgraphInput {
+                canvas_id: CANVAS_ID.into(),
+                nodes: vec![
+                    subgraph_box_input(box_x, CANVAS_ID, "X"),
+                    subgraph_node_input(member_a, CANVAS_ID, "text", "A"),
+                ],
+                edges: vec![CreateCanvasSubgraphEdgeInput {
+                    id: ordinary_edge.into(),
+                    canvas_id: CANVAS_ID.into(),
+                    source_node_id: member_a.into(),
+                    target_node_id: box_x.into(),
+                    relation_type: "hierarchy".into(),
+                    direction: CanvasEdgeDirection::Forward,
+                    line_style: CanvasEdgeLineStyle::Solid,
+                    created_at_ms: 102,
+                }],
+                // A single membership must occupy position 0; position 1 is a gap.
+                memberships: vec![subgraph_membership_input(
+                    bad_membership,
+                    CANVAS_ID,
+                    member_a,
+                    box_x,
+                    "ordered_box_member",
+                    1,
+                )],
+                created_at_ms: 100,
+            },
+        );
+
+        assert_eq!(result.unwrap_err(), CanvasError::PersistenceFailed);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM canvas_nodes WHERE id IN (?1, ?2)",
+                    rusqlite::params![box_x, member_a],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM canvas_edges WHERE id IN (?1, ?2)",
+                    rusqlite::params![ordinary_edge, bad_membership],
                     |row| row.get::<_, i64>(0),
                 )
                 .unwrap(),
