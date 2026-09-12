@@ -496,6 +496,42 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
     }
   }, [canvas, canvasId, commitNodeContent, commitNodeName, serviceRef])
 
+  // Slice 11A-1: undo / redo keyboard shortcuts.
+  // Only the five supported operations are captured in history; other mutations
+  // are transparently forwarded and do not touch the stacks.
+  useEffect(() => {
+    if (service === null || canvas === null) return
+    const currentService = serviceRef.current
+    if (currentService === null) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isEditableTarget(event.target)) return
+      const isUndo =
+        (event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z'
+      const isRedo =
+        ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'z') ||
+        ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'y')
+      if (!isUndo && !isRedo) return
+      event.preventDefault()
+      void (async () => {
+        try {
+          if (isUndo) {
+            await currentService.undo(canvas.id)
+            setAttempt((a) => a + 1)
+            setFeedback('撤销')
+          } else {
+            await currentService.redo(canvas.id)
+            setAttempt((a) => a + 1)
+            setFeedback('重做')
+          }
+        } catch {
+          setFeedback(isUndo ? '撤销失败，请重试。' : '重做失败，请重试。')
+        }
+      })()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [service, canvas, serviceRef, canvasId]);
+
   async function leaveCanvas(): Promise<void> {
     if (latestViewport.current !== null) await persistViewport(latestViewport.current)
     void navigate(PATHS.CANVAS)

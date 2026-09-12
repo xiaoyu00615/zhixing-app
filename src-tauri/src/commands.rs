@@ -929,6 +929,76 @@ pub(crate) struct CanvasSubgraphMembershipDto {
     created_at_ms: i64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CanvasMutationNodeDto {
+    id: String,
+    canvas_id: String,
+    #[serde(rename = "type")]
+    node_type: String,
+    node_name: String,
+    content: CanvasNodeContent,
+    x: f64,
+    y: f64,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CanvasMutationEdgeDto {
+    id: String,
+    canvas_id: String,
+    source_node_id: String,
+    target_node_id: String,
+    relation_type: String,
+    direction: CanvasEdgeDirection,
+    line_style: CanvasEdgeLineStyle,
+    membership_position: Option<i64>,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind")]
+pub(crate) enum CanvasMutationActionDto {
+    #[serde(rename = "insert_nodes")]
+    InsertNodes { nodes: Vec<CanvasMutationNodeDto> },
+    #[serde(rename = "soft_delete_nodes")]
+    SoftDeleteNodes {
+        #[serde(rename = "nodeIds")]
+        node_ids: Vec<String>,
+    },
+    #[serde(rename = "set_node_name")]
+    SetNodeName {
+        #[serde(rename = "nodeId")]
+        node_id: String,
+        #[serde(rename = "nodeName")]
+        node_name: String,
+    },
+    #[serde(rename = "set_node_content")]
+    SetNodeContent {
+        #[serde(rename = "nodeId")]
+        node_id: String,
+        content: CanvasNodeContent,
+    },
+    #[serde(rename = "insert_edges")]
+    InsertEdges { edges: Vec<CanvasMutationEdgeDto> },
+    #[serde(rename = "soft_delete_edges")]
+    SoftDeleteEdges {
+        #[serde(rename = "edgeIds")]
+        edge_ids: Vec<String>,
+    },
+    #[serde(rename = "restore_edges")]
+    RestoreEdges { edges: Vec<CanvasMutationEdgeDto> },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApplyCanvasMutationBatchDto {
+    canvas_id: String,
+    at_ms: i64,
+    actions: Vec<CanvasMutationActionDto>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CanvasEdgeDto {
@@ -1310,6 +1380,83 @@ pub(crate) fn canvas_subgraph_create(
         .map(|r| serde_json::to_value(r).unwrap())
         .collect();
     Ok(serde_json::json!({ "nodes": nodes_value, "edges": edges_value }))
+}
+
+#[tauri::command]
+pub(crate) fn canvas_mutation_apply_batch(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: ApplyCanvasMutationBatchDto,
+) -> Result<(), CanvasCommandErrorDto> {
+    let connection = canvas_connection(&app, &runtime_status)?;
+    let actions = input
+        .actions
+        .into_iter()
+        .map(map_mutation_action)
+        .collect::<Result<Vec<_>, _>>()?;
+    CanvasDbService::apply_mutation_batch(
+        &connection,
+        crate::canvas::ApplyCanvasMutationBatchInput {
+            canvas_id: input.canvas_id,
+            at_ms: input.at_ms,
+            actions,
+        },
+    )
+    .map_err(CanvasCommandErrorDto::from)?;
+    Ok(())
+}
+
+fn map_mutation_action(
+    action: CanvasMutationActionDto,
+) -> Result<crate::canvas::CanvasMutationAction, crate::canvas::CanvasError> {
+    use crate::canvas::CanvasMutationAction as Domain;
+    Ok(match action {
+        CanvasMutationActionDto::InsertNodes { nodes } => Domain::InsertNodes(
+            nodes
+                .into_iter()
+                .map(|node| crate::canvas::CanvasMutationNodeSnapshot {
+                    id: node.id,
+                    canvas_id: node.canvas_id,
+                    node_type: node.node_type,
+                    node_name: node.node_name,
+                    content: node.content,
+                    x: node.x,
+                    y: node.y,
+                    created_at_ms: node.created_at_ms,
+                })
+                .collect(),
+        ),
+        CanvasMutationActionDto::SoftDeleteNodes { node_ids } => Domain::SoftDeleteNodes(node_ids),
+        CanvasMutationActionDto::SetNodeName { node_id, node_name } => {
+            Domain::SetNodeName { node_id, node_name }
+        }
+        CanvasMutationActionDto::SetNodeContent { node_id, content } => {
+            Domain::SetNodeContent { node_id, content }
+        }
+        CanvasMutationActionDto::InsertEdges { edges } => {
+            Domain::InsertEdges(edges.into_iter().map(mutation_edge_snapshot).collect())
+        }
+        CanvasMutationActionDto::SoftDeleteEdges { edge_ids } => Domain::SoftDeleteEdges(edge_ids),
+        CanvasMutationActionDto::RestoreEdges { edges } => {
+            Domain::RestoreEdges(edges.into_iter().map(mutation_edge_snapshot).collect())
+        }
+    })
+}
+
+fn mutation_edge_snapshot(
+    edge: CanvasMutationEdgeDto,
+) -> crate::canvas::CanvasMutationEdgeSnapshot {
+    crate::canvas::CanvasMutationEdgeSnapshot {
+        id: edge.id,
+        canvas_id: edge.canvas_id,
+        source_node_id: edge.source_node_id,
+        target_node_id: edge.target_node_id,
+        relation_type: edge.relation_type,
+        direction: edge.direction,
+        line_style: edge.line_style,
+        membership_position: edge.membership_position,
+        created_at_ms: edge.created_at_ms,
+    }
 }
 
 #[tauri::command]
@@ -1728,6 +1875,98 @@ mod tests {
             CanvasEdgeDirection::Bidirectional
         );
         assert_eq!(two_nodes.edges[0].line_style, CanvasEdgeLineStyle::Dashed);
+    }
+
+    #[test]
+    fn canvas_mutation_batch_dto_accepts_exact_adapter_payload() {
+        let payload = serde_json::json!({
+            "canvasId": "00000000-0000-4000-8000-000000000601",
+            "atMs": 200,
+            "actions": [
+                {
+                    "kind": "insert_nodes",
+                    "nodes": [
+                        {
+                            "id": "00000000-0000-4000-8000-000000002301",
+                            "canvasId": "00000000-0000-4000-8000-000000000601",
+                            "type": "text",
+                            "nodeName": "A",
+                            "content": { "type": "text", "text": "body" },
+                            "x": 10.0,
+                            "y": 20.0,
+                            "createdAtMs": 100
+                        }
+                    ]
+                },
+                { "kind": "soft_delete_nodes", "nodeIds": ["00000000-0000-4000-8000-000000002301"] },
+                { "kind": "set_node_name", "nodeId": "00000000-0000-4000-8000-000000002301", "nodeName": "B" },
+                {
+                    "kind": "set_node_content",
+                    "nodeId": "00000000-0000-4000-8000-000000002301",
+                    "content": { "type": "text", "text": "edited" }
+                },
+                {
+                    "kind": "insert_edges",
+                    "edges": [
+                        {
+                            "id": "00000000-0000-4000-8000-000000002302",
+                            "canvasId": "00000000-0000-4000-8000-000000000601",
+                            "sourceNodeId": "00000000-0000-4000-8000-000000002301",
+                            "targetNodeId": "00000000-0000-4000-8000-000000002303",
+                            "relationType": "default",
+                            "direction": "forward",
+                            "lineStyle": "solid",
+                            "membershipPosition": null,
+                            "createdAtMs": 101
+                        }
+                    ]
+                },
+                { "kind": "soft_delete_edges", "edgeIds": ["00000000-0000-4000-8000-000000002302"] },
+                {
+                    "kind": "restore_edges",
+                    "edges": [
+                        {
+                            "id": "00000000-0000-4000-8000-000000002302",
+                            "canvasId": "00000000-0000-4000-8000-000000000601",
+                            "sourceNodeId": "00000000-0000-4000-8000-000000002301",
+                            "targetNodeId": "00000000-0000-4000-8000-000000002303",
+                            "relationType": "default",
+                            "direction": "forward",
+                            "lineStyle": "solid",
+                            "membershipPosition": null,
+                            "createdAtMs": 101
+                        }
+                    ]
+                }
+            ]
+        });
+        let parsed: ApplyCanvasMutationBatchDto = serde_json::from_value(payload).unwrap();
+        assert_eq!(parsed.canvas_id, "00000000-0000-4000-8000-000000000601");
+        assert_eq!(parsed.at_ms, 200);
+        assert_eq!(parsed.actions.len(), 7);
+        assert!(matches!(
+            parsed.actions[0],
+            CanvasMutationActionDto::InsertNodes { .. }
+        ));
+        assert!(matches!(
+            parsed.actions[6],
+            CanvasMutationActionDto::RestoreEdges { .. }
+        ));
+
+        let unknown_kind = serde_json::json!({
+            "canvasId": "00000000-0000-4000-8000-000000000601",
+            "atMs": 200,
+            "actions": [{ "kind": "drop_table" }]
+        });
+        assert!(serde_json::from_value::<ApplyCanvasMutationBatchDto>(unknown_kind).is_err());
+
+        // Action wrapper fields are camelCase; snake_case is not accepted.
+        let snake_field = serde_json::json!({
+            "canvasId": "00000000-0000-4000-8000-000000000601",
+            "atMs": 200,
+            "actions": [{ "kind": "soft_delete_nodes", "node_ids": [] }]
+        });
+        assert!(serde_json::from_value::<ApplyCanvasMutationBatchDto>(snake_field).is_err());
     }
 
     #[test]

@@ -23,6 +23,7 @@ import {
   type CanvasRepository,
   type CanvasRepositoryOperation,
   type AddCanvasNodeBoxMemberInput,
+  type ApplyCanvasMutationBatchInput,
   type CreateCanvasEdgeInput,
   type CreateCanvasInput,
   type CreateCanvasNodeInput,
@@ -390,6 +391,16 @@ export class NativeCanvasRepository implements CanvasRepository {
     return parseEdge(
       await invokeCanvas('canvas_edge_delete', 'deleteCanvasEdge', { input }),
       'deleteCanvasEdge',
+    )
+  }
+
+  async applyCanvasMutationBatch(
+    input: ApplyCanvasMutationBatchInput,
+  ): Promise<void> {
+    await invokeCanvas(
+      'canvas_mutation_apply_batch',
+      'applyCanvasMutationBatch',
+      { input },
     )
   }
 }

@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 
-use rusqlite::{params, Connection, ErrorCode, OptionalExtension, Row};
+use rusqlite::{params, Connection, ErrorCode, OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use thiserror::Error;
@@ -363,6 +363,53 @@ pub(crate) struct CreateCanvasSubgraphInput {
     pub(crate) edges: Vec<CreateCanvasSubgraphEdgeInput>,
     pub(crate) memberships: Vec<CreateCanvasSubgraphMembershipInput>,
     pub(crate) created_at_ms: i64,
+}
+
+pub(crate) struct CanvasMutationNodeSnapshot {
+    pub(crate) id: String,
+    pub(crate) canvas_id: String,
+    pub(crate) node_type: String,
+    pub(crate) node_name: String,
+    pub(crate) content: CanvasNodeContent,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) created_at_ms: i64,
+}
+
+pub(crate) struct CanvasMutationEdgeSnapshot {
+    pub(crate) id: String,
+    pub(crate) canvas_id: String,
+    pub(crate) source_node_id: String,
+    pub(crate) target_node_id: String,
+    pub(crate) relation_type: String,
+    pub(crate) direction: CanvasEdgeDirection,
+    pub(crate) line_style: CanvasEdgeLineStyle,
+    pub(crate) membership_position: Option<i64>,
+    pub(crate) created_at_ms: i64,
+}
+
+pub(crate) enum CanvasMutationAction {
+    InsertNodes(Vec<CanvasMutationNodeSnapshot>),
+    // Slice 11A-1: emitted only as the inverse of InsertNodes by the history
+    // layer. Soft-deletes exactly these explicit node ids without cascading.
+    SoftDeleteNodes(Vec<String>),
+    SetNodeName {
+        node_id: String,
+        node_name: String,
+    },
+    SetNodeContent {
+        node_id: String,
+        content: CanvasNodeContent,
+    },
+    InsertEdges(Vec<CanvasMutationEdgeSnapshot>),
+    SoftDeleteEdges(Vec<String>),
+    RestoreEdges(Vec<CanvasMutationEdgeSnapshot>),
+}
+
+pub(crate) struct ApplyCanvasMutationBatchInput {
+    pub(crate) canvas_id: String,
+    pub(crate) at_ms: i64,
+    pub(crate) actions: Vec<CanvasMutationAction>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -1285,6 +1332,358 @@ impl CanvasDbService {
             .commit()
             .map_err(|_| CanvasError::PersistenceFailed)?;
         Ok((created_nodes, created_edges))
+    }
+
+    pub(crate) fn apply_mutation_batch(
+        connection: &Connection,
+        input: ApplyCanvasMutationBatchInput,
+    ) -> Result<(), CanvasError> {
+        validate_id(&input.canvas_id)?;
+        validate_timestamp(input.at_ms)?;
+        if input.actions.is_empty() {
+            return Err(CanvasError::PersistenceFailed);
+        }
+
+        // Pre-transaction structural validation.
+        let mut node_ids: HashSet<&String> = HashSet::new();
+        let mut edge_ids: HashSet<&String> = HashSet::new();
+        for action in &input.actions {
+            match action {
+                CanvasMutationAction::InsertNodes(nodes) => {
+                    for node in nodes {
+                        validate_id(&node.id)?;
+                        validate_id(&node.canvas_id)?;
+                        if node.canvas_id != input.canvas_id {
+                            return Err(CanvasError::PersistenceFailed);
+                        }
+                        validate_position(node.x, node.y)?;
+                        validate_timestamp(node.created_at_ms)?;
+                        if node.node_type != node.content.node_type() {
+                            return Err(CanvasError::PersistenceFailed);
+                        }
+                        content_json(&node.content)?;
+                        if !node_ids.insert(&node.id) {
+                            return Err(CanvasError::PersistenceFailed);
+                        }
+                    }
+                }
+                CanvasMutationAction::SoftDeleteNodes(ids) => {
+                    for node_id in ids {
+                        validate_id(node_id)?;
+                        if !node_ids.insert(node_id) {
+                            return Err(CanvasError::PersistenceFailed);
+                        }
+                    }
+                }
+                CanvasMutationAction::SetNodeName { node_id, node_name } => {
+                    validate_id(node_id)?;
+                    validate_node_name(node_name)?;
+                }
+                CanvasMutationAction::SetNodeContent { node_id, content } => {
+                    validate_id(node_id)?;
+                    content_json(content)?;
+                }
+                CanvasMutationAction::InsertEdges(edges)
+                | CanvasMutationAction::RestoreEdges(edges) => {
+                    for edge in edges {
+                        validate_id(&edge.id)?;
+                        validate_id(&edge.canvas_id)?;
+                        validate_id(&edge.source_node_id)?;
+                        validate_id(&edge.target_node_id)?;
+                        if edge.canvas_id != input.canvas_id {
+                            return Err(CanvasError::PersistenceFailed);
+                        }
+                        if edge.source_node_id == edge.target_node_id {
+                            return Err(CanvasError::PersistenceFailed);
+                        }
+                        validate_timestamp(edge.created_at_ms)?;
+                        Self::validate_mutation_edge_shape(edge)?;
+                        if !edge_ids.insert(&edge.id) {
+                            return Err(CanvasError::PersistenceFailed);
+                        }
+                    }
+                }
+                CanvasMutationAction::SoftDeleteEdges(ids) => {
+                    for edge_id in ids {
+                        validate_id(edge_id)?;
+                        if !edge_ids.insert(edge_id) {
+                            return Err(CanvasError::PersistenceFailed);
+                        }
+                    }
+                }
+            }
+        }
+
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|_| CanvasError::PersistenceFailed)?;
+        Self::get_canvas(&transaction, &input.canvas_id)?;
+
+        // None = row missing, Some(None) = active, Some(Some(_)) = soft-deleted.
+        let node_state = |transaction: &Transaction, id: &str| {
+            transaction
+                .query_row(
+                    "SELECT deleted_at_ms FROM canvas_nodes WHERE id = ?1",
+                    [id],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .optional()
+                .map_err(|_| CanvasError::PersistenceFailed)
+        };
+        let edge_state = |transaction: &Transaction, id: &str| {
+            transaction
+                .query_row(
+                    "SELECT deleted_at_ms FROM canvas_edges WHERE id = ?1",
+                    [id],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .optional()
+                .map_err(|_| CanvasError::PersistenceFailed)
+        };
+
+        for action in &input.actions {
+            match action {
+                CanvasMutationAction::InsertNodes(nodes) => {
+                    for node in nodes {
+                        match node_state(&transaction, &node.id)? {
+                            Some(None) => return Err(CanvasError::Duplicate),
+                            None => {
+                                let content = content_json(&node.content)?;
+                                transaction
+                                    .execute(
+                                        "INSERT INTO canvas_nodes(\
+                                            id, canvas_id, type, node_name, content_json, x, y, \
+                                            created_at_ms, updated_at_ms\
+                                         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                        params![
+                                            node.id,
+                                            node.canvas_id,
+                                            node.node_type,
+                                            node.node_name,
+                                            content,
+                                            node.x,
+                                            node.y,
+                                            node.created_at_ms,
+                                            input.at_ms,
+                                        ],
+                                    )
+                                    .map_err(|_| CanvasError::PersistenceFailed)?;
+                            }
+                            Some(Some(_)) => {
+                                let content = content_json(&node.content)?;
+                                let changed = transaction
+                                    .execute(
+                                        "UPDATE canvas_nodes SET canvas_id = ?2, type = ?3, \
+                                         node_name = ?4, content_json = ?5, x = ?6, y = ?7, \
+                                         created_at_ms = ?8, updated_at_ms = ?9, deleted_at_ms = NULL \
+                                         WHERE id = ?1 AND canvas_id = ?2",
+                                        params![
+                                            node.id,
+                                            node.canvas_id,
+                                            node.node_type,
+                                            node.node_name,
+                                            content,
+                                            node.x,
+                                            node.y,
+                                            node.created_at_ms,
+                                            input.at_ms,
+                                        ],
+                                    )
+                                    .map_err(|_| CanvasError::PersistenceFailed)?;
+                                if changed != 1 {
+                                    return Err(CanvasError::NotFound);
+                                }
+                            }
+                        }
+                        Self::get_node(&transaction, &node.id)?;
+                    }
+                }
+                CanvasMutationAction::SoftDeleteNodes(ids) => {
+                    for node_id in ids {
+                        let changed = transaction
+                            .execute(
+                                "UPDATE canvas_nodes SET deleted_at_ms = ?1, updated_at_ms = ?1 \
+                                 WHERE id = ?2 AND canvas_id = ?3 AND deleted_at_ms IS NULL",
+                                params![input.at_ms, node_id, input.canvas_id],
+                            )
+                            .map_err(|_| CanvasError::PersistenceFailed)?;
+                        if changed != 1 {
+                            return Err(CanvasError::NotFound);
+                        }
+                    }
+                }
+                CanvasMutationAction::SetNodeName { node_id, node_name } => {
+                    let changed = transaction
+                        .execute(
+                            "UPDATE canvas_nodes SET node_name = ?1, updated_at_ms = ?2 \
+                             WHERE canvas_id = ?3 AND id = ?4 AND deleted_at_ms IS NULL \
+                               AND type IN ('text', 'sticky', 'node_box')",
+                            params![node_name, input.at_ms, input.canvas_id, node_id],
+                        )
+                        .map_err(|_| CanvasError::PersistenceFailed)?;
+                    if changed != 1 {
+                        return Err(CanvasError::NotFound);
+                    }
+                }
+                CanvasMutationAction::SetNodeContent { node_id, content } => {
+                    let node_type = content.node_type();
+                    let content = content_json(content)?;
+                    let changed = transaction
+                        .execute(
+                            "UPDATE canvas_nodes SET content_json = ?1, updated_at_ms = ?2 \
+                             WHERE canvas_id = ?3 AND id = ?4 AND type = ?5 AND deleted_at_ms IS NULL",
+                            params![content, input.at_ms, input.canvas_id, node_id, node_type],
+                        )
+                        .map_err(|_| CanvasError::PersistenceFailed)?;
+                    if changed != 1 {
+                        return Err(CanvasError::NotFound);
+                    }
+                }
+                CanvasMutationAction::InsertEdges(edges) => {
+                    for edge in edges {
+                        Self::require_node_in_canvas(
+                            &transaction,
+                            &input.canvas_id,
+                            &edge.source_node_id,
+                        )?;
+                        Self::require_node_in_canvas(
+                            &transaction,
+                            &input.canvas_id,
+                            &edge.target_node_id,
+                        )?;
+                        match edge_state(&transaction, &edge.id)? {
+                            Some(None) => return Err(CanvasError::Duplicate),
+                            None => {
+                                transaction
+                                    .execute(
+                                        "INSERT INTO canvas_edges(\
+                                         id, canvas_id, source_node_id, target_node_id, \
+                                         relation_type, direction, line_style, membership_position, \
+                                         created_at_ms, updated_at_ms, deleted_at_ms\
+                                      ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)",
+                                        params![
+                                            edge.id,
+                                            edge.canvas_id,
+                                            edge.source_node_id,
+                                            edge.target_node_id,
+                                            edge.relation_type,
+                                            edge.direction.as_str(),
+                                            edge.line_style.as_str(),
+                                            edge.membership_position,
+                                            edge.created_at_ms,
+                                            input.at_ms,
+                                        ],
+                                    )
+                                    .map_err(map_edge_write_error)?;
+                            }
+                            Some(Some(_)) => {
+                                Self::update_edge_snapshot(
+                                    &transaction,
+                                    edge,
+                                    input.at_ms,
+                                    &input.canvas_id,
+                                )?;
+                            }
+                        }
+                    }
+                }
+                CanvasMutationAction::SoftDeleteEdges(ids) => {
+                    for edge_id in ids {
+                        let changed = transaction
+                            .execute(
+                                "UPDATE canvas_edges SET deleted_at_ms = ?1, updated_at_ms = ?1 \
+                                 WHERE id = ?2 AND canvas_id = ?3 AND deleted_at_ms IS NULL",
+                                params![input.at_ms, edge_id, input.canvas_id],
+                            )
+                            .map_err(|_| CanvasError::PersistenceFailed)?;
+                        if changed != 1 {
+                            return Err(CanvasError::NotFound);
+                        }
+                    }
+                }
+                CanvasMutationAction::RestoreEdges(edges) => {
+                    for edge in edges {
+                        Self::require_node_in_canvas(
+                            &transaction,
+                            &input.canvas_id,
+                            &edge.source_node_id,
+                        )?;
+                        Self::require_node_in_canvas(
+                            &transaction,
+                            &input.canvas_id,
+                            &edge.target_node_id,
+                        )?;
+                        match edge_state(&transaction, &edge.id)? {
+                            Some(Some(_)) => {
+                                Self::update_edge_snapshot(
+                                    &transaction,
+                                    edge,
+                                    input.at_ms,
+                                    &input.canvas_id,
+                                )?;
+                            }
+                            // Missing or already active cannot be restored.
+                            None | Some(None) => return Err(CanvasError::NotFound),
+                        }
+                    }
+                }
+            }
+        }
+
+        transaction
+            .commit()
+            .map_err(|_| CanvasError::PersistenceFailed)?;
+        Ok(())
+    }
+
+    fn validate_mutation_edge_shape(edge: &CanvasMutationEdgeSnapshot) -> Result<(), CanvasError> {
+        if validate_relation_type(&edge.relation_type).is_ok() {
+            if edge.membership_position.is_some() {
+                return Err(CanvasError::PersistenceFailed);
+            }
+        } else if is_membership_relation_type(&edge.relation_type) {
+            if edge.direction != CanvasEdgeDirection::Forward
+                || edge.line_style != CanvasEdgeLineStyle::Solid
+                || !matches!(edge.membership_position, Some(position) if position >= 0)
+            {
+                return Err(CanvasError::PersistenceFailed);
+            }
+        } else {
+            return Err(CanvasError::PersistenceFailed);
+        }
+        Ok(())
+    }
+
+    fn update_edge_snapshot(
+        transaction: &Transaction,
+        edge: &CanvasMutationEdgeSnapshot,
+        at_ms: i64,
+        canvas_id: &str,
+    ) -> Result<(), CanvasError> {
+        let changed = transaction
+            .execute(
+                "UPDATE canvas_edges SET canvas_id = ?2, source_node_id = ?3, target_node_id = ?4, \
+                 relation_type = ?5, direction = ?6, line_style = ?7, membership_position = ?8, \
+                 created_at_ms = ?9, updated_at_ms = ?10, deleted_at_ms = NULL \
+                 WHERE id = ?1 AND canvas_id = ?2 AND deleted_at_ms IS NOT NULL",
+                params![
+                    edge.id,
+                    canvas_id,
+                    edge.source_node_id,
+                    edge.target_node_id,
+                    edge.relation_type,
+                    edge.direction.as_str(),
+                    edge.line_style.as_str(),
+                    edge.membership_position,
+                    edge.created_at_ms,
+                    at_ms,
+                ],
+            )
+            .map_err(map_edge_write_error)?;
+        if changed != 1 {
+            return Err(CanvasError::PersistenceFailed);
+        }
+        Ok(())
     }
 
     pub(crate) fn add_node_box_member(
@@ -4793,5 +5192,412 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    fn mutation_node(id: &str, node_name: &str) -> CanvasMutationNodeSnapshot {
+        CanvasMutationNodeSnapshot {
+            id: id.into(),
+            canvas_id: CANVAS_ID.into(),
+            node_type: "text".into(),
+            node_name: node_name.into(),
+            content: CanvasNodeContent::Text {
+                text: "body".into(),
+            },
+            x: 10.0,
+            y: 20.0,
+            created_at_ms: 20,
+        }
+    }
+
+    fn mutation_edge(id: &str, source: &str, target: &str) -> CanvasMutationEdgeSnapshot {
+        CanvasMutationEdgeSnapshot {
+            id: id.into(),
+            canvas_id: CANVAS_ID.into(),
+            source_node_id: source.into(),
+            target_node_id: target.into(),
+            relation_type: "default".into(),
+            direction: CanvasEdgeDirection::Forward,
+            line_style: CanvasEdgeLineStyle::Solid,
+            membership_position: None,
+            created_at_ms: 30,
+        }
+    }
+
+    fn active_node_count(connection: &Connection) -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM canvas_nodes WHERE deleted_at_ms IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn active_edge_count(connection: &Connection) -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM canvas_edges WHERE deleted_at_ms IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn mutation_batch_inserts_soft_deletes_and_revives_a_node() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let node = "00000000-0000-4000-8000-000000002b01";
+
+        CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 100,
+                actions: vec![CanvasMutationAction::InsertNodes(vec![mutation_node(
+                    node, "A",
+                )])],
+            },
+        )
+        .unwrap();
+        assert_eq!(active_node_count(&connection), 1);
+
+        CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 101,
+                actions: vec![CanvasMutationAction::SoftDeleteNodes(vec![node.into()])],
+            },
+        )
+        .unwrap();
+        assert_eq!(active_node_count(&connection), 0);
+
+        // Redo revives the same id instead of inserting a duplicate row.
+        CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 102,
+                actions: vec![CanvasMutationAction::InsertNodes(vec![mutation_node(
+                    node, "A",
+                )])],
+            },
+        )
+        .unwrap();
+        assert_eq!(active_node_count(&connection), 1);
+
+        let duplicate = CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 103,
+                actions: vec![CanvasMutationAction::InsertNodes(vec![mutation_node(
+                    node, "A",
+                )])],
+            },
+        );
+        assert_eq!(duplicate.unwrap_err(), CanvasError::Duplicate);
+    }
+
+    #[test]
+    fn mutation_batch_soft_deleting_node_does_not_cascade_to_edges() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let source = "00000000-0000-4000-8000-000000002b11";
+        let target = "00000000-0000-4000-8000-000000002b12";
+        let edge = "00000000-0000-4000-8000-000000002b13";
+
+        CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 100,
+                actions: vec![
+                    CanvasMutationAction::InsertNodes(vec![
+                        mutation_node(source, "S"),
+                        mutation_node(target, "T"),
+                    ]),
+                    CanvasMutationAction::InsertEdges(vec![mutation_edge(edge, source, target)]),
+                ],
+            },
+        )
+        .unwrap();
+
+        CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 101,
+                actions: vec![CanvasMutationAction::SoftDeleteNodes(vec![source.into()])],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(active_node_count(&connection), 1);
+        // The incident edge remains active: no implicit cascade.
+        assert_eq!(active_edge_count(&connection), 1);
+    }
+
+    #[test]
+    fn mutation_batch_sets_node_name_and_content() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let node = "00000000-0000-4000-8000-000000002b21";
+
+        CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 100,
+                actions: vec![CanvasMutationAction::InsertNodes(vec![mutation_node(
+                    node, "Old",
+                )])],
+            },
+        )
+        .unwrap();
+        CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 101,
+                actions: vec![CanvasMutationAction::SetNodeName {
+                    node_id: node.into(),
+                    node_name: "New".into(),
+                }],
+            },
+        )
+        .unwrap();
+        CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 102,
+                actions: vec![CanvasMutationAction::SetNodeContent {
+                    node_id: node.into(),
+                    content: CanvasNodeContent::Text {
+                        text: "edited".into(),
+                    },
+                }],
+            },
+        )
+        .unwrap();
+
+        let record = CanvasDbService::get_node(&connection, node).unwrap();
+        assert_eq!(record.node_name, "New");
+        assert_eq!(
+            record.content,
+            CanvasNodeContent::Text {
+                text: "edited".into()
+            }
+        );
+
+        let wrong_type = CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 103,
+                actions: vec![CanvasMutationAction::SetNodeContent {
+                    node_id: node.into(),
+                    content: CanvasNodeContent::Sticky {
+                        text: "wrong".into(),
+                    },
+                }],
+            },
+        );
+        assert_eq!(wrong_type.unwrap_err(), CanvasError::NotFound);
+    }
+
+    #[test]
+    fn mutation_batch_inserts_soft_deletes_and_restores_edge() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let source = "00000000-0000-4000-8000-000000002b31";
+        let target = "00000000-0000-4000-8000-000000002b32";
+        let edge = "00000000-0000-4000-8000-000000002b33";
+
+        CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 100,
+                actions: vec![
+                    CanvasMutationAction::InsertNodes(vec![
+                        mutation_node(source, "S"),
+                        mutation_node(target, "T"),
+                    ]),
+                    CanvasMutationAction::InsertEdges(vec![mutation_edge(edge, source, target)]),
+                ],
+            },
+        )
+        .unwrap();
+        CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 101,
+                actions: vec![CanvasMutationAction::SoftDeleteEdges(vec![edge.into()])],
+            },
+        )
+        .unwrap();
+        assert_eq!(active_edge_count(&connection), 0);
+
+        CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 102,
+                actions: vec![CanvasMutationAction::RestoreEdges(vec![mutation_edge(
+                    edge, source, target,
+                )])],
+            },
+        )
+        .unwrap();
+        let restored = CanvasDbService::get_active_edge(&connection, edge).unwrap();
+        assert_eq!(restored.deleted_at_ms, None);
+        assert_eq!(restored.updated_at_ms, 102);
+    }
+
+    #[test]
+    fn mutation_batch_restore_edge_fails_when_active_duplicate_occupies_slot() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let source = "00000000-0000-4000-8000-000000002b41";
+        let target = "00000000-0000-4000-8000-000000002b42";
+        let edge = "00000000-0000-4000-8000-000000002b43";
+        let replacement = "00000000-0000-4000-8000-000000002b44";
+
+        CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 100,
+                actions: vec![
+                    CanvasMutationAction::InsertNodes(vec![
+                        mutation_node(source, "S"),
+                        mutation_node(target, "T"),
+                    ]),
+                    CanvasMutationAction::InsertEdges(vec![mutation_edge(edge, source, target)]),
+                ],
+            },
+        )
+        .unwrap();
+        CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 101,
+                actions: vec![CanvasMutationAction::SoftDeleteEdges(vec![edge.into()])],
+            },
+        )
+        .unwrap();
+        CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 102,
+                actions: vec![CanvasMutationAction::InsertEdges(vec![mutation_edge(
+                    replacement,
+                    source,
+                    target,
+                )])],
+            },
+        )
+        .unwrap();
+
+        let conflict = CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 103,
+                actions: vec![CanvasMutationAction::RestoreEdges(vec![mutation_edge(
+                    edge, source, target,
+                )])],
+            },
+        );
+        assert_eq!(conflict.unwrap_err(), CanvasError::Duplicate);
+        // Original stays soft-deleted; replacement remains the only active edge.
+        assert_eq!(active_edge_count(&connection), 1);
+        assert!(CanvasDbService::get_active_edge(&connection, edge).is_err());
+    }
+
+    #[test]
+    fn mutation_batch_rolls_back_nodes_when_later_edge_is_invalid() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let source = "00000000-0000-4000-8000-000000002b51";
+        let target = "00000000-0000-4000-8000-000000002b52";
+        let dangling = "00000000-0000-4000-8000-000000002b53";
+        let missing = "00000000-0000-4000-8000-000000002b54";
+
+        let result = CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 100,
+                actions: vec![
+                    CanvasMutationAction::InsertNodes(vec![
+                        mutation_node(source, "S"),
+                        mutation_node(target, "T"),
+                    ]),
+                    CanvasMutationAction::InsertEdges(vec![mutation_edge(
+                        dangling, source, missing,
+                    )]),
+                ],
+            },
+        );
+        assert_eq!(result.unwrap_err(), CanvasError::NotFound);
+        assert_eq!(active_node_count(&connection), 0);
+        assert_eq!(active_edge_count(&connection), 0);
+    }
+
+    #[test]
+    fn mutation_batch_rejects_empty_actions_and_noncanonical_membership() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+
+        let empty = CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 100,
+                actions: vec![],
+            },
+        );
+        assert_eq!(empty.unwrap_err(), CanvasError::PersistenceFailed);
+
+        let source = "00000000-0000-4000-8000-000000002b61";
+        let target = "00000000-0000-4000-8000-000000002b62";
+        let edge = "00000000-0000-4000-8000-000000002b63";
+        let mut bad_membership = mutation_edge(edge, source, target);
+        bad_membership.relation_type = "ordered_box_member".into();
+        bad_membership.direction = CanvasEdgeDirection::None;
+        bad_membership.membership_position = Some(0);
+
+        let invalid = CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 101,
+                actions: vec![
+                    CanvasMutationAction::InsertNodes(vec![
+                        mutation_node(source, "S"),
+                        CanvasMutationNodeSnapshot {
+                            id: target.into(),
+                            canvas_id: CANVAS_ID.into(),
+                            node_type: "node_box".into(),
+                            node_name: "Box".into(),
+                            content: CanvasNodeContent::NodeBox,
+                            x: 30.0,
+                            y: 40.0,
+                            created_at_ms: 21,
+                        },
+                    ]),
+                    CanvasMutationAction::InsertEdges(vec![bad_membership]),
+                ],
+            },
+        );
+        assert_eq!(invalid.unwrap_err(), CanvasError::PersistenceFailed);
+        assert_eq!(active_node_count(&connection), 0);
     }
 }

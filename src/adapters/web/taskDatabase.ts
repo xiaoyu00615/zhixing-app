@@ -50,6 +50,8 @@ import {
 } from '@/canvas/model'
 import type {
   AddCanvasNodeBoxMemberInput,
+  ApplyCanvasMutationBatchInput,
+  CanvasMutationEdgeSnapshot,
   CreateCanvasInput,
   CreateCanvasEdgeInput,
   CreateCanvasNodeInput,
@@ -1238,6 +1240,366 @@ export class WebTaskDatabase {
           resultEdges.push(this.requireCanvasEdge(membershipInput.id, false))
         }
         return { nodes: resultNodes, edges: resultEdges }
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  applyCanvasMutationBatch(input: ApplyCanvasMutationBatchInput): void {
+    if (
+      !isCanonicalCanvasId(input.canvasId) ||
+      !isNonNegativeSafeIntegerMilliseconds(input.atMs) ||
+      input.actions.length === 0
+    ) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+
+    // Pre-transaction structural validation, mirroring the native batch.
+    const nodeIdActionSet = new Set<string>()
+    const edgeIdActionSet = new Set<string>()
+    const rememberNodeId = (id: string): void => {
+      if (nodeIdActionSet.has(id)) throw new TaskDatabaseError('PERSISTENCE_FAILED')
+      nodeIdActionSet.add(id)
+    }
+    const rememberEdgeId = (id: string): void => {
+      if (edgeIdActionSet.has(id)) throw new TaskDatabaseError('PERSISTENCE_FAILED')
+      edgeIdActionSet.add(id)
+    }
+    const assertMutationEdgeShape = (
+      edge: CanvasMutationEdgeSnapshot,
+    ): void => {
+      if (
+        edge.canvasId !== input.canvasId ||
+        !isCanonicalCanvasId(edge.sourceNodeId) ||
+        !isCanonicalCanvasId(edge.targetNodeId) ||
+        edge.sourceNodeId === edge.targetNodeId ||
+        !isNonNegativeSafeIntegerMilliseconds(edge.createdAtMs)
+      ) {
+        throw new TaskDatabaseError('PERSISTENCE_FAILED')
+      }
+      if (isCanvasOrdinaryEdgeRelationType(edge.relationType)) {
+        if (edge.membershipPosition !== null) {
+          throw new TaskDatabaseError('PERSISTENCE_FAILED')
+        }
+        if (!isCanvasEdgeDirection(edge.direction) || !isCanvasEdgeLineStyle(edge.lineStyle)) {
+          throw new TaskDatabaseError('PERSISTENCE_FAILED')
+        }
+      } else if (isCanvasMembershipRelationType(edge.relationType)) {
+        if (
+          edge.direction !== 'forward' ||
+          edge.lineStyle !== 'solid' ||
+          !isCanvasMembershipPosition(edge.membershipPosition)
+        ) {
+          throw new TaskDatabaseError('PERSISTENCE_FAILED')
+        }
+      } else {
+        throw new TaskDatabaseError('PERSISTENCE_FAILED')
+      }
+    }
+
+    for (const action of input.actions) {
+      switch (action.kind) {
+        case 'insert_nodes': {
+          for (const node of action.nodes) {
+            if (
+              !isCanonicalCanvasId(node.id) ||
+              node.canvasId !== input.canvasId ||
+              !isPersistedCanvasNodeName(node.nodeName) ||
+              !isCanvasCoordinate(node.x) ||
+              !isCanvasCoordinate(node.y) ||
+              !isNonNegativeSafeIntegerMilliseconds(node.createdAtMs) ||
+              node.content.type !== node.type
+            ) {
+              throw new TaskDatabaseError('PERSISTENCE_FAILED')
+            }
+            rememberNodeId(node.id)
+          }
+          break
+        }
+        case 'soft_delete_nodes': {
+          for (const nodeId of action.nodeIds) {
+            if (!isCanonicalCanvasId(nodeId)) {
+              throw new TaskDatabaseError('PERSISTENCE_FAILED')
+            }
+            rememberNodeId(nodeId)
+          }
+          break
+        }
+        case 'set_node_name': {
+          if (
+            !isCanonicalCanvasId(action.nodeId) ||
+            !isPersistedCanvasNodeName(action.nodeName)
+          ) {
+            throw new TaskDatabaseError('PERSISTENCE_FAILED')
+          }
+          break
+        }
+        case 'set_node_content': {
+          if (!isCanonicalCanvasId(action.nodeId)) {
+            throw new TaskDatabaseError('PERSISTENCE_FAILED')
+          }
+          break
+        }
+        case 'insert_edges':
+        case 'restore_edges': {
+          for (const edge of action.edges) {
+            if (!isCanonicalCanvasId(edge.id) || edge.canvasId !== input.canvasId) {
+              throw new TaskDatabaseError('PERSISTENCE_FAILED')
+            }
+            assertMutationEdgeShape(edge)
+            rememberEdgeId(edge.id)
+          }
+          break
+        }
+        case 'soft_delete_edges': {
+          for (const edgeId of action.edgeIds) {
+            if (!isCanonicalCanvasId(edgeId)) {
+              throw new TaskDatabaseError('PERSISTENCE_FAILED')
+            }
+            rememberEdgeId(edgeId)
+          }
+          break
+        }
+        default:
+          throw new TaskDatabaseError('PERSISTENCE_FAILED')
+      }
+    }
+
+    try {
+      this.#database.transaction(() => {
+        this.requireCanvas(input.canvasId)
+
+        // Returns 'missing' | 'active' | 'deleted' for the id.
+        const nodeState = (id: string): 'missing' | 'active' | 'deleted' => {
+          const row = this.#database.selectObject(
+            'SELECT deleted_at_ms FROM canvas_nodes WHERE id = ?',
+            [id],
+          )
+          if (row === undefined) return 'missing'
+          return row.deleted_at_ms === null ? 'active' : 'deleted'
+        }
+        const edgeState = (id: string): 'missing' | 'active' | 'deleted' => {
+          const row = this.#database.selectObject(
+            'SELECT deleted_at_ms FROM canvas_edges WHERE id = ?',
+            [id],
+          )
+          if (row === undefined) return 'missing'
+          return row.deleted_at_ms === null ? 'active' : 'deleted'
+        }
+        const writeEdgeSnapshot = (edge: CanvasMutationEdgeSnapshot): void => {
+          this.#database.exec({
+            sql: `UPDATE canvas_edges
+                  SET canvas_id = ?, source_node_id = ?, target_node_id = ?,
+                      relation_type = ?, direction = ?, line_style = ?,
+                      membership_position = ?, created_at_ms = ?, updated_at_ms = ?,
+                      deleted_at_ms = NULL
+                  WHERE id = ? AND canvas_id = ?
+                    AND deleted_at_ms IS NOT NULL`,
+            bind: [
+              input.canvasId,
+              edge.sourceNodeId,
+              edge.targetNodeId,
+              edge.relationType,
+              edge.direction,
+              edge.lineStyle,
+              edge.membershipPosition,
+              edge.createdAtMs,
+              input.atMs,
+              edge.id,
+              input.canvasId,
+            ],
+          })
+          if (this.#database.changes() !== 1) {
+            throw new TaskDatabaseError('NOT_FOUND')
+          }
+        }
+
+        for (const action of input.actions) {
+          switch (action.kind) {
+            case 'insert_nodes': {
+              for (const node of action.nodes) {
+                const state = nodeState(node.id)
+                if (state === 'active') {
+                  throw new TaskDatabaseError('STATUS_CONFLICT')
+                }
+                if (state === 'missing') {
+                  this.#database.exec({
+                    sql: `INSERT INTO canvas_nodes
+                          (id, canvas_id, type, node_name, content_json, x, y,
+                           created_at_ms, updated_at_ms)
+                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    bind: [
+                      node.id,
+                      input.canvasId,
+                      node.type,
+                      node.nodeName,
+                      JSON.stringify(node.content),
+                      node.x,
+                      node.y,
+                      node.createdAtMs,
+                      input.atMs,
+                    ],
+                  })
+                } else {
+                  this.#database.exec({
+                    sql: `UPDATE canvas_nodes
+                          SET canvas_id = ?, type = ?, node_name = ?, content_json = ?,
+                              x = ?, y = ?, created_at_ms = ?, updated_at_ms = ?,
+                              deleted_at_ms = NULL
+                          WHERE id = ? AND canvas_id = ?`,
+                    bind: [
+                      input.canvasId,
+                      node.type,
+                      node.nodeName,
+                      JSON.stringify(node.content),
+                      node.x,
+                      node.y,
+                      node.createdAtMs,
+                      input.atMs,
+                      node.id,
+                      input.canvasId,
+                    ],
+                  })
+                  if (this.#database.changes() !== 1) {
+                    throw new TaskDatabaseError('NOT_FOUND')
+                  }
+                }
+              }
+              break
+            }
+            case 'soft_delete_nodes': {
+              for (const nodeId of action.nodeIds) {
+                this.#database.exec({
+                  sql: `UPDATE canvas_nodes
+                        SET deleted_at_ms = ?, updated_at_ms = ?
+                        WHERE id = ? AND canvas_id = ? AND deleted_at_ms IS NULL`,
+                  bind: [input.atMs, input.atMs, nodeId, input.canvasId],
+                })
+                if (this.#database.changes() !== 1) {
+                  throw new TaskDatabaseError('NOT_FOUND')
+                }
+              }
+              break
+            }
+            case 'set_node_name': {
+              this.#database.exec({
+                sql: `UPDATE canvas_nodes
+                      SET node_name = ?, updated_at_ms = ?
+                      WHERE canvas_id = ? AND id = ? AND deleted_at_ms IS NULL`,
+                bind: [action.nodeName, input.atMs, input.canvasId, action.nodeId],
+              })
+              if (this.#database.changes() !== 1) {
+                throw new TaskDatabaseError('NOT_FOUND')
+              }
+              break
+            }
+            case 'set_node_content': {
+              const node = this.requireNodeInCanvas(input.canvasId, action.nodeId)
+              if (node.type !== action.content.type) {
+                throw new TaskDatabaseError('PERSISTENCE_FAILED')
+              }
+              this.#database.exec({
+                sql: `UPDATE canvas_nodes
+                      SET content_json = ?, updated_at_ms = ?
+                      WHERE canvas_id = ? AND id = ? AND deleted_at_ms IS NULL`,
+                bind: [
+                  JSON.stringify(action.content),
+                  input.atMs,
+                  input.canvasId,
+                  action.nodeId,
+                ],
+              })
+              if (this.#database.changes() !== 1) {
+                throw new TaskDatabaseError('NOT_FOUND')
+              }
+              break
+            }
+            case 'insert_edges': {
+              for (const edge of action.edges) {
+                this.requireNodeInCanvas(input.canvasId, edge.sourceNodeId)
+                this.requireNodeInCanvas(input.canvasId, edge.targetNodeId)
+                const state = edgeState(edge.id)
+                if (state === 'active') {
+                  throw new TaskDatabaseError('STATUS_CONFLICT')
+                }
+                if (state === 'missing') {
+                  this.assertNoDuplicateCanvasEdge(
+                    input.canvasId,
+                    edge.sourceNodeId,
+                    edge.targetNodeId,
+                    edge.relationType,
+                    edge.direction,
+                  )
+                  this.#database.exec({
+                    sql: `INSERT INTO canvas_edges
+                          (id, canvas_id, source_node_id, target_node_id, relation_type,
+                           direction, line_style, membership_position, created_at_ms,
+                           updated_at_ms, deleted_at_ms)
+                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+                    bind: [
+                      edge.id,
+                      input.canvasId,
+                      edge.sourceNodeId,
+                      edge.targetNodeId,
+                      edge.relationType,
+                      edge.direction,
+                      edge.lineStyle,
+                      edge.membershipPosition,
+                      edge.createdAtMs,
+                      input.atMs,
+                    ],
+                  })
+                } else {
+                  this.assertNoDuplicateCanvasEdge(
+                    input.canvasId,
+                    edge.sourceNodeId,
+                    edge.targetNodeId,
+                    edge.relationType,
+                    edge.direction,
+                    edge.id,
+                  )
+                  writeEdgeSnapshot(edge)
+                }
+              }
+              break
+            }
+            case 'soft_delete_edges': {
+              for (const edgeId of action.edgeIds) {
+                this.#database.exec({
+                  sql: `UPDATE canvas_edges
+                        SET deleted_at_ms = ?, updated_at_ms = ?
+                        WHERE id = ? AND canvas_id = ? AND deleted_at_ms IS NULL`,
+                  bind: [input.atMs, input.atMs, edgeId, input.canvasId],
+                })
+                if (this.#database.changes() !== 1) {
+                  throw new TaskDatabaseError('NOT_FOUND')
+                }
+              }
+              break
+            }
+            case 'restore_edges': {
+              for (const edge of action.edges) {
+                this.requireNodeInCanvas(input.canvasId, edge.sourceNodeId)
+                this.requireNodeInCanvas(input.canvasId, edge.targetNodeId)
+                if (edgeState(edge.id) !== 'deleted') {
+                  throw new TaskDatabaseError('NOT_FOUND')
+                }
+                this.assertNoDuplicateCanvasEdge(
+                  input.canvasId,
+                  edge.sourceNodeId,
+                  edge.targetNodeId,
+                  edge.relationType,
+                  edge.direction,
+                  edge.id,
+                )
+                writeEdgeSnapshot(edge)
+              }
+              break
+            }
+          }
+        }
       })
     } catch (error: unknown) {
       if (error instanceof TaskDatabaseError) throw error

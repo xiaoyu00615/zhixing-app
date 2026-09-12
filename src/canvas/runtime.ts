@@ -1,5 +1,6 @@
 import { openWebTaskRepository } from '@/adapters/web'
 import { CanvasApplicationError, createCanvasService } from '@/canvas/service'
+import { createCanvasHistoryService } from '@/canvas/history/service'
 import type { CanvasRuntime } from '@/canvas/runtime.types'
 
 export async function openCanvasRuntime(): Promise<CanvasRuntime> {
@@ -9,7 +10,7 @@ export async function openCanvasRuntime(): Promise<CanvasRuntime> {
       throw new CanvasApplicationError('UNAVAILABLE')
     }
     return {
-      service: createCanvasService({ repository: opened.canvasRepository }),
+      service: createCanvasHistoryService(createCanvasService({ repository: opened.canvasRepository })),
       dispose: opened.dispose,
     }
   } catch {

@@ -152,6 +152,14 @@ export interface CanvasService {
     readonly edges: readonly CanvasEdge[]
     readonly oldToNewNodeId: ReadonlyMap<string, string>
   }>
+  applyCanvasMutationBatch(
+    canvasId: string,
+    actions: import('@/canvas/repository').CanvasMutationAction[],
+  ): Promise<void>
+  undo(canvasId: string): Promise<void>
+  redo(canvasId: string): Promise<void>
+  canUndo(canvasId: string): boolean
+  canRedo(canvasId: string): boolean
 }
 
 interface CreateCanvasServiceOptions {
@@ -623,5 +631,19 @@ export function createCanvasService({
         oldToNewNodeId,
       }
     },
+    applyCanvasMutationBatch(canvasId, actions) {
+      validateId(canvasId, 'canvasId')
+      return callRepository(() =>
+        repository.applyCanvasMutationBatch({
+          canvasId,
+          atMs: readNowMs(nowMs),
+          actions,
+        }),
+      )
+    },
+    undo() { throw new CanvasApplicationError('UNAVAILABLE') },
+    redo() { throw new CanvasApplicationError('UNAVAILABLE') },
+    canUndo() { return false },
+    canRedo() { return false },
   }
 }

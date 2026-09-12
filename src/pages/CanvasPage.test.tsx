@@ -58,6 +58,8 @@ function createFixture(initial: readonly Canvas[] = []) {
     updateCanvasEdgeRelationType: vi.fn(),
     deleteCanvasEdge: vi.fn(),
     pasteCanvasSubgraph: vi.fn(),
+    applyCanvasMutationBatch: vi.fn(),
+    undo: vi.fn(), redo: vi.fn(), canUndo: vi.fn(() => false), canRedo: vi.fn(() => false),
   }
   const dispose = vi.fn()
   const openRuntime: OpenCanvasRuntime = vi.fn(() =>

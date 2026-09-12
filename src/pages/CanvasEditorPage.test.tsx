@@ -274,6 +274,8 @@ function fixture() {
     updateCanvasEdgeRelationType: updateCanvasEdgeRelationTypeMock,
     deleteCanvasEdge: deleteCanvasEdgeMock,
     pasteCanvasSubgraph: vi.fn(() => Promise.resolve({ nodes: [], edges: [], oldToNewNodeId: new Map() })),
+    applyCanvasMutationBatch: vi.fn<CanvasService['applyCanvasMutationBatch']>(() => Promise.resolve()),
+    undo: vi.fn(), redo: vi.fn(), canUndo: vi.fn(() => false), canRedo: vi.fn(() => false),
   }
   const openRuntime: OpenCanvasRuntime = vi.fn(() => Promise.resolve({ service, dispose: vi.fn() }))
   return { canvas, node, service, openRuntime, openCanvasMock, createTextNodeMock, editTextNodeMock, createCanvasNodeMock, updateCanvasNodeContentMock, renameCanvasNodeMock, deleteCanvasNodeMock, moveCanvasNodeMock, moveCanvasNodesMock, updateViewportMock, createCanvasEdgeMock, addNodeBoxMemberMock, reorderNodeBoxMembershipsMock, updateCanvasEdgeDirectionMock, updateCanvasEdgeLineStyleMock, updateCanvasEdgeRelationTypeMock, deleteCanvasEdgeMock }

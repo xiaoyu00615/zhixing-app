@@ -21,6 +21,7 @@ import {
   CanvasRepositoryError,
   type CanvasRepository,
   type AddCanvasNodeBoxMemberInput,
+  type ApplyCanvasMutationBatchInput,
   type CanvasRepositoryOperation,
   type CreateCanvasEdgeInput,
   type CreateCanvasInput,
@@ -458,6 +459,22 @@ export class WebCanvasRepository implements CanvasRepository {
       const nodes: CanvasNode[] = rawNodes.map((item) => parseNode(item, operation))
       const edges: CanvasEdge[] = rawEdges.map((item) => parseEdge(item, operation))
       return { nodes, edges }
+    } catch (error: unknown) {
+      throw mapError(error, operation)
+    }
+  }
+
+  async applyCanvasMutationBatch(
+    input: ApplyCanvasMutationBatchInput,
+  ): Promise<void> {
+    const operation = 'applyCanvasMutationBatch'
+    validateId(input.canvasId, operation)
+    validateTimestamp(input.atMs, operation)
+    if (input.actions.length === 0) {
+      throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+    }
+    try {
+      await this.#client.applyCanvasMutationBatch(input)
     } catch (error: unknown) {
       throw mapError(error, operation)
     }

@@ -265,6 +265,11 @@ export type TaskWorkerRequest =
       readonly type: 'canvas.subgraph.create'
       readonly input: import('@/canvas/repository').CreateCanvasSubgraphInput
     }
+  | {
+      readonly requestId: number
+      readonly type: 'canvas.mutation.applyBatch'
+      readonly input: import('@/canvas/repository').ApplyCanvasMutationBatchInput
+    }
   | { readonly requestId: number; readonly type: 'shutdown' }
 
 export interface TaskWorkerSuccessResponse {
@@ -814,9 +819,48 @@ export function parseTaskWorkerRequest(
             input: value.input as unknown as import('@/canvas/repository').CreateCanvasSubgraphInput,
           }
         : null
+    case 'canvas.mutation.applyBatch':
+      return isApplyCanvasMutationBatchEnvelope(value.input)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input as import('@/canvas/repository').ApplyCanvasMutationBatchInput,
+          }
+        : null
     default:
       return null
   }
+}
+
+const CANVAS_MUTATION_ACTION_KINDS = new Set([
+  'insert_nodes',
+  'soft_delete_nodes',
+  'set_node_name',
+  'set_node_content',
+  'insert_edges',
+  'soft_delete_edges',
+  'restore_edges',
+])
+
+// Envelope gate only: deep structural and canonical validation is enforced
+// inside the single database transaction (taskDatabase / Rust), matching the
+// createCanvasSubgraph trust boundary.
+function isApplyCanvasMutationBatchEnvelope(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !isCanonicalCanvasId(value.canvasId) ||
+    !isCanvasTimestamp(value.atMs) ||
+    !Array.isArray(value.actions) ||
+    value.actions.length === 0
+  ) {
+    return false
+  }
+  return value.actions.every(
+    (action) =>
+      isRecord(action) &&
+      typeof action.kind === 'string' &&
+      CANVAS_MUTATION_ACTION_KINDS.has(action.kind),
+  )
 }
 
 export function extractRequestId(value: unknown): number | null {

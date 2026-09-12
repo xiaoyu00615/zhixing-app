@@ -7,9 +7,15 @@ import type {
   CanvasNode,
 } from '@/canvas/model'
 import {
+  isCanvasMembershipRelationType,
+  isCanvasOrdinaryEdgeRelationType,
+} from '@/canvas/model'
+import {
   CanvasRepositoryError,
   type CanvasRepository,
   type AddCanvasNodeBoxMemberInput,
+  type ApplyCanvasMutationBatchInput,
+  type CanvasMutationEdgeSnapshot,
   type CreateCanvasInput,
   type CreateCanvasEdgeInput,
   type CreateCanvasSubgraphInput,
@@ -475,6 +481,264 @@ export class CanvasContractBackend implements CanvasRepository {
     const updated = { ...edge, ...input }
     this.edges.set(edge.id, updated)
     return Promise.resolve(updated)
+  }
+
+  async applyCanvasMutationBatch(
+    input: ApplyCanvasMutationBatchInput,
+  ): Promise<void> {
+    const operation = 'applyCanvasMutationBatch'
+    await this.getCanvas(input.canvasId)
+    if (
+      !Number.isSafeInteger(input.atMs) ||
+      input.atMs < 0 ||
+      input.actions.length === 0
+    ) {
+      throw new CanvasRepositoryError('PERSISTENCE_FAILED', operation)
+    }
+
+    // Deep-enough snapshots of the three stores; restored verbatim on failure.
+    const nodesBackup = new Map(this.nodes)
+    const deletedNodesBackup = new Map(this.deletedNodes)
+    const edgesBackup = new Map(this.edges)
+    const rollBack = (): void => {
+      this.nodes.clear()
+      for (const [key, value] of nodesBackup) this.nodes.set(key, value)
+      this.deletedNodes.clear()
+      for (const [key, value] of deletedNodesBackup) {
+        this.deletedNodes.set(key, value)
+      }
+      this.edges.clear()
+      for (const [key, value] of edgesBackup) this.edges.set(key, value)
+    }
+
+    const isMs = (value: unknown): value is number =>
+      Number.isSafeInteger(value) && (value as number) >= 0
+    const fail = (
+      code: 'NOT_FOUND' | 'DUPLICATE' | 'PERSISTENCE_FAILED',
+    ): never => {
+      throw new CanvasRepositoryError(code, operation)
+    }
+    const requireActiveNodeInCanvas = (id: string): CanvasNode => {
+      const node = this.nodes.get(id)
+      if (node === undefined || node.canvasId !== input.canvasId) {
+        throw new CanvasRepositoryError('NOT_FOUND', operation)
+      }
+      return node
+    }
+    const assertEdgeShape = (snapshot: CanvasMutationEdgeSnapshot): void => {
+      if (
+        snapshot.canvasId !== input.canvasId ||
+        !isMs(snapshot.createdAtMs)
+      ) {
+        fail('NOT_FOUND')
+      }
+      if (snapshot.sourceNodeId === snapshot.targetNodeId) {
+        fail('PERSISTENCE_FAILED')
+      }
+      requireActiveNodeInCanvas(snapshot.sourceNodeId)
+      requireActiveNodeInCanvas(snapshot.targetNodeId)
+      if (isCanvasOrdinaryEdgeRelationType(snapshot.relationType)) {
+        if (snapshot.membershipPosition !== null) {
+          fail('PERSISTENCE_FAILED')
+        }
+      } else if (isCanvasMembershipRelationType(snapshot.relationType)) {
+        if (
+          snapshot.direction !== 'forward' ||
+          snapshot.lineStyle !== 'solid' ||
+          !Number.isSafeInteger(snapshot.membershipPosition) ||
+          (snapshot.membershipPosition as number) < 0
+        ) {
+          fail('PERSISTENCE_FAILED')
+        }
+      } else {
+        fail('PERSISTENCE_FAILED')
+      }
+    }
+    const assertNoActiveDuplicateEdge = (
+      snapshot: CanvasMutationEdgeSnapshot,
+      excludedId?: string,
+    ): void => {
+      const duplicate = [...this.edges.values()].some((edge) => {
+        if (
+          edge.id === excludedId ||
+          edge.deletedAtMs !== null ||
+          edge.canvasId !== input.canvasId ||
+          edge.relationType !== snapshot.relationType ||
+          edge.direction !== snapshot.direction
+        ) {
+          return false
+        }
+        const sameEndpoints =
+          edge.sourceNodeId === snapshot.sourceNodeId &&
+          edge.targetNodeId === snapshot.targetNodeId
+        if (isCanvasMembershipRelationType(snapshot.relationType)) {
+          return sameEndpoints
+        }
+        if (snapshot.direction === 'forward') return sameEndpoints
+        return (
+          sameEndpoints ||
+          (edge.sourceNodeId === snapshot.targetNodeId &&
+            edge.targetNodeId === snapshot.sourceNodeId)
+        )
+      })
+      if (duplicate) fail('DUPLICATE')
+    }
+    const toEdge = (
+      snapshot: CanvasMutationEdgeSnapshot,
+    ): CanvasEdge => ({
+      id: snapshot.id,
+      canvasId: snapshot.canvasId,
+      sourceNodeId: snapshot.sourceNodeId,
+      targetNodeId: snapshot.targetNodeId,
+      relationType: snapshot.relationType,
+      direction: snapshot.direction,
+      lineStyle: snapshot.lineStyle,
+      membershipPosition: snapshot.membershipPosition,
+      createdAtMs: snapshot.createdAtMs,
+      updatedAtMs: input.atMs,
+      deletedAtMs: null,
+    })
+
+    try {
+      const nodeIdActionSet = new Set<string>()
+      const edgeIdActionSet = new Set<string>()
+      const rememberNodeId = (id: string): void => {
+        if (nodeIdActionSet.has(id)) fail('PERSISTENCE_FAILED')
+        nodeIdActionSet.add(id)
+      }
+      const rememberEdgeId = (id: string): void => {
+        if (edgeIdActionSet.has(id)) fail('PERSISTENCE_FAILED')
+        edgeIdActionSet.add(id)
+      }
+
+      for (const action of input.actions) {
+        switch (action.kind) {
+          case 'insert_nodes': {
+            for (const snapshot of action.nodes) {
+              if (
+                snapshot.canvasId !== input.canvasId ||
+                !isMs(snapshot.createdAtMs) ||
+                typeof snapshot.nodeName !== 'string' ||
+                snapshot.content.type !== snapshot.type
+              ) {
+                fail('PERSISTENCE_FAILED')
+              }
+              rememberNodeId(snapshot.id)
+              const active = this.nodes.get(snapshot.id)
+              const deleted = this.deletedNodes.get(snapshot.id)
+              if (active !== undefined) fail('DUPLICATE')
+              const revived: CanvasNode = {
+                id: snapshot.id,
+                canvasId: snapshot.canvasId,
+                type: snapshot.type,
+                nodeName: snapshot.nodeName,
+                content: snapshot.content,
+                x: snapshot.x,
+                y: snapshot.y,
+                createdAtMs: snapshot.createdAtMs,
+                updatedAtMs: input.atMs,
+              } as CanvasNode
+              if (deleted !== undefined) {
+                if (deleted.canvasId !== input.canvasId) fail('NOT_FOUND')
+                this.deletedNodes.delete(snapshot.id)
+              }
+              this.nodes.set(snapshot.id, revived)
+            }
+            break
+          }
+          case 'soft_delete_nodes': {
+            for (const nodeId of action.nodeIds) {
+              rememberNodeId(nodeId)
+              const node = this.nodes.get(nodeId)
+              if (node === undefined || node.canvasId !== input.canvasId) {
+                throw new CanvasRepositoryError('NOT_FOUND', operation)
+              }
+              // Explicit ids only; edges are intentionally untouched.
+              this.nodes.delete(nodeId)
+              this.deletedNodes.set(nodeId, {
+                ...node,
+                updatedAtMs: input.atMs,
+              })
+            }
+            break
+          }
+          case 'set_node_name': {
+            const node = requireActiveNodeInCanvas(action.nodeId)
+            if (typeof action.nodeName !== 'string') {
+              fail('PERSISTENCE_FAILED')
+            }
+            this.nodes.set(action.nodeId, {
+              ...node,
+              nodeName: action.nodeName,
+              updatedAtMs: input.atMs,
+            })
+            break
+          }
+          case 'set_node_content': {
+            const node = requireActiveNodeInCanvas(action.nodeId)
+            if (node.type !== action.content.type) {
+              fail('PERSISTENCE_FAILED')
+            }
+            this.nodes.set(action.nodeId, {
+              ...node,
+              content: action.content,
+              updatedAtMs: input.atMs,
+            } as CanvasNode)
+            break
+          }
+          case 'insert_edges': {
+            for (const snapshot of action.edges) {
+              rememberEdgeId(snapshot.id)
+              assertEdgeShape(snapshot)
+              const active = this.edges.get(snapshot.id)
+              if (active !== undefined && active.deletedAtMs === null) {
+                fail('DUPLICATE')
+              }
+              assertNoActiveDuplicateEdge(snapshot)
+              this.edges.set(snapshot.id, toEdge(snapshot))
+            }
+            break
+          }
+          case 'soft_delete_edges': {
+            for (const edgeId of action.edgeIds) {
+              rememberEdgeId(edgeId)
+              const edge = this.edges.get(edgeId)
+              if (
+                edge === undefined ||
+                edge.deletedAtMs !== null ||
+                edge.canvasId !== input.canvasId
+              ) {
+                throw new CanvasRepositoryError('NOT_FOUND', operation)
+              }
+              this.edges.set(edgeId, {
+                ...edge,
+                deletedAtMs: input.atMs,
+                updatedAtMs: input.atMs,
+              })
+            }
+            break
+          }
+          case 'restore_edges': {
+            for (const snapshot of action.edges) {
+              rememberEdgeId(snapshot.id)
+              assertEdgeShape(snapshot)
+              const existing = this.edges.get(snapshot.id)
+              if (existing === undefined || existing.deletedAtMs === null) {
+                fail('NOT_FOUND')
+              }
+              assertNoActiveDuplicateEdge(snapshot, snapshot.id)
+              this.edges.set(snapshot.id, toEdge(snapshot))
+            }
+            break
+          }
+          default:
+            fail('PERSISTENCE_FAILED')
+        }
+      }
+    } catch (error) {
+      rollBack()
+      throw error
+    }
   }
 
   private requireActiveEdge(
@@ -1257,6 +1521,305 @@ export function defineCanvasRepositoryContract(
           expect.objectContaining({ id: survivingId }),
         ])
         await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toEqual([])
+      })
+    })
+
+    describe('Canvas mutation batch (Slice 11A-1)', () => {
+      const nodeSnapshot = (
+        id: string,
+        over: Partial<import('@/canvas/repository').CanvasMutationNodeSnapshot> = {},
+      ): import('@/canvas/repository').CanvasMutationNodeSnapshot => ({
+        id,
+        canvasId: CONTRACT_CANVAS_ID,
+        type: 'text',
+        nodeName: '',
+        content: { type: 'text', text: 'body' },
+        x: 10,
+        y: 20,
+        createdAtMs: 20,
+        ...over,
+      })
+      const edgeSnapshot = (
+        id: string,
+        sourceNodeId: string,
+        targetNodeId: string,
+        over: Partial<CanvasMutationEdgeSnapshot> = {},
+      ): CanvasMutationEdgeSnapshot => ({
+        id,
+        canvasId: CONTRACT_CANVAS_ID,
+        sourceNodeId,
+        targetNodeId,
+        relationType: 'default',
+        direction: 'forward',
+        lineStyle: 'solid',
+        membershipPosition: null,
+        createdAtMs: 30,
+        ...over,
+      })
+      const seedCanvas = async (repository: CanvasRepository): Promise<void> => {
+        await repository.createCanvas({ id: CONTRACT_CANVAS_ID, title: 'Ideas', viewport: { x: 0, y: 0, zoom: 1 }, createdAtMs: 10 })
+      }
+
+      test('inserts nodes and revives a soft-deleted node on redo insert', async () => {
+        const { repository } = createFixture()
+        await seedCanvas(repository)
+        const id = '00000000-0000-4000-8000-000000000901'
+        await repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 100,
+          actions: [{ kind: 'insert_nodes', nodes: [nodeSnapshot(id)] }],
+        })
+        await expect(repository.listCanvasNodes(CONTRACT_CANVAS_ID)).resolves.toEqual([
+          expect.objectContaining({ id, updatedAtMs: 100 }),
+        ])
+        await repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 101,
+          actions: [{ kind: 'soft_delete_nodes', nodeIds: [id] }],
+        })
+        await expect(repository.listCanvasNodes(CONTRACT_CANVAS_ID)).resolves.toEqual([])
+        // Re-running the forward action revives the same id.
+        await repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 102,
+          actions: [{ kind: 'insert_nodes', nodes: [nodeSnapshot(id)] }],
+        })
+        await expect(repository.listCanvasNodes(CONTRACT_CANVAS_ID)).resolves.toEqual([
+          expect.objectContaining({ id, updatedAtMs: 102 }),
+        ])
+        await expect(repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 103,
+          actions: [{ kind: 'insert_nodes', nodes: [nodeSnapshot(id)] }],
+        })).rejects.toMatchObject({ code: 'DUPLICATE', operation: 'applyCanvasMutationBatch' })
+      })
+
+      test('soft_delete_nodes never cascades to edges', async () => {
+        const { repository } = createFixture()
+        await seedCanvas(repository)
+        const source = '00000000-0000-4000-8000-000000000911'
+        const target = '00000000-0000-4000-8000-000000000912'
+        const edge = '00000000-0000-4000-8000-000000000913'
+        await repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 100,
+          actions: [
+            { kind: 'insert_nodes', nodes: [nodeSnapshot(source), nodeSnapshot(target, { id: target })] },
+            { kind: 'insert_edges', edges: [edgeSnapshot(edge, source, target)] },
+          ],
+        })
+        await repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 101,
+          actions: [{ kind: 'soft_delete_nodes', nodeIds: [source] }],
+        })
+        // The incident edge stays active: no implicit cascade.
+        await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toEqual([
+          expect.objectContaining({ id: edge, deletedAtMs: null }),
+        ])
+      })
+
+      test('set_node_name and set_node_content update active nodes', async () => {
+        const { repository } = createFixture()
+        await seedCanvas(repository)
+        const id = '00000000-0000-4000-8000-000000000921'
+        await repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 100,
+          actions: [{ kind: 'insert_nodes', nodes: [nodeSnapshot(id, { nodeName: 'Old' })] }],
+        })
+        await repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 101,
+          actions: [{ kind: 'set_node_name', nodeId: id, nodeName: 'New' }],
+        })
+        await repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 102,
+          actions: [{ kind: 'set_node_content', nodeId: id, content: { type: 'text', text: 'edited' } }],
+        })
+        await expect(repository.listCanvasNodes(CONTRACT_CANVAS_ID)).resolves.toEqual([
+          expect.objectContaining({ id, nodeName: 'New', content: { type: 'text', text: 'edited' }, updatedAtMs: 102 }),
+        ])
+        await expect(repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 103,
+          actions: [{ kind: 'set_node_content', nodeId: id, content: { type: 'sticky', text: 'wrong' } }],
+        })).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })
+        await expect(repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 104,
+          actions: [{ kind: 'set_node_name', nodeId: '00000000-0000-4000-8000-000000000999', nodeName: 'X' }],
+        })).rejects.toMatchObject({ code: 'NOT_FOUND' })
+      })
+
+      test('soft-deletes then restores an ordinary edge with full fields', async () => {
+        const { repository } = createFixture()
+        await seedCanvas(repository)
+        const source = '00000000-0000-4000-8000-000000000931'
+        const target = '00000000-0000-4000-8000-000000000932'
+        const edge = '00000000-0000-4000-8000-000000000933'
+        const snapshot = edgeSnapshot(edge, source, target, {
+          relationType: 'hierarchy',
+          direction: 'bidirectional',
+          lineStyle: 'dashed',
+          createdAtMs: 40,
+        })
+        await repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 100,
+          actions: [
+            { kind: 'insert_nodes', nodes: [nodeSnapshot(source), nodeSnapshot(target)] },
+            { kind: 'insert_edges', edges: [snapshot] },
+          ],
+        })
+        await repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 101,
+          actions: [{ kind: 'soft_delete_edges', edgeIds: [edge] }],
+        })
+        await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toEqual([])
+        await repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 102,
+          actions: [{ kind: 'restore_edges', edges: [snapshot] }],
+        })
+        await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toEqual([
+          expect.objectContaining({
+            id: edge,
+            relationType: 'hierarchy',
+            direction: 'bidirectional',
+            lineStyle: 'dashed',
+            membershipPosition: null,
+            deletedAtMs: null,
+            createdAtMs: 40,
+            updatedAtMs: 102,
+          }),
+        ])
+      })
+
+      test('fails closed when restoring an edge blocked by an active same-endpoint edge', async () => {
+        const { repository } = createFixture()
+        await seedCanvas(repository)
+        const source = '00000000-0000-4000-8000-000000000941'
+        const target = '00000000-0000-4000-8000-000000000942'
+        const edge = '00000000-0000-4000-8000-000000000943'
+        const replacement = '00000000-0000-4000-8000-000000000944'
+        const snapshot = edgeSnapshot(edge, source, target)
+        await repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 100,
+          actions: [
+            { kind: 'insert_nodes', nodes: [nodeSnapshot(source), nodeSnapshot(target)] },
+            { kind: 'insert_edges', edges: [snapshot] },
+          ],
+        })
+        await repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 101,
+          actions: [{ kind: 'soft_delete_edges', edgeIds: [edge] }],
+        })
+        // A new same-endpoint ordinary edge now occupies the unique slot.
+        await repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 102,
+          actions: [{ kind: 'insert_edges', edges: [edgeSnapshot(replacement, source, target)] }],
+        })
+        await expect(repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 103,
+          actions: [{ kind: 'restore_edges', edges: [snapshot] }],
+        })).rejects.toMatchObject({ code: 'DUPLICATE' })
+        await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toEqual([
+          expect.objectContaining({ id: replacement, deletedAtMs: null }),
+        ])
+      })
+
+      test('rejects missing and already-deleted edge ids without partial soft-delete', async () => {
+        const { repository } = createFixture()
+        await seedCanvas(repository)
+        const source = '00000000-0000-4000-8000-000000000951'
+        const target = '00000000-0000-4000-8000-000000000952'
+        const edgeA = '00000000-0000-4000-8000-000000000953'
+        const edgeB = '00000000-0000-4000-8000-000000000954'
+        await repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 100,
+          actions: [
+            { kind: 'insert_nodes', nodes: [nodeSnapshot(source), nodeSnapshot(target)] },
+            { kind: 'insert_edges', edges: [edgeSnapshot(edgeA, source, target), edgeSnapshot(edgeB, source, target, { direction: 'none' })] },
+          ],
+        })
+        await expect(repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 101,
+          actions: [{ kind: 'soft_delete_edges', edgeIds: [edgeA, '00000000-0000-4000-8000-000000000999'] }],
+        })).rejects.toMatchObject({ code: 'NOT_FOUND' })
+        await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toHaveLength(2)
+        await expect(repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 102,
+          actions: [{ kind: 'restore_edges', edges: [edgeSnapshot(edgeA, source, target)] }],
+        })).rejects.toMatchObject({ code: 'NOT_FOUND' })
+      })
+
+      test('rolls back the whole batch when a later action is invalid', async () => {
+        const { repository } = createFixture()
+        await seedCanvas(repository)
+        const source = '00000000-0000-4000-8000-000000000961'
+        const target = '00000000-0000-4000-8000-000000000962'
+        const danglingEdge = '00000000-0000-4000-8000-000000000963'
+        await expect(repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 100,
+          actions: [
+            { kind: 'insert_nodes', nodes: [nodeSnapshot(source), nodeSnapshot(target)] },
+            { kind: 'insert_edges', edges: [edgeSnapshot(danglingEdge, source, '00000000-0000-4000-8000-000000000999')] },
+          ],
+        })).rejects.toMatchObject({ code: 'NOT_FOUND' })
+        await expect(repository.listCanvasNodes(CONTRACT_CANVAS_ID)).resolves.toEqual([])
+        await expect(repository.listCanvasEdges(CONTRACT_CANVAS_ID)).resolves.toEqual([])
+      })
+
+      test('rejects empty actions, unknown canvas, and noncanonical membership shape', async () => {
+        const { repository } = createFixture()
+        await seedCanvas(repository)
+        await expect(repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 100,
+          actions: [],
+        })).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })
+        await expect(repository.applyCanvasMutationBatch({
+          canvasId: '00000000-0000-4000-8000-000000000999',
+          atMs: 100,
+          actions: [{ kind: 'set_node_name', nodeId: 'x', nodeName: 'y' }],
+        })).rejects.toMatchObject({ code: 'NOT_FOUND' })
+        const source = '00000000-0000-4000-8000-000000000971'
+        const box = '00000000-0000-4000-8000-000000000972'
+        const edge = '00000000-0000-4000-8000-000000000973'
+        await expect(repository.applyCanvasMutationBatch({
+          canvasId: CONTRACT_CANVAS_ID,
+          atMs: 101,
+          actions: [
+            {
+              kind: 'insert_nodes',
+              nodes: [
+                nodeSnapshot(source),
+                nodeSnapshot(box, { id: box, type: 'node_box', content: { type: 'node_box' } }),
+              ],
+            },
+            {
+              kind: 'insert_edges',
+              edges: [edgeSnapshot(edge, source, box, {
+                relationType: 'ordered_box_member',
+                direction: 'none',
+                lineStyle: 'solid',
+                membershipPosition: 0,
+              })],
+            },
+          ],
+        })).rejects.toMatchObject({ code: 'PERSISTENCE_FAILED' })
+        await expect(repository.listCanvasNodes(CONTRACT_CANVAS_ID)).resolves.toEqual([])
       })
     })
   })

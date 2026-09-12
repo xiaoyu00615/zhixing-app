@@ -283,6 +283,12 @@ async function handleRequest(value: unknown): Promise<void> {
           state.database.createCanvasSubgraph(request.input),
         )
         return
+      case 'canvas.mutation.applyBatch':
+        success(
+          request.requestId,
+          state.database.applyCanvasMutationBatch(request.input),
+        )
+        return
       case 'canvas.nodeBox.addMember':
         success(
           request.requestId,

@@ -56,6 +56,7 @@ defineCanvasRepositoryContract('NativeCanvasRepository', () => {
       case 'canvas_edge_set_relation_type': return backend.updateCanvasEdgeRelationType(args?.input as UpdateCanvasEdgeRelationTypeInput)
       case 'canvas_edge_delete': return backend.deleteCanvasEdge(args?.input as DeleteCanvasEdgeInput)
       case 'canvas_subgraph_create': return backend.createCanvasSubgraph(args?.input as import('@/canvas/repository').CreateCanvasSubgraphInput)
+      case 'canvas_mutation_apply_batch': return backend.applyCanvasMutationBatch(args?.input as import('@/canvas/repository').ApplyCanvasMutationBatchInput)
       default: throw new Error(`Unexpected command ${command}`)
     }
   })

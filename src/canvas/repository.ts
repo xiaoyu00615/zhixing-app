@@ -3,6 +3,7 @@ import type {
   CanvasEdge,
   CanvasEdgeDirection,
   CanvasEdgeLineStyle,
+  CanvasEdgeRelationType,
   CanvasMembershipRelationType,
   CanvasOrdinaryEdgeRelationType,
   CanvasNode,
@@ -183,6 +184,79 @@ export interface DeleteCanvasEdgeInput {
   readonly updatedAtMs: number
 }
 
+/**
+ * Generic, history-agnostic mutation batch primitives.
+ *
+ * These types describe explicit domain mutations. They have no dependency on
+ * the undo/redo session: operation replay or future agent paths can produce
+ * the same actions. Every batch runs in a single transaction; any invalid
+ * action rolls the whole batch back.
+ */
+export interface CanvasMutationNodeSnapshot {
+  readonly id: string
+  readonly canvasId: string
+  readonly type: RegisteredCanvasNodeType
+  readonly nodeName: string
+  readonly content: RegisteredCanvasNodeContent
+  readonly x: number
+  readonly y: number
+  readonly createdAtMs: number
+}
+
+export interface CanvasMutationEdgeSnapshot {
+  readonly id: string
+  readonly canvasId: string
+  readonly sourceNodeId: string
+  readonly targetNodeId: string
+  readonly relationType: CanvasEdgeRelationType
+  readonly direction: CanvasEdgeDirection
+  readonly lineStyle: CanvasEdgeLineStyle
+  readonly membershipPosition: number | null
+  readonly createdAtMs: number
+}
+
+export type CanvasMutationAction =
+  | {
+      readonly kind: 'insert_nodes'
+      readonly nodes: readonly CanvasMutationNodeSnapshot[]
+    }
+  // Slice 11A-1 restriction: this is emitted ONLY as the inverse of
+  // insert_nodes by the history layer. It soft-deletes exactly the explicit
+  // node ids and never cascades to edges. It is not the user-facing Node
+  // Delete feature (restore_nodes / cascade handling arrive in 11A-2).
+  | {
+      readonly kind: 'soft_delete_nodes'
+      readonly nodeIds: readonly string[]
+    }
+  | {
+      readonly kind: 'set_node_name'
+      readonly nodeId: string
+      readonly nodeName: string
+    }
+  | {
+      readonly kind: 'set_node_content'
+      readonly nodeId: string
+      readonly content: RegisteredCanvasNodeContent
+    }
+  | {
+      readonly kind: 'insert_edges'
+      readonly edges: readonly CanvasMutationEdgeSnapshot[]
+    }
+  | {
+      readonly kind: 'soft_delete_edges'
+      readonly edgeIds: readonly string[]
+    }
+  | {
+      readonly kind: 'restore_edges'
+      readonly edges: readonly CanvasMutationEdgeSnapshot[]
+    }
+
+export interface ApplyCanvasMutationBatchInput {
+  readonly canvasId: string
+  readonly atMs: number
+  readonly actions: readonly CanvasMutationAction[]
+}
+
 export interface CanvasRepository {
   createCanvas(input: CreateCanvasInput): Promise<Canvas>
   listCanvases(): Promise<readonly Canvas[]>
@@ -218,6 +292,9 @@ export interface CanvasRepository {
     input: UpdateCanvasEdgeRelationTypeInput,
   ): Promise<CanvasEdge>
   deleteCanvasEdge(input: DeleteCanvasEdgeInput): Promise<CanvasEdge>
+  applyCanvasMutationBatch(
+    input: ApplyCanvasMutationBatchInput,
+  ): Promise<void>
 }
 
 export type CanvasRepositoryErrorCode =

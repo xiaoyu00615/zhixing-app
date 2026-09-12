@@ -439,6 +439,14 @@ export class TaskWorkerClient {
     }))
   }
 
+  applyCanvasMutationBatch(input: import('@/canvas/repository').ApplyCanvasMutationBatchInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'canvas.mutation.applyBatch',
+      input,
+    }))
+  }
+
   async shutdown(): Promise<void> {
     if (this.#terminated) {
       return

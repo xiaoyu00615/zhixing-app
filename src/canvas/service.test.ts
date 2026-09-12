@@ -123,6 +123,7 @@ function fixture(): {
       updateCanvasEdgeLineStyle: updateCanvasEdgeLineStyleMock,
       updateCanvasEdgeRelationType: updateCanvasEdgeRelationTypeMock,
       deleteCanvasEdge: deleteCanvasEdgeMock,
+      applyCanvasMutationBatch: vi.fn(() => Promise.resolve()),
     },
     createCanvasMock,
     createTextNodeMock,
