@@ -278,6 +278,30 @@ Understand / Inspect
 - 将未来能力描述成当前已实现。
 - 在无批准时新增依赖、平台权限或高风险文件操作。
 
+## 17. Architecture Governance
+
+正式中型以上开发任务开始前，根据任务范围读取：
+
+```text
+docs/architecture/00_ARCHITECTURE_OVERVIEW.md   # 系统事实与模块地图
+docs/architecture/01_SHARED_MODULES.md          # 已有能力、Reuse 决策
+docs/architecture/02_ARCHITECTURE_RULES.md      # 依赖 / 复用 / 抽象规则
+docs/architecture/03_AI_DEVELOPMENT_CONTRACT.md # 任务 Contract 模板
+docs/architecture/04_TEST_AND_REVIEW.md         # 测试 Gate 与 Health Review
+```
+
+架构文档维护时再读取：
+
+```text
+docs/architecture/05_MAINTENANCE.md
+```
+
+核心原则（来自 03 与 02）：
+
+- **Reuse Before Create** — 新增 Component / Hook / Service / Repository / Validator / Parser / Adapter helper / Command / Registry / Persistence helper / Utility 前必须 SEARCH → REUSE / EXTEND / EXTRACT / NEW。
+- **Audit Only** — 用户要求 audit / inspect / review 时，只读不写，禁止自动升级成 implementation。
+- **Large-line once review** — 大型 main 主线完成后做一次 Health Review；小 Slice 不重复完整 Health Review。
+
 ## 16. 每轮开始与结束检查
 
 开始前：
