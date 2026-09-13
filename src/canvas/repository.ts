@@ -250,6 +250,14 @@ export type CanvasMutationAction =
       readonly kind: 'restore_edges'
       readonly edges: readonly CanvasMutationEdgeSnapshot[]
     }
+  | {
+      readonly kind: 'move_nodes'
+      readonly moves: readonly {
+        readonly nodeId: string
+        readonly x: number
+        readonly y: number
+      }[]
+    }
 
 export interface ApplyCanvasMutationBatchInput {
   readonly canvasId: string

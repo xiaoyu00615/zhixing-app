@@ -258,6 +258,13 @@ pub(crate) struct CanvasNodePositionMove {
     pub(crate) y: f64,
 }
 
+pub(crate) struct MoveNodeInput {
+    pub(crate) canvas_id: String,
+    pub(crate) node_id: String,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+}
+
 pub(crate) struct MoveCanvasNodesInput {
     pub(crate) canvas_id: String,
     pub(crate) moves: Vec<CanvasNodePositionMove>,
@@ -404,6 +411,7 @@ pub(crate) enum CanvasMutationAction {
     InsertEdges(Vec<CanvasMutationEdgeSnapshot>),
     SoftDeleteEdges(Vec<String>),
     RestoreEdges(Vec<CanvasMutationEdgeSnapshot>),
+    MoveNodes(Vec<MoveNodeInput>),
 }
 
 pub(crate) struct ApplyCanvasMutationBatchInput {
@@ -1411,6 +1419,15 @@ impl CanvasDbService {
                         }
                     }
                 }
+                CanvasMutationAction::MoveNodes(moves) => {
+                    for node_move in moves {
+                        validate_id(&node_move.node_id)?;
+                        validate_position(node_move.x, node_move.y)?;
+                        if !node_ids.insert(&node_move.node_id) {
+                            return Err(CanvasError::PersistenceFailed);
+                        }
+                    }
+                }
             }
         }
 
@@ -1624,6 +1641,25 @@ impl CanvasDbService {
                             }
                             // Missing or already active cannot be restored.
                             None | Some(None) => return Err(CanvasError::NotFound),
+                        }
+                    }
+                }
+                CanvasMutationAction::MoveNodes(moves) => {
+                    for node_move in moves {
+                        Self::require_node_in_canvas(
+                            &transaction,
+                            &input.canvas_id,
+                            &node_move.node_id,
+                        )?;
+                        let changed = transaction
+                            .execute(
+                                "UPDATE canvas_nodes SET x = ?1, y = ?2, updated_at_ms = ?3 \
+                                 WHERE canvas_id = ?4 AND id = ?5 AND deleted_at_ms IS NULL",
+                                params![node_move.x, node_move.y, input.at_ms, input.canvas_id, node_move.node_id],
+                            )
+                            .map_err(|_| CanvasError::PersistenceFailed)?;
+                        if changed != 1 {
+                            return Err(CanvasError::NotFound);
                         }
                     }
                 }
@@ -5549,6 +5585,135 @@ mod tests {
         assert_eq!(result.unwrap_err(), CanvasError::NotFound);
         assert_eq!(active_node_count(&connection), 0);
         assert_eq!(active_edge_count(&connection), 0);
+    }
+
+    #[test]
+    fn mutation_batch_move_nodes_one_and_multiple() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let a = "00000000-0000-4000-8000-000000003a01";
+        let b = "00000000-0000-4000-8000-000000003a02";
+        create_node(&connection, a, CANVAS_ID, "A");
+        create_node(&connection, b, CANVAS_ID, "B");
+
+        // Single node move.
+        let result = CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 100,
+                actions: vec![CanvasMutationAction::MoveNodes(vec![MoveNodeInput {
+                    canvas_id: CANVAS_ID.into(),
+                    node_id: a.into(),
+                    x: 300.0,
+                    y: 400.0,
+                }])],
+            },
+        );
+        assert!(result.is_ok());
+        let node = CanvasDbService::get_node(&connection, a).unwrap();
+        assert!((node.x - 300.0).abs() < f64::EPSILON);
+        assert!((node.y - 400.0).abs() < f64::EPSILON);
+
+        // Multi-node move.
+        let result = CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 101,
+                actions: vec![CanvasMutationAction::MoveNodes(vec![
+                    MoveNodeInput {
+                        canvas_id: CANVAS_ID.into(),
+                        node_id: a.into(),
+                        x: 10.0,
+                        y: 20.0,
+                    },
+                    MoveNodeInput {
+                        canvas_id: CANVAS_ID.into(),
+                        node_id: b.into(),
+                        x: 500.0,
+                        y: 600.0,
+                    },
+                ])],
+            },
+        );
+        assert!(result.is_ok());
+        let na = CanvasDbService::get_node(&connection, a).unwrap();
+        let nb = CanvasDbService::get_node(&connection, b).unwrap();
+        assert!((na.x - 10.0).abs() < f64::EPSILON);
+        assert!((na.y - 20.0).abs() < f64::EPSILON);
+        assert!((nb.x - 500.0).abs() < f64::EPSILON);
+        assert!((nb.y - 600.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn mutation_batch_move_nodes_rolls_back_on_missing_node() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let a = "00000000-0000-4000-8000-000000003b01";
+        let missing = "00000000-0000-4000-8000-000000003b02";
+        create_node(&connection, a, CANVAS_ID, "A");
+
+        let result = CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 100,
+                actions: vec![CanvasMutationAction::MoveNodes(vec![
+                    MoveNodeInput {
+                        canvas_id: CANVAS_ID.into(),
+                        node_id: a.into(),
+                        x: 999.0,
+                        y: 999.0,
+                    },
+                    MoveNodeInput {
+                        canvas_id: CANVAS_ID.into(),
+                        node_id: missing.into(),
+                        x: 1.0,
+                        y: 1.0,
+                    },
+                ])],
+            },
+        );
+        assert_eq!(result.unwrap_err(), CanvasError::NotFound);
+        // Rollback: A should still be at original position.
+        let node = CanvasDbService::get_node(&connection, a).unwrap();
+        assert!((node.x - 10.0).abs() < f64::EPSILON);
+        assert!((node.y - 20.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn mutation_batch_move_nodes_rejects_deleted_node() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_canvas(&connection);
+        let a = "00000000-0000-4000-8000-000000003c01";
+        create_node(&connection, a, CANVAS_ID, "A");
+        // Soft-delete the node.
+        CanvasDbService::delete_node(
+            &connection,
+            DeleteCanvasNodeInput {
+                canvas_id: CANVAS_ID.into(),
+                id: a.into(),
+                deleted_at_ms: 50,
+                updated_at_ms: 50,
+            },
+        )
+        .unwrap();
+
+        let result = CanvasDbService::apply_mutation_batch(
+            &connection,
+            ApplyCanvasMutationBatchInput {
+                canvas_id: CANVAS_ID.into(),
+                at_ms: 100,
+                actions: vec![CanvasMutationAction::MoveNodes(vec![MoveNodeInput {
+                    canvas_id: CANVAS_ID.into(),
+                    node_id: a.into(),
+                    x: 1.0,
+                    y: 1.0,
+                }])],
+            },
+        );
+        assert_eq!(result.unwrap_err(), CanvasError::NotFound);
     }
 
     #[test]

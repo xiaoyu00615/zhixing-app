@@ -989,6 +989,18 @@ pub(crate) enum CanvasMutationActionDto {
     },
     #[serde(rename = "restore_edges")]
     RestoreEdges { edges: Vec<CanvasMutationEdgeDto> },
+    #[serde(rename = "move_nodes")]
+    MoveNodes {
+        nodes: Vec<CanvasMoveNodeDto>,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CanvasMoveNodeDto {
+    pub(crate) node_id: String,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1392,7 +1404,7 @@ pub(crate) fn canvas_mutation_apply_batch(
     let actions = input
         .actions
         .into_iter()
-        .map(map_mutation_action)
+        .map(|action| map_mutation_action(action, &input.canvas_id))
         .collect::<Result<Vec<_>, _>>()?;
     CanvasDbService::apply_mutation_batch(
         &connection,
@@ -1408,6 +1420,7 @@ pub(crate) fn canvas_mutation_apply_batch(
 
 fn map_mutation_action(
     action: CanvasMutationActionDto,
+    canvas_id: &str,
 ) -> Result<crate::canvas::CanvasMutationAction, crate::canvas::CanvasError> {
     use crate::canvas::CanvasMutationAction as Domain;
     Ok(match action {
@@ -1439,6 +1452,19 @@ fn map_mutation_action(
         CanvasMutationActionDto::SoftDeleteEdges { edge_ids } => Domain::SoftDeleteEdges(edge_ids),
         CanvasMutationActionDto::RestoreEdges { edges } => {
             Domain::RestoreEdges(edges.into_iter().map(mutation_edge_snapshot).collect())
+        }
+        CanvasMutationActionDto::MoveNodes { nodes } => {
+            Domain::MoveNodes(
+                nodes
+                    .into_iter()
+                    .map(|node| crate::canvas::MoveNodeInput {
+                        canvas_id: canvas_id.to_string(),
+                        node_id: node.node_id,
+                        x: node.x,
+                        y: node.y,
+                    })
+                    .collect(),
+            )
         }
     })
 }

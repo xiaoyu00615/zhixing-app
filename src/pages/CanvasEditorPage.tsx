@@ -110,6 +110,12 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
   const [flowNodes, setFlowNodes] = useState<CanvasFlowNode[]>([])
   const [canvasEdges, setCanvasEdges] = useState<CanvasEdge[]>([])
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
+  // Pending selection snapshot from before the last undo/redo, to restore after
+  // openCanvas re-syncs flowNodes (which clears React Flow selected state).
+  const pendingHistorySelectionRef = useRef<{
+    readonly canvasId: string
+    readonly nodeIds: Set<string>
+  } | null>(null)
   const [edgeContextMenu, setEdgeContextMenu] = useState<{
     readonly edgeId: string
     readonly x: number
@@ -240,13 +246,27 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
             { id: node.id, type: node.type },
           ]),
         )
-        setFlowNodes(workspace.nodes.map((node: CanvasNode) =>
-          toCanvasFlowNode(
-            node,
-            (id, type, text) => void commitNodeContent(id, type, text),
-            commitNodeName,
-          ),
-        ))
+        // Read the pending selection snapshot once, then apply it to every node
+        // in the same map. Clearing the ref must happen AFTER the map so later
+        // iterations still see the snapshot (multi-selection restore).
+        const pending = pendingHistorySelectionRef.current
+        const pendingNodeIds =
+          pending !== null && pending.canvasId === canvasId ? pending.nodeIds : null
+        setFlowNodes(
+          workspace.nodes.map((node: CanvasNode) => {
+            const flowNode = toCanvasFlowNode(
+              node,
+              (id, type, text) => void commitNodeContent(id, type, text),
+              commitNodeName,
+            )
+            return pendingNodeIds !== null && pendingNodeIds.has(flowNode.id)
+              ? { ...flowNode, selected: true }
+              : flowNode
+          }),
+        )
+        if (pendingNodeIds !== null) {
+          pendingHistorySelectionRef.current = null
+        }
         canvasEdgesRef.current = [...workspace.edges]
         setCanvasEdges([...workspace.edges])
         setPhase('ready')
@@ -514,6 +534,17 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
       event.preventDefault()
       void (async () => {
         try {
+          // Snapshot currently selected node IDs before undo/redo, so they can be
+          // restored after openCanvas re-syncs flowNodes (which clears selection).
+          const selectedIds = new Set(
+            flowNodesRef.current.filter((n) => n.selected).map((n) => n.id),
+          )
+          if (selectedIds.size > 0) {
+            pendingHistorySelectionRef.current = {
+              canvasId: canvas.id,
+              nodeIds: selectedIds,
+            }
+          }
           if (isUndo) {
             await currentService.undo(canvas.id)
             setAttempt((a) => a + 1)
@@ -524,6 +555,8 @@ function Editor({ openRuntime }: { readonly openRuntime: OpenCanvasRuntime }) {
             setFeedback('重做')
           }
         } catch {
+          // Failure must not leave a stale pending selection for the next refresh.
+          pendingHistorySelectionRef.current = null
           setFeedback(isUndo ? '撤销失败，请重试。' : '重做失败，请重试。')
         }
       })()

@@ -159,8 +159,51 @@ export function createCanvasHistoryService(
       })
     },
 
-    moveCanvasNode(id, x, y) { return inner.moveCanvasNode(id, x, y) },
-    moveCanvasNodes(canvasId, moves) { return inner.moveCanvasNodes(canvasId, moves) },
+    async moveCanvasNode(id, x, y) {
+      const canvasId = nodeCanvasId.get(id)
+      if (canvasId === undefined) return inner.moveCanvasNode(id, x, y)
+      const before = nodeById.get(id)
+      if (before === undefined) return inner.moveCanvasNode(id, x, y)
+      if (before.x === x && before.y === y) return inner.moveCanvasNode(id, x, y)
+      return inner.moveCanvasNode(id, x, y).then((node) => {
+        nodeById.set(id, node)
+        pushEntry(canvasId,
+          [{ kind: 'move_nodes', moves: [{ nodeId: id, x, y }] }],
+          [{ kind: 'move_nodes', moves: [{ nodeId: id, x: before.x, y: before.y }] }],
+        )
+        return node
+      })
+    },
+    async moveCanvasNodes(canvasId, moves) {
+      // Validate all nodes exist and are tracked before executing any mutation.
+      const beforeMap = new Map<string, { x: number; y: number }>()
+      for (const move of moves) {
+        const node = nodeById.get(move.nodeId)
+        if (node === undefined || node.canvasId !== canvasId) {
+          return inner.moveCanvasNodes(canvasId, moves)
+        }
+        beforeMap.set(move.nodeId, { x: node.x, y: node.y })
+      }
+      // Filter out zero-movement nodes before calling inner.
+      const actualMoves = moves.filter(
+        (m) => !(beforeMap.get(m.nodeId)?.x === m.x && beforeMap.get(m.nodeId)?.y === m.y),
+      )
+      if (actualMoves.length === 0) return inner.moveCanvasNodes(canvasId, moves)
+      return inner.moveCanvasNodes(canvasId, moves).then((nodes) => {
+        for (const node of nodes) {
+          nodeById.set(node.id, node)
+          nodeCanvasId.set(node.id, canvasId)
+        }
+        pushEntry(canvasId,
+          [{ kind: 'move_nodes', moves: actualMoves }],
+          [{
+            kind: 'move_nodes',
+            moves: actualMoves.map((m) => ({ nodeId: m.nodeId, x: beforeMap.get(m.nodeId)!.x, y: beforeMap.get(m.nodeId)!.y })),
+          }],
+        )
+        return nodes
+      })
+    },
     deleteCanvasNode(canvasId, id) { return inner.deleteCanvasNode(canvasId, id) },
 
     async createCanvasEdge(canvasId, sourceNodeId, targetNodeId) {

@@ -840,6 +840,7 @@ const CANVAS_MUTATION_ACTION_KINDS = new Set([
   'insert_edges',
   'soft_delete_edges',
   'restore_edges',
+  'move_nodes',
 ])
 
 // Envelope gate only: deep structural and canonical validation is enforced

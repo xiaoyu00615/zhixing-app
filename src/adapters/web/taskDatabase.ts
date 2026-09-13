@@ -1362,6 +1362,15 @@ export class WebTaskDatabase {
           }
           break
         }
+        case 'move_nodes': {
+          for (const move of action.moves) {
+            if (!isCanonicalCanvasId(move.nodeId) || !isCanvasCoordinate(move.x) || !isCanvasCoordinate(move.y)) {
+              throw new TaskDatabaseError('PERSISTENCE_FAILED')
+            }
+            rememberNodeId(move.nodeId)
+          }
+          break
+        }
         default:
           throw new TaskDatabaseError('PERSISTENCE_FAILED')
       }
@@ -1595,6 +1604,21 @@ export class WebTaskDatabase {
                   edge.id,
                 )
                 writeEdgeSnapshot(edge)
+              }
+              break
+            }
+            case 'move_nodes': {
+              for (const move of action.moves) {
+                this.requireNodeInCanvas(input.canvasId, move.nodeId)
+                this.#database.exec({
+                  sql: `UPDATE canvas_nodes
+                        SET x = ?, y = ?, updated_at_ms = ?
+                        WHERE canvas_id = ? AND id = ? AND deleted_at_ms IS NULL`,
+                  bind: [move.x, move.y, input.atMs, input.canvasId, move.nodeId],
+                })
+                if (this.#database.changes() !== 1) {
+                  throw new TaskDatabaseError('NOT_FOUND')
+                }
               }
               break
             }
