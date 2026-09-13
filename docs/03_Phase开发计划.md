@@ -192,6 +192,59 @@ Phase 2 只在 Phase 1B COMPLETE 后开始。Phase 1B 负责基于 Task contract
 - 多人协作；
 - 云同步。
 
+### Canvas V1 Status: COMPLETE AFTER FORMAL SCOPE REVISION
+
+Phase 3 Canvas V1 于 2026-09-13 经正式产品 Scope Decision 关闭。关闭原因不是原始 Phase 3 全部条目均已完成，而是对原始 Phase 3 范围进行了正式修订，并明确保留历史计划可追踪性。
+
+Phase 3 Canvas V1 保留为已完成的核心闭环：
+
+- Canvas List / Editor；
+- React Flow Core；
+- Text Node；
+- Sticky Node；
+- Node Box；
+- Canvas / CanvasNode / CanvasEdge persistence；
+- Drag / Zoom / Pan；
+- Edge；
+- Selection；
+- Multi Select；
+- Collective Move；
+- Node Box ordered membership；
+- Node Box unordered membership；
+- Node Box reorder；
+- Copy / Paste；
+- Internal Edge Copy；
+- Undo / Redo；
+- Move History；
+- Selection Preservation；
+- Context Menu；
+- Node / Edge soft delete；
+- Native persistence；
+- Web persistence；
+- Restart persistence；
+- Unknown type safety。
+
+正式从 Phase 3 移出的原始条目：
+
+| 原 Phase 3 条目 | Scope Decision | 目标阶段 / 条件 |
+|---|---|---|
+| Group：组合 / 整体移动 / 取消组合 | DEFER TO CANVAS ENHANCEMENT | 当前 Multi Select、Collective Move、Node Box 已满足 V1 组织需求；未来仅在需要 persistent group identity 或 group / ungroup semantics 时设计 |
+| Node Property Panel | DEFER TO CANVAS ENHANCEMENT | 当前 inline edit 与 Context Menu 覆盖 V1 核心属性操作；节点类型与属性数量显著增加后再设计 |
+| MiniMap | DEFER TO CANVAS ENHANCEMENT | 大画布导航增强；实际大画布使用产生导航成本后引入 |
+| Canvas Editor Search | MOVE TO SEARCH INTEGRATION | Phase 5 / Global Search 基础建立后，再决定 Global Search 与 Canvas-local Search 的公共索引 / query 机制 |
+| Link Node | DEFER TO CANVAS ENHANCEMENT | 不阻塞 Canvas V1 与 Phase 4 Diary + Note |
+| Image Node + 图片 Node 文件存储 | MOVE AFTER DOCUMENT CORE / SHARED ATTACHMENT CONTRACT | 两个项目作为一个整体迁移；先明确 Canvas / Note / Diary 可复用的 Attachment / File Asset Contract；SQLite 只存 metadata / references，真实图片存 local filesystem |
+| Task Entity Node | MOVE TO LINKED ENTITY INTEGRATION | Task Domain 已存在，但缺少正式 Canvas ↔ Entity reference contract；不创建 Task Node 特例 |
+| Note Entity Node | DEPEND ON PHASE 4 NOTE DOMAIN | Phase 4 Note Domain 完成后进入 Linked Entity Integration |
+| Diary Entity Node | DEPEND ON PHASE 4 DIARY DOMAIN | Phase 4 Diary Domain 完成后进入 Linked Entity Integration |
+| Linked Entity 失效状态 | MOVE WITH LINKED ENTITY CONTRACT | 与 entity reference、entity lifecycle、deleted state、unavailable state、open behavior 一起设计 |
+
+Document Compiler / Processor 等能力继续保持 FUTURE ARCHITECTURE，不进入 Phase 3 closeout debt，包括：Processor、Document Compiler、Renderer Registry、Markdown Export、AI Processor、Auto Layout、Cross-canvas Paste、Node Box Nesting、Frame Node、Sub-canvas。
+
+Phase 3 下一正式阶段：
+
+- Phase 4｜Diary + Note。
+
 ---
 
 ## Phase 4｜Diary + Notes + Document System
