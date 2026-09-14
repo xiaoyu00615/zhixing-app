@@ -16,7 +16,22 @@ export const TASK_STATUS_OPERATIONS = [
 
 export type TaskStatusOperation = (typeof TASK_STATUS_OPERATIONS)[number]
 
-export type LocalDate = string
+import {
+  getDaysInLocalMonth,
+  isValidLocalDate,
+  type LocalDate,
+} from '@/shared/validation'
+
+// Domain-neutral primitives extracted to @/shared/validation.
+// Re-exported here for backward compatibility with existing Task callers.
+export {
+  isCanonicalLowercaseUuid,
+  isNonNegativeSafeIntegerMilliseconds,
+  isValidLocalDate,
+  getDaysInLocalMonth,
+  localDateFromDate,
+  type LocalDate,
+} from '@/shared/validation'
 
 export interface Task {
   readonly id: string
@@ -83,9 +98,6 @@ export interface TaskCalendarDay {
   readonly tasks: readonly Task[]
 }
 
-const CANONICAL_LOWERCASE_UUID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-
 export function isTaskStatus(value: unknown): value is TaskStatus {
   return (
     typeof value === 'string' &&
@@ -102,75 +114,8 @@ export function isTaskStatusOperation(
   )
 }
 
-export function isCanonicalLowercaseUuid(value: unknown): value is string {
-  return typeof value === 'string' && CANONICAL_LOWERCASE_UUID.test(value)
-}
-
 export function isNonEmptyTaskTitle(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
-}
-
-export function isNonNegativeSafeIntegerMilliseconds(
-  value: unknown,
-): value is number {
-  return Number.isSafeInteger(value) && typeof value === 'number' && value >= 0
-}
-
-const LOCAL_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/
-
-function isLeapYear(year: number): boolean {
-  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
-}
-
-export function getDaysInLocalMonth(
-  year: number,
-  month: number,
-): number | null {
-  if (!Number.isInteger(year) || year < 1 || year > 9999) {
-    return null
-  }
-  if (!Number.isInteger(month) || month < 1 || month > 12) {
-    return null
-  }
-  return [
-    31,
-    isLeapYear(year) ? 29 : 28,
-    31,
-    30,
-    31,
-    30,
-    31,
-    31,
-    30,
-    31,
-    30,
-    31,
-  ][month - 1]!
-}
-
-export function isValidLocalDate(value: unknown): value is LocalDate {
-  if (typeof value !== 'string') {
-    return false
-  }
-  const match = LOCAL_DATE_PATTERN.exec(value)
-  if (match === null) {
-    return false
-  }
-  const year = Number(match[1])
-  const month = Number(match[2])
-  const day = Number(match[3])
-  if (year < 1 || month < 1 || month > 12 || day < 1) {
-    return false
-  }
-  const daysInMonth = getDaysInLocalMonth(year, month)
-  return daysInMonth !== null && day <= daysInMonth
-}
-
-export function localDateFromDate(date: Date): LocalDate {
-  const year = date.getFullYear().toString().padStart(4, '0')
-  const month = (date.getMonth() + 1).toString().padStart(2, '0')
-  const day = date.getDate().toString().padStart(2, '0')
-  return `${year}-${month}-${day}`
 }
 
 export function isTaskOverdue(task: Task, today: LocalDate): boolean {

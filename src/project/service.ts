@@ -6,7 +6,7 @@ import {
 import {
   isCanonicalLowercaseUuid,
   isNonNegativeSafeIntegerMilliseconds,
-} from '@/task/model'
+} from '@/shared/validation'
 
 export type ProjectApplicationErrorCode =
   'VALIDATION' | 'NOT_FOUND' | 'UNAVAILABLE'

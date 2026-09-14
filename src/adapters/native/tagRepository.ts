@@ -12,7 +12,7 @@ import {
 import {
   isCanonicalLowercaseUuid,
   isNonNegativeSafeIntegerMilliseconds,
-} from '@/task/model'
+} from '@/shared/validation'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)

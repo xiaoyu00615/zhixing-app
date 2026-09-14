@@ -1,0 +1,97 @@
+import type { DiaryDate, DiaryEntry } from './model'
+
+export interface CreateDiaryEntryInput {
+  readonly title: string
+  readonly content: string
+  readonly diaryDate: DiaryDate
+}
+
+export interface UpdateDiaryEntryInput {
+  readonly id: string
+  readonly title: string
+  readonly content: string
+}
+
+export interface ChangeDiaryDateInput {
+  readonly id: string
+  readonly diaryDate: DiaryDate
+}
+
+export interface SoftDeleteDiaryEntryInput {
+  readonly id: string
+}
+
+export interface RestoreDiaryEntryInput {
+  readonly id: string
+}
+
+/**
+ * Read lookup methods return the active record or null and never throw
+ * NOT_FOUND for a plain missing or soft-deleted record. Mutation methods
+ * throw NOT_FOUND when the target is missing or violates the operation's
+ * active/deleted precondition.
+ */
+export interface DiaryRepository {
+  create(input: CreateDiaryEntryInput): Promise<DiaryEntry>
+  /** Returns null when the record is missing or soft-deleted. */
+  getActiveById(id: string): Promise<DiaryEntry | null>
+  /** Returns null when no active entry exists for the date. */
+  getActiveByDiaryDate(diaryDate: DiaryDate): Promise<DiaryEntry | null>
+  /** Active entries ordered by diary_date DESC, updated_at_ms DESC, id ASC. */
+  listActive(): Promise<DiaryEntry[]>
+  /** Throws NOT_FOUND when target is missing or not active. */
+  updateDiaryEntry(input: UpdateDiaryEntryInput): Promise<DiaryEntry>
+  /**
+   * Throws NOT_FOUND when target is missing or not active; throws
+   * DIARY_DATE_CONFLICT when another active entry already owns the new date.
+   */
+  changeDiaryDate(input: ChangeDiaryDateInput): Promise<DiaryEntry>
+  /** Throws NOT_FOUND when target is missing or not active. */
+  softDelete(input: SoftDeleteDiaryEntryInput): Promise<void>
+  /** Throws NOT_FOUND when target is missing or not soft-deleted. */
+  restore(input: RestoreDiaryEntryInput): Promise<void>
+}
+
+export const DIARY_REPOSITORY_ERROR_CODES = [
+  'INVALID_ID',
+  'NOT_FOUND',
+  'INVALID_TITLE',
+  'INVALID_DIARY_DATE',
+  'DIARY_DATE_CONFLICT',
+  'PERSISTENCE_ERROR',
+] as const
+export type DiaryRepositoryErrorCode = (typeof DIARY_REPOSITORY_ERROR_CODES)[number]
+export type DiaryRepositoryOperation =
+  | 'create'
+  | 'getActiveById'
+  | 'getActiveByDiaryDate'
+  | 'listActive'
+  | 'updateDiaryEntry'
+  | 'changeDiaryDate'
+  | 'softDelete'
+  | 'restore'
+
+const SAFE_ERROR_MESSAGES: Record<DiaryRepositoryErrorCode, string> = {
+  INVALID_ID: 'Invalid diary entry identifier.',
+  NOT_FOUND: 'Diary entry not found.',
+  INVALID_TITLE: 'Invalid diary entry title.',
+  INVALID_DIARY_DATE: 'Invalid diary date.',
+  DIARY_DATE_CONFLICT: 'A diary entry already exists for this date.',
+  PERSISTENCE_ERROR: 'Unable to persist the diary entry change.',
+}
+
+export class DiaryRepositoryError extends Error {
+  readonly code: DiaryRepositoryErrorCode
+  readonly operation: DiaryRepositoryOperation
+
+  constructor(code: DiaryRepositoryErrorCode, operation: DiaryRepositoryOperation) {
+    super(SAFE_ERROR_MESSAGES[code])
+    this.name = 'DiaryRepositoryError'
+    this.code = code
+    this.operation = operation
+  }
+}
+
+export function isDiaryRepositoryErrorCode(value: unknown): value is DiaryRepositoryErrorCode {
+  return typeof value === 'string' && (DIARY_REPOSITORY_ERROR_CODES as readonly string[]).includes(value)
+}

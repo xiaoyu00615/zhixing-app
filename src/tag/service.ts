@@ -3,7 +3,7 @@ import { TagRepositoryError, type TagRepository } from '@/tag/repository'
 import {
   isCanonicalLowercaseUuid,
   isNonNegativeSafeIntegerMilliseconds,
-} from '@/task/model'
+} from '@/shared/validation'
 
 export type TagApplicationErrorCode =
   | 'VALIDATION'

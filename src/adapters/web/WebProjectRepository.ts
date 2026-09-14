@@ -9,7 +9,7 @@ import {
 import {
   isCanonicalLowercaseUuid,
   isNonNegativeSafeIntegerMilliseconds,
-} from '@/task/model'
+} from '@/shared/validation'
 import { TaskWorkerClient, TaskWorkerClientError } from './taskWorkerClient'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
