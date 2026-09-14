@@ -959,6 +959,7 @@ mod tests {
                 (9, "0009_add_canvas_node_name".to_string()),
                 (10, "0010_add_canvas_node_boxes".to_string()),
                 (11, "0011_add_canvas_node_soft_delete".to_string()),
+                (12, "0012_add_notes_and_diary".to_string()),
             ]
         );
 
@@ -1053,7 +1054,7 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(history, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(history, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
 
         let foreign_keys: Vec<(String, String, String)> = connection
             .prepare("PRAGMA foreign_key_list('tasks')")
@@ -2084,5 +2085,420 @@ mod tests {
             TaskError::PersistenceUnavailable
         );
         assert!(!database_path.exists());
+    }
+
+    #[test]
+    fn migration_12_creates_notes_and_diary_entries_tables_and_partial_unique_index() {
+        let (_sandbox, _path, connection) = migrated_database();
+
+        let table_names: Vec<String> = connection
+            .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(table_names.iter().any(|n| n == "notes"));
+        assert!(table_names.iter().any(|n| n == "diary_entries"));
+        assert!(!table_names.iter().any(|n| n == "documents"));
+
+        let notes_columns: Vec<(String, String)> = connection
+            .prepare("PRAGMA table_info('notes')")
+            .unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            notes_columns,
+            vec![
+                ("id".into(), "TEXT".into()),
+                ("title".into(), "TEXT".into()),
+                ("content".into(), "TEXT".into()),
+                ("created_at_ms".into(), "INTEGER".into()),
+                ("updated_at_ms".into(), "INTEGER".into()),
+                ("deleted_at_ms".into(), "INTEGER".into()),
+            ]
+        );
+
+        let diary_columns: Vec<(String, String)> = connection
+            .prepare("PRAGMA table_info('diary_entries')")
+            .unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            diary_columns,
+            vec![
+                ("id".into(), "TEXT".into()),
+                ("title".into(), "TEXT".into()),
+                ("content".into(), "TEXT".into()),
+                ("diary_date".into(), "TEXT".into()),
+                ("created_at_ms".into(), "INTEGER".into()),
+                ("updated_at_ms".into(), "INTEGER".into()),
+                ("deleted_at_ms".into(), "INTEGER".into()),
+            ]
+        );
+
+        let indexes: Vec<(String, i64, Option<String>)> = connection
+            .prepare("PRAGMA index_list('diary_entries')")
+            .unwrap()
+            .query_map(
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let partial_unique = indexes
+            .iter()
+            .find(|(name, _, _)| name == "idx_diary_entries_diary_date_active_unique");
+        assert!(
+            partial_unique.is_some(),
+            "partial unique index on diary_date missing: {indexes:?}"
+        );
+        let (_, is_unique, origin) = partial_unique.unwrap();
+        assert!(*is_unique != 0);
+        assert!(origin.as_deref() == Some("c"));
+
+        let partial_unique_sql = connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = 'idx_diary_entries_diary_date_active_unique'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let partial_unique_sql_upper = partial_unique_sql.to_uppercase();
+        assert!(partial_unique_sql_upper.contains("DIARY_DATE"));
+        assert!(partial_unique_sql_upper.contains("WHERE DELETED_AT_MS IS NULL"));
+    }
+
+    fn insert_note(
+        conn: &Connection,
+        id: &str,
+        title: &str,
+        content: &str,
+        created_at_ms: i64,
+        updated_at_ms: i64,
+        deleted_at_ms: Option<i64>,
+    ) -> rusqlite::Result<()> {
+        conn.execute(
+            "INSERT INTO notes (id, title, content, created_at_ms, updated_at_ms, deleted_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![id, title, content, created_at_ms, updated_at_ms, deleted_at_ms],
+        )?;
+        Ok(())
+    }
+
+    fn insert_diary_entry(
+        conn: &Connection,
+        id: &str,
+        title: &str,
+        content: &str,
+        diary_date: &str,
+        created_at_ms: i64,
+        updated_at_ms: i64,
+        deleted_at_ms: Option<i64>,
+    ) -> rusqlite::Result<()> {
+        conn.execute(
+            "INSERT INTO diary_entries \
+             (id, title, content, diary_date, created_at_ms, updated_at_ms, deleted_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![id, title, content, diary_date, created_at_ms, updated_at_ms, deleted_at_ms],
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn migration_12_rejects_negative_timestamps_on_notes_and_diary_entries() {
+        let (_sandbox, _path, connection) = migrated_database();
+
+        // notes.created_at_ms negative
+        let notes_negative_created = insert_note(
+            &connection,
+            "00000000-0000-4000-8000-000000000001",
+            "t",
+            "c",
+            -1,
+            200,
+            None,
+        );
+        assert!(notes_negative_created.is_err(), "notes.created_at_ms CHECK should reject -1");
+
+        // notes.updated_at_ms negative
+        let notes_negative_updated = insert_note(
+            &connection,
+            "00000000-0000-4000-8000-000000000002",
+            "t",
+            "c",
+            100,
+            -1,
+            None,
+        );
+        assert!(notes_negative_updated.is_err(), "notes.updated_at_ms CHECK should reject -1");
+
+        // notes.deleted_at_ms non-null negative
+        let notes_negative_deleted = insert_note(
+            &connection,
+            "00000000-0000-4000-8000-000000000003",
+            "t",
+            "c",
+            100,
+            200,
+            Some(-1),
+        );
+        assert!(
+            notes_negative_deleted.is_err(),
+            "notes.deleted_at_ms CHECK should reject -1"
+        );
+
+        // diary_entries.created_at_ms negative
+        let diary_negative_created = insert_diary_entry(
+            &connection,
+            "00000000-0000-4000-8000-000000000011",
+            "t",
+            "c",
+            "2026-09-01",
+            -1,
+            200,
+            None,
+        );
+        assert!(
+            diary_negative_created.is_err(),
+            "diary_entries.created_at_ms CHECK should reject -1"
+        );
+
+        // diary_entries.updated_at_ms negative
+        let diary_negative_updated = insert_diary_entry(
+            &connection,
+            "00000000-0000-4000-8000-000000000012",
+            "t",
+            "c",
+            "2026-09-02",
+            100,
+            -1,
+            None,
+        );
+        assert!(
+            diary_negative_updated.is_err(),
+            "diary_entries.updated_at_ms CHECK should reject -1"
+        );
+
+        // diary_entries.deleted_at_ms non-null negative
+        let diary_negative_deleted = insert_diary_entry(
+            &connection,
+            "00000000-0000-4000-8000-000000000013",
+            "t",
+            "c",
+            "2026-09-03",
+            100,
+            200,
+            Some(-1),
+        );
+        assert!(
+            diary_negative_deleted.is_err(),
+            "diary_entries.deleted_at_ms CHECK should reject -1"
+        );
+
+        // sanity: valid inserts do succeed (so failure above is CHECK, not table absence)
+        insert_note(
+            &connection,
+            "00000000-0000-4000-8000-000000000021",
+            "t",
+            "c",
+            0,
+            0,
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn migration_12_diary_date_partial_unique_allows_multiple_deleted_same_date() {
+        let (_sandbox, _path, connection) = migrated_database();
+
+        // Case 1: active + active same diary_date → FAIL
+        let a = insert_diary_entry(
+            &connection,
+            "00000000-0000-4000-8000-000000000031",
+            "A",
+            "c",
+            "2026-09-01",
+            100,
+            100,
+            None,
+        )
+        .unwrap();
+        let _ = a;
+        let b_active = insert_diary_entry(
+            &connection,
+            "00000000-0000-4000-8000-000000000032",
+            "B",
+            "c",
+            "2026-09-01",
+            101,
+            101,
+            None,
+        );
+        assert!(
+            b_active.is_err(),
+            "active + active same diary_date must fail partial unique"
+        );
+
+        // Case 2: deleted + active same diary_date → PASS
+        let c_deleted = insert_diary_entry(
+            &connection,
+            "00000000-0000-4000-8000-000000000033",
+            "C",
+            "c",
+            "2026-09-02",
+            200,
+            200,
+            Some(200),
+        )
+        .unwrap();
+        let _ = c_deleted;
+        let d_active = insert_diary_entry(
+            &connection,
+            "00000000-0000-4000-8000-000000000034",
+            "D",
+            "c",
+            "2026-09-02",
+            201,
+            201,
+            None,
+        );
+        assert!(d_active.is_ok(), "deleted + active same diary_date must pass");
+
+        // Case 3: multiple deleted same diary_date → PASS
+        let e_deleted = insert_diary_entry(
+            &connection,
+            "00000000-0000-4000-8000-000000000035",
+            "E",
+            "c",
+            "2026-09-03",
+            300,
+            300,
+            Some(300),
+        )
+        .unwrap();
+        let _ = e_deleted;
+        let f_deleted = insert_diary_entry(
+            &connection,
+            "00000000-0000-4000-8000-000000000036",
+            "F",
+            "c",
+            "2026-09-03",
+            301,
+            301,
+            Some(301),
+        );
+        assert!(f_deleted.is_ok(), "multiple deleted same diary_date must pass");
+    }
+
+    #[test]
+    fn migration_12_allows_empty_and_raw_markdown_content_roundtrip() {
+        let (_sandbox, _path, connection) = migrated_database();
+
+        // empty title and content on notes
+        insert_note(
+            &connection,
+            "00000000-0000-4000-8000-000000000041",
+            "",
+            "",
+            100,
+            200,
+            None,
+        )
+        .unwrap();
+
+        // raw markdown / whitespace on notes
+        let raw_markdown = "# Heading\n\n- item A\n- item B\n\n```\ncode block\n```\n\n*italic* and **bold**\n\n\ttrailing-tab-and-space  \n\n\n";
+        insert_note(
+            &connection,
+            "00000000-0000-4000-8000-000000000042",
+            "Raw note",
+            raw_markdown,
+            100,
+            200,
+            None,
+        )
+        .unwrap();
+
+        // roundtrip via SELECT
+        let read_note = |id: &str| -> (String, String) {
+            connection
+                .query_row(
+                    "SELECT title, content FROM notes WHERE id = ?1",
+                    rusqlite::params![id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .unwrap()
+        };
+        let (empty_title, empty_content) = read_note("00000000-0000-4000-8000-000000000041");
+        assert_eq!(empty_title, "");
+        assert_eq!(empty_content, "");
+
+        let (raw_title, raw_content) = read_note("00000000-0000-4000-8000-000000000042");
+        assert_eq!(raw_title, "Raw note");
+        assert_eq!(raw_content, raw_markdown);
+
+        // diary_entries with empty + raw content
+        insert_diary_entry(
+            &connection,
+            "00000000-0000-4000-8000-000000000051",
+            "",
+            "",
+            "2026-09-05",
+            100,
+            200,
+            None,
+        )
+        .unwrap();
+        insert_diary_entry(
+            &connection,
+            "00000000-0000-4000-8000-000000000052",
+            "Raw diary",
+            raw_markdown,
+            "2026-09-06",
+            100,
+            200,
+            None,
+        )
+        .unwrap();
+
+        let read_diary = |id: &str| -> (String, String, String) {
+            connection
+                .query_row(
+                    "SELECT title, content, diary_date FROM diary_entries WHERE id = ?1",
+                    rusqlite::params![id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .unwrap()
+        };
+        let (d_empty_title, d_empty_content, d_empty_date) =
+            read_diary("00000000-0000-4000-8000-000000000051");
+        assert_eq!(d_empty_title, "");
+        assert_eq!(d_empty_content, "");
+        assert_eq!(d_empty_date, "2026-09-05");
+
+        let (d_raw_title, d_raw_content, d_raw_date) =
+            read_diary("00000000-0000-4000-8000-000000000052");
+        assert_eq!(d_raw_title, "Raw diary");
+        assert_eq!(d_raw_content, raw_markdown);
+        assert_eq!(d_raw_date, "2026-09-06");
     }
 }

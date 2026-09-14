@@ -2352,6 +2352,12 @@ export class WebTaskDatabase {
     const canvasEdgesTableCount = this.#database.selectValue(
       `SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'canvas_edges'`,
     )
+    const notesTableCount = this.#database.selectValue(
+      `SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'notes'`,
+    )
+    const diaryEntriesTableCount = this.#database.selectValue(
+      `SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'diary_entries'`,
+    )
     if (
       tasksTableCount !== 1 ||
       projectsTableCount !== 1 ||
@@ -2360,6 +2366,8 @@ export class WebTaskDatabase {
       canvasesTableCount !== 1 ||
       canvasNodesTableCount !== 1 ||
       canvasEdgesTableCount !== 1 ||
+      notesTableCount !== 1 ||
+      diaryEntriesTableCount !== 1 ||
       quickCheck !== 'ok' ||
       foreignKeys !== 1
     ) {

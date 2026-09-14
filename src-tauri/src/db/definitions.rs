@@ -24,6 +24,8 @@ const ADD_CANVAS_NODE_BOXES_SQL: &str =
     include_str!("../../migrations/0010_add_canvas_node_boxes.sql");
 const ADD_CANVAS_NODE_SOFT_DELETE_SQL: &str =
     include_str!("../../migrations/0011_add_canvas_node_soft_delete.sql");
+const ADD_NOTES_AND_DIARY_SQL: &str =
+    include_str!("../../migrations/0012_add_notes_and_diary.sql");
 
 pub const MIGRATIONS: &[MigrationDefinition] = &[
     MigrationDefinition {
@@ -90,6 +92,12 @@ pub const MIGRATIONS: &[MigrationDefinition] = &[
         version: 11,
         id: "0011_add_canvas_node_soft_delete",
         sql_up: ADD_CANVAS_NODE_SOFT_DELETE_SQL,
+        high_risk: false,
+    },
+    MigrationDefinition {
+        version: 12,
+        id: "0012_add_notes_and_diary",
+        sql_up: ADD_NOTES_AND_DIARY_SQL,
         high_risk: false,
     },
 ];

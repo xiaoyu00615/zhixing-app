@@ -752,7 +752,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(rows, 11, "Production Migrations 1-11 必须写入 history");
+        assert_eq!(rows, 12, "Production Migrations 1-12 必须写入 history");
         let task_table: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
@@ -789,7 +789,7 @@ mod tests {
         let others: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master \
-                 WHERE type='table' AND name NOT IN ('schema_migrations', 'tasks', 'projects', 'tags', 'task_tags', 'canvases', 'canvas_nodes', 'canvas_edges')",
+                 WHERE type='table' AND name NOT IN ('schema_migrations', 'tasks', 'projects', 'tags', 'task_tags', 'canvases', 'canvas_nodes', 'canvas_edges', 'notes', 'diary_entries')",
                 [],
                 |r| r.get(0),
             )
@@ -816,12 +816,12 @@ mod tests {
         let manifest_bytes_before =
             fs::read(data_root.join(MANIFEST_FILENAME)).unwrap();
 
-        // (2) Production already applied v1-v11; insert an unknown v12.
+        // (2) Production already applied v1-v12; insert an unknown v13.
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
             conn.execute_batch(
                 "INSERT INTO schema_migrations(version,id,checksum_sha256,applied_at_ms) \
-                 VALUES(12,'m12','sha12',101);",
+                 VALUES(13,'m13','sha13',101);",
             )
             .unwrap();
         }
@@ -854,10 +854,10 @@ mod tests {
         assert_eq!(device_id_1.as_str(), loaded2.device_id.as_str());
         assert!(db_path.exists(), "失败不得删 zhixing.db");
 
-        // (4) Remove only the injected v12 row; approved v1-v11 remain intact.
+        // (4) Remove only the injected v13 row; approved v1-v12 remain intact.
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
-            conn.execute_batch("DELETE FROM schema_migrations WHERE version = 12;")
+            conn.execute_batch("DELETE FROM schema_migrations WHERE version = 13;")
                 .unwrap();
         }
         let status = run_bootstrap_pipeline(&cfg, &local);
