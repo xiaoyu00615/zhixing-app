@@ -286,7 +286,7 @@ Phase 3 下一正式阶段：
 
 ### Phase 4 Status: IN PROGRESS
 
-Phase 4 已实际启动，官方状态由 `NOT STARTED` 更新为 `IN PROGRESS`。冲突来源：`docs/00_当前版本清单.md` 在 `ab8e7ec feat: add note and diary schema` 与 `add13e8 feat: add note and diary domain contracts` 进入 main 之后未及时同步。以 `add13e8e4ea510b516c26c818f0ffdacdcc33974` 为治理 baseline 修订本节。
+Phase 4 已实际启动，官方状态由 `NOT STARTED` 更新为 `IN PROGRESS`。本节以 P4-04B1 closeout commit `110b5c69aba651f04a187821d63bcc60eb364664` 为当前治理 baseline。
 
 已完成（DONE，使用真实历史 Step ID；不重新编号）：
 
@@ -296,15 +296,15 @@ Phase 4 已实际启动，官方状态由 `NOT STARTED` 更新为 `IN PROGRESS`�
 - P4-02A｜Migration 0012 Foundation：`0012_add_notes_and_diary`，`notes` 与 `diary_entries` schema 进入 production migration history；CHECK constraint、`deleted_at_ms` 软删除与相关索引已冻结；
 - P4-03｜Note / Diary Domain Contract：`src/note/model.ts` 与 `src/diary/model.ts`；
 - P4-03A｜Shared Import + Repository Contract Repair：`src/note/repository.ts` 与 `src/diary/repository.ts`；`NOTE_REPOSITORY_ERROR_CODES` 与 `DIARY_REPOSITORY_ERROR_CODES` 与 Task 独立；
-- P4-03B｜Non-Task Shared Validation Import Cleanup：canonical lowercase UUID 与非负 safe-integer ms timestamp 校验在 Native 侧复用。
+- P4-03B｜Non-Task Shared Validation Import Cleanup：canonical lowercase UUID 与非负 safe-integer ms timestamp 校验在 Native 侧复用；
+- P4-04B1｜Native Note Persistence：CLOSED，commit `110b5c69aba651f04a187821d63bcc60eb364664`。
 
-进行中（IN PROGRESS）：
+NEXT（NOT STARTED）：
 
-- P4-04B1｜Native Note Persistence（见下方 Scope）。当前 dirty implementation 保留，未 stage、未 commit。
+- P4-04B2｜Web Note Persistence。
 
 明确 NOT STARTED：
 
-- P4-04B2｜Web Note Persistence；
 - P4-04B3｜Native / Web Parity Hardening；
 - NoteService + runtime composition（含 `noteRuntime.native.ts`）；
 - Note UI；
@@ -312,36 +312,46 @@ Phase 4 已实际启动，官方状态由 `NOT STARTED` 更新为 `IN PROGRESS`�
 
 本节不合并 NoteService、runtime composition 或 Note UI 至 persistence step。后续仍须遵循 Plan → 用户/架构审核 → Implementation → Tests → Review → Commit 流程。
 
-### P4-04B1｜Native Note Persistence（IN PROGRESS）
+### P4-04B1｜Native Note Persistence（CLOSED）
 
-Scope：
+Closeout commit：`110b5c69aba651f04a187821d63bcc60eb364664`，commit message `feat: add native note persistence`。
+
+完成范围：
 
 - `src/note/repository.ts` persistence-ready input alignment：`CreateNoteInput` 显式 `id`；`UpdateNoteInput` / `SoftDeleteNoteInput` / `RestoreNoteInput` 显式 `updatedAtMs`；
-- Rust `NoteDbService`：canonical lowercase UUID 校验、非负 safe-integer ms timestamp 校验、`NOT_FOUND` 与 `PERSISTENCE_ERROR` 结构化错误；
+- Rust Note DB persistence（`NoteDbService`）：canonical lowercase UUID 校验、非负 safe-integer ms timestamp 校验、`NOT_FOUND` 与 `PERSISTENCE_ERROR` 结构化错误；
 - 6 个 Tauri Note commands：`note_create`、`note_get_active_by_id`、`note_list_active`、`note_update`、`note_soft_delete`、`note_restore`；
+- Native Tauri command registration；
+- Native adapter 导出；
 - `NativeNoteRepository` 实现 `NoteRepository`；
 - `NOTE_REPOSITORY_ERROR_CODES` 与 Task 保持独立冻结边界；
-- Native adapter tests；
+- Dedicated `NativeNoteRepository` 单元测试；
 - Rust DB tests；
-- Dedicated `NativeNoteRepository` 单元测试（P4-04B1 范围）。
+- Full verified gates：cargo test、Vitest、typecheck、lint、build 均 PASS。
 
-明确不做（P4-04B1）：
+明确不做（P4-04B1，不作为本 Step 交付）：
 
 - 无 Web implementation；
 - 无 NoteService；
 - 无 runtime composition；
 - 无 `noteRuntime.native.ts`；
-- 无 UI。
+- 无 Note UI；
+- 无 Diary persistence。
 
-当前 dirty implementation 状态：IN PROGRESS，不得写为 DONE。缺少 dedicated `NativeNoteRepository` 单元测试、human review 与 git closeout。
+P4-04B1 closeout 后 committed baseline（main HEAD `110b5c6`）：
 
-P4-04B1 当前 uncommitted verification（WORKING TREE / UNCOMMITTED，非 committed baseline）：
+- `cargo test`：`139 passed / 0 failed / 0 ignored`；
+- `pnpm test`：`41 test files / 654 passed`；
+- typecheck、lint、build：PASS。
 
-- `cargo test`：`139 passed`（WORKING TREE / UNCOMMITTED）；
-- `pnpm test`：`40 files / 639 passed`（WORKING TREE / UNCOMMITTED）；
-- 上述计数为 dirty working tree 记录，不写入 `docs/00_当前版本清单.md` 的 committed baseline 字段；committed baseline 见该文档：Rust 129、Vitest 40 files / 639。
+历史 baseline（供追溯，不再作为 current main baseline）：
 
-### P4-04B2｜Web Note Persistence（NOT STARTED）
+- Task V1 closeout：Rust 129 / Vitest 40 files / 639 tests；
+- Canvas Phase 3 closeout：Rust 129 / Vitest 40 files / 639 tests；
+- `add13e8 feat: add note and diary domain contracts`：Rust 129 / Vitest 40 files / 639 tests；
+- P4-04B1 commit `110b5c6` 后更新为上表新数字。
+
+### P4-04B2｜Web Note Persistence（NOT STARTED / NEXT）
 
 Scope（后续独立 Step）：
 
@@ -378,6 +388,8 @@ Scope（在 P4-04B1 + P4-04B2 均完成后）：
 - List ordering 一致：`updated_at_ms DESC, id ASC`；
 - Error code 映射安全，不外泄底层错误消息；
 - Restart persistence parity。
+
+P4-04B1 closeout 中的 Native restart verification 属于 contract-equivalent / infrastructure evidence（Native 侧 restart 数据不丢），不等于 Native/Web restart parity；真正跨平台 restart parity 仍留给 P4-04B3。
 
 ### NoteService + Runtime Composition（LATER STEP）
 
