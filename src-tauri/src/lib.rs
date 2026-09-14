@@ -31,6 +31,7 @@ mod canvas;
 mod commands;
 mod db;
 mod diagnostics;
+mod notes_db;
 mod project;
 mod storage;
 mod tag;
@@ -227,7 +228,13 @@ pub fn run() {
             commands::canvas_edge_set_direction,
             commands::canvas_edge_set_line_style,
             commands::canvas_edge_set_relation_type,
-            commands::canvas_edge_delete
+            commands::canvas_edge_delete,
+            commands::note_create,
+            commands::note_get_active_by_id,
+            commands::note_list_active,
+            commands::note_update,
+            commands::note_soft_delete,
+            commands::note_restore
         ])
         .setup(|app| {
             // 🔒 冻结 §3：路径统一通过 PathResolver。

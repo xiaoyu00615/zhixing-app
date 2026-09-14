@@ -1,22 +1,27 @@
 import type { Note } from './model'
 
 export interface CreateNoteInput {
+  readonly id: string
   readonly title: string
   readonly content: string
+  readonly createdAtMs: number
 }
 
 export interface UpdateNoteInput {
   readonly id: string
   readonly title: string
   readonly content: string
+  readonly updatedAtMs: number
 }
 
 export interface SoftDeleteNoteInput {
   readonly id: string
+  readonly updatedAtMs: number
 }
 
 export interface RestoreNoteInput {
   readonly id: string
+  readonly updatedAtMs: number
 }
 
 /**

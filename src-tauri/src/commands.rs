@@ -15,6 +15,10 @@ use crate::canvas::{
 use crate::project::{
     CreateProjectInput, ProjectDbService, ProjectError, ProjectRecord, RenameProjectInput,
 };
+use crate::notes_db::{
+    CreateNoteInput, NoteDbService, NoteError, NoteRecord, RestoreNoteInput, SoftDeleteNoteInput,
+    UpdateNoteInput,
+};
 use crate::tag::{CreateTagInput, RenameTagInput, TagDbService, TagError, TagRecord};
 use crate::task::{
     AddTaskTagInput, ChangeTaskStatusInput, ClearTaskDeadlineInput, ClearTaskProjectInput,
@@ -1319,6 +1323,159 @@ pub(crate) fn canvas_edge_create(
     )
     .map(CanvasEdgeDto::from)
     .map_err(Into::into)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NoteDto {
+    id: String,
+    title: String,
+    content: String,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    deleted_at_ms: Option<i64>,
+}
+
+impl From<NoteRecord> for NoteDto {
+    fn from(note: NoteRecord) -> Self {
+        Self {
+            id: note.id,
+            title: note.title,
+            content: note.content,
+            created_at_ms: note.created_at_ms,
+            updated_at_ms: note.updated_at_ms,
+            deleted_at_ms: note.deleted_at_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreateNoteDto {
+    id: String,
+    title: String,
+    content: String,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateNoteDto {
+    id: String,
+    title: String,
+    content: String,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NoteLifecycleDto {
+    id: String,
+    updated_at_ms: i64,
+}
+
+fn note_error(error: NoteError) -> TaskCommandErrorDto {
+    TaskCommandErrorDto {
+        code: error.code(),
+        message: error.safe_message(),
+    }
+}
+
+#[tauri::command]
+pub(crate) fn note_create(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: CreateNoteDto,
+) -> Result<NoteDto, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    NoteDbService::create(
+        &connection,
+        CreateNoteInput {
+            id: input.id,
+            title: input.title,
+            content: input.content,
+            created_at_ms: input.created_at_ms,
+        },
+    )
+    .map(NoteDto::from)
+    .map_err(note_error)
+}
+
+#[tauri::command]
+pub(crate) fn note_get_active_by_id(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    id: String,
+) -> Result<Option<NoteDto>, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    NoteDbService::get_active_by_id(&connection, &id)
+        .map(|option| option.map(NoteDto::from))
+        .map_err(note_error)
+}
+
+#[tauri::command]
+pub(crate) fn note_list_active(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+) -> Result<Vec<NoteDto>, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    NoteDbService::list_active(&connection)
+        .map(|records| records.into_iter().map(NoteDto::from).collect())
+        .map_err(note_error)
+}
+
+#[tauri::command]
+pub(crate) fn note_update(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: UpdateNoteDto,
+) -> Result<NoteDto, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    NoteDbService::update_note(
+        &connection,
+        UpdateNoteInput {
+            id: input.id,
+            title: input.title,
+            content: input.content,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(NoteDto::from)
+    .map_err(note_error)
+}
+
+#[tauri::command]
+pub(crate) fn note_soft_delete(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: NoteLifecycleDto,
+) -> Result<(), TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    NoteDbService::soft_delete(
+        &connection,
+        SoftDeleteNoteInput {
+            id: input.id,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map_err(note_error)
+}
+
+#[tauri::command]
+pub(crate) fn note_restore(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: NoteLifecycleDto,
+) -> Result<(), TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    NoteDbService::restore(
+        &connection,
+        RestoreNoteInput {
+            id: input.id,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map_err(note_error)
 }
 
 #[tauri::command]
