@@ -284,7 +284,123 @@ Phase 3 下一正式阶段：
 - 新建关联 Diary；
 - 更多转换语义。
 
+### Phase 4 Status: IN PROGRESS
+
+Phase 4 已实际启动，官方状态由 `NOT STARTED` 更新为 `IN PROGRESS`。冲突来源：`docs/00_当前版本清单.md` 在 `ab8e7ec feat: add note and diary schema` 与 `add13e8 feat: add note and diary domain contracts` 进入 main 之后未及时同步。以 `add13e8e4ea510b516c26c818f0ffdacdcc33974` 为治理 baseline 修订本节。
+
+已完成（DONE，使用真实历史 Step ID；不重新编号）：
+
+- P4-00｜Phase 4 Boundary Design：Diary 使用独立 `diary_date`，Note 与 Diary 分域，不建立 Document 泛型 wrapper；
+- P4-00A｜Contract Freeze；
+- P4-01｜Migration Design Review；
+- P4-02A｜Migration 0012 Foundation：`0012_add_notes_and_diary`，`notes` 与 `diary_entries` schema 进入 production migration history；CHECK constraint、`deleted_at_ms` 软删除与相关索引已冻结；
+- P4-03｜Note / Diary Domain Contract：`src/note/model.ts` 与 `src/diary/model.ts`；
+- P4-03A｜Shared Import + Repository Contract Repair：`src/note/repository.ts` 与 `src/diary/repository.ts`；`NOTE_REPOSITORY_ERROR_CODES` 与 `DIARY_REPOSITORY_ERROR_CODES` 与 Task 独立；
+- P4-03B｜Non-Task Shared Validation Import Cleanup：canonical lowercase UUID 与非负 safe-integer ms timestamp 校验在 Native 侧复用。
+
+进行中（IN PROGRESS）：
+
+- P4-04B1｜Native Note Persistence（见下方 Scope）。当前 dirty implementation 保留，未 stage、未 commit。
+
+明确 NOT STARTED：
+
+- P4-04B2｜Web Note Persistence；
+- P4-04B3｜Native / Web Parity Hardening；
+- NoteService + runtime composition（含 `noteRuntime.native.ts`）；
+- Note UI；
+- Diary Persistence、Diary Service、Diary UI。
+
+本节不合并 NoteService、runtime composition 或 Note UI 至 persistence step。后续仍须遵循 Plan → 用户/架构审核 → Implementation → Tests → Review → Commit 流程。
+
+### P4-04B1｜Native Note Persistence（IN PROGRESS）
+
+Scope：
+
+- `src/note/repository.ts` persistence-ready input alignment：`CreateNoteInput` 显式 `id`；`UpdateNoteInput` / `SoftDeleteNoteInput` / `RestoreNoteInput` 显式 `updatedAtMs`；
+- Rust `NoteDbService`：canonical lowercase UUID 校验、非负 safe-integer ms timestamp 校验、`NOT_FOUND` 与 `PERSISTENCE_ERROR` 结构化错误；
+- 6 个 Tauri Note commands：`note_create`、`note_get_active_by_id`、`note_list_active`、`note_update`、`note_soft_delete`、`note_restore`；
+- `NativeNoteRepository` 实现 `NoteRepository`；
+- `NOTE_REPOSITORY_ERROR_CODES` 与 Task 保持独立冻结边界；
+- Native adapter tests；
+- Rust DB tests；
+- Dedicated `NativeNoteRepository` 单元测试（P4-04B1 范围）。
+
+明确不做（P4-04B1）：
+
+- 无 Web implementation；
+- 无 NoteService；
+- 无 runtime composition；
+- 无 `noteRuntime.native.ts`；
+- 无 UI。
+
+当前 dirty implementation 状态：IN PROGRESS，不得写为 DONE。缺少 dedicated `NativeNoteRepository` 单元测试、human review 与 git closeout。
+
+P4-04B1 当前 uncommitted verification（WORKING TREE / UNCOMMITTED，非 committed baseline）：
+
+- `cargo test`：`139 passed`（WORKING TREE / UNCOMMITTED）；
+- `pnpm test`：`40 files / 639 passed`（WORKING TREE / UNCOMMITTED）；
+- 上述计数为 dirty working tree 记录，不写入 `docs/00_当前版本清单.md` 的 committed baseline 字段；committed baseline 见该文档：Rust 129、Vitest 40 files / 639。
+
+### P4-04B2｜Web Note Persistence（NOT STARTED）
+
+Scope（后续独立 Step）：
+
+- Worker protocol `note.*` request / response variants 与 parsers；
+- Worker client `note` methods；
+- `taskDatabase` 中 Note SQL 方法；
+- `WebNoteRepository` 实现 `NoteRepository`；
+- 现有 Web factory 集成（`Native`/`Web` capability detection 收口）；
+- Web repository tests。
+
+必须复用：
+
+- existing Dedicated Worker；
+- existing `TaskWorkerClient`；
+- existing SQLite WASM runtime；
+- existing OPFS DB；
+- existing Web adapter selection 收口机制。
+
+明确不做（P4-04B2）：
+
+- 不新增第二套 Web Worker；
+- 不新增独立 Web SQLite connection；
+- 不提前引入 NoteService / runtime composition / UI。
+
+### P4-04B3｜Native / Web Parity Hardening（NOT STARTED）
+
+Scope（在 P4-04B1 + P4-04B2 均完成后）：
+
+- 同一 `NoteRepository` 契约下 Native 与 Web 语义一致；
+- Lookup 缺失或已软删除返回 `null`；
+- Mutation 对缺失或状态冲突抛 `NOT_FOUND`；
+- `title` 与 `content` 精确保存，不做 trim / normalize 之外的改写；
+- `createdAtMs` 与 `updatedAtMs` 时间戳语义一致；
+- List ordering 一致：`updated_at_ms DESC, id ASC`；
+- Error code 映射安全，不外泄底层错误消息；
+- Restart persistence parity。
+
+### NoteService + Runtime Composition（LATER STEP）
+
+`NoteService`、UUID generator injection、`nowMs` injection、`noteRuntime.native.ts`、以及可能的 Web runtime composition 属于 persistence 完成之后的独立 Step。P4-04B1 / P4-04B2 / P4-04B3 均不实现。
+
+### Note UI（LATER STEP）
+
+Note UI 属于独立的后续 Step，进入 UI 前需另开 Plan / 用户批准。
+
+### Diary Tracking
+
+- Schema：DONE（Migration 0012）；
+- Domain Contract：DONE（`src/diary/model.ts` 与 `src/diary/repository.ts`）；
+- Persistence：NOT STARTED；
+- Service：NOT STARTED；
+- UI：NOT STARTED。
+
+已知设计 blocker（本轮不解决）：
+
+- Web `sqlite-wasm` 当前尚未冻结 `DIARY_DATE_CONFLICT` 的可靠结构化 constraint classification 方案。Web 侧 SQLite constraint 错误（`SQLITE_CONSTRAINT_UNIQUE` 等）到 `DiaryRepositoryError` 的稳定映射需要在 Diary Persistence Step 之前完成设计决策；Native 侧不阻塞。
+
 ---
+
 
 ## Phase 5｜Global Search + Tags + Archive + Trash
 
