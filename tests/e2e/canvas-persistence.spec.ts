@@ -164,7 +164,7 @@ test('rolls a failed Web Migration 10 table rebuild back atomically', async ({ b
   }
 })
 
-test('preserves exact v9 Canvas data through Web Migrations 10 and 11', async ({ browserName }, testInfo) => {
+test('preserves exact v9 Canvas data through Web Migrations 10, 11, and 12', async ({ browserName }, testInfo) => {
   expect(browserName).toBe('chromium')
   const baseURL = testInfo.project.use.baseURL
   if (typeof baseURL !== 'string') throw new Error('Playwright baseURL is required.')
@@ -176,7 +176,7 @@ test('preserves exact v9 Canvas data through Web Migrations 10 and 11', async ({
     await expect(page.evaluate(() =>
       (window as unknown as HarnessWindow).__taskPersistenceHarness.auditMigrationTenUpgrade(),
     )).resolves.toEqual({
-      historyVersion: 11,
+      historyVersion: 12,
       canvasPreserved: true,
       nodesPreserved: 2,
       edgesPreserved: 4,
