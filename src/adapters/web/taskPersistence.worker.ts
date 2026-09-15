@@ -7,12 +7,51 @@ import sqlite3InitModule, {
 
 import {
   extractRequestId,
+  isRecord,
   parseTaskWorkerRequest,
   type TaskWorkerResponse,
   type WebPersistenceCapability,
 } from '@/adapters/web/taskWorkerProtocol'
 import { TaskDatabaseError, WebTaskDatabase } from '@/adapters/web/taskDatabase'
 import type { TaskRepositoryErrorCode } from '@/task/repository'
+import { isTaskRepositoryErrorCode } from '@/task/repository'
+import type { NoteRepositoryErrorCode } from '@/note/repository'
+import { isNoteRepositoryErrorCode } from '@/note/repository'
+
+type NoteOperationType =
+  | 'note.create'
+  | 'note.getActiveById'
+  | 'note.listActive'
+  | 'note.updateNote'
+  | 'note.softDelete'
+  | 'note.restore'
+
+const NOTE_OPERATION_TYPES = new Set<NoteOperationType>([
+  'note.create',
+  'note.getActiveById',
+  'note.listActive',
+  'note.updateNote',
+  'note.softDelete',
+  'note.restore',
+])
+
+function isNoteOperation(type: string): boolean {
+  return NOTE_OPERATION_TYPES.has(type as NoteOperationType)
+}
+
+/**
+ * True when the raw request envelope looks like a note-domain request even
+ * though it failed domain parsing (malformed input or unknown note op).
+ * Used so malformed / unknown note.* requests fail through the Note
+ * failure emitter instead of the Task failure emitter.
+ */
+function isNoteRequestType(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.type === 'string' &&
+    value.type.startsWith('note.')
+  )
+}
 
 const DATABASE_FILENAME = '/zhixing.db'
 const workerScope = self as DedicatedWorkerGlobalScope
@@ -96,12 +135,25 @@ function failure(requestId: number, code: TaskRepositoryErrorCode): void {
   workerScope.postMessage(response)
 }
 
+function noteFailure(requestId: number, code: NoteRepositoryErrorCode): void {
+  const response: TaskWorkerResponse = {
+    requestId,
+    ok: false,
+    error: { code },
+  }
+  workerScope.postMessage(response)
+}
+
 async function handleRequest(value: unknown): Promise<void> {
   const request = parseTaskWorkerRequest(value)
   if (request === null) {
     const requestId = extractRequestId(value)
     if (requestId !== null) {
-      failure(requestId, 'PERSISTENCE_FAILED')
+      if (isNoteRequestType(value)) {
+        noteFailure(requestId, 'PERSISTENCE_ERROR')
+      } else {
+        failure(requestId, 'PERSISTENCE_FAILED')
+      }
     }
     return
   }
@@ -121,7 +173,44 @@ async function handleRequest(value: unknown): Promise<void> {
 
   const state = await getInitialization()
   if (state.capability.status !== 'AVAILABLE' || state.database === undefined) {
-    failure(request.requestId, 'PERSISTENCE_UNAVAILABLE')
+    if (isNoteOperation(request.type)) {
+      noteFailure(request.requestId, 'PERSISTENCE_ERROR')
+    } else {
+      failure(request.requestId, 'PERSISTENCE_UNAVAILABLE')
+    }
+    return
+  }
+
+  if (isNoteOperation(request.type)) {
+    try {
+      switch (request.type) {
+        case 'note.create':
+          success(request.requestId, state.database.createNote(request.input))
+          return
+        case 'note.getActiveById':
+          success(request.requestId, state.database.getActiveNote(request.id))
+          return
+        case 'note.listActive':
+          success(request.requestId, state.database.listActiveNotes())
+          return
+        case 'note.updateNote':
+          success(request.requestId, state.database.updateNote(request.input))
+          return
+        case 'note.softDelete':
+          success(request.requestId, state.database.softDeleteNote(request.input))
+          return
+        case 'note.restore':
+          success(request.requestId, state.database.restoreNote(request.input))
+          return
+      }
+    } catch (error: unknown) {
+      const code: NoteRepositoryErrorCode =
+        error instanceof TaskDatabaseError &&
+        isNoteRepositoryErrorCode(error.code)
+          ? error.code
+          : 'PERSISTENCE_ERROR'
+      noteFailure(request.requestId, code)
+    }
     return
   }
 
@@ -335,7 +424,10 @@ async function handleRequest(value: unknown): Promise<void> {
   } catch (error: unknown) {
     failure(
       request.requestId,
-      error instanceof TaskDatabaseError ? error.code : 'PERSISTENCE_FAILED',
+      error instanceof TaskDatabaseError &&
+        isTaskRepositoryErrorCode(error.code)
+        ? error.code
+        : 'PERSISTENCE_FAILED',
     )
   }
 }

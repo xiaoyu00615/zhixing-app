@@ -10,11 +10,20 @@ import type {
   TaskRepositoryErrorCode,
   TrashTaskInput,
 } from '@/task/repository'
+import { isTaskRepositoryErrorCode } from '@/task/repository'
 import type {
   CreateProjectInput,
   RenameProjectInput,
 } from '@/project/repository'
 import type { CreateTagInput, RenameTagInput } from '@/tag/repository'
+import type {
+  CreateNoteInput,
+  NoteRepositoryErrorCode,
+  RestoreNoteInput,
+  SoftDeleteNoteInput,
+  UpdateNoteInput,
+} from '@/note/repository'
+import { isNoteRepositoryErrorCode } from '@/note/repository'
 import type {
   CreateCanvasInput,
   CreateCanvasEdgeInput,
@@ -33,6 +42,8 @@ import type {
   UpdateTextNodeInput,
 } from '@/canvas/repository'
 import {
+  extractRequestId,
+  parseNoteWorkerResponse,
   parseTaskWorkerResponse,
   parseWebPersistenceCapability,
   type TaskWorkerRequest,
@@ -47,11 +58,6 @@ export interface TaskWorkerEndpoint {
   terminate(): void
 }
 
-interface PendingRequest {
-  readonly resolve: (value: unknown) => void
-  readonly reject: (error: TaskWorkerClientError) => void
-}
-
 export class TaskWorkerClientError extends Error {
   readonly code: TaskRepositoryErrorCode
 
@@ -60,6 +66,74 @@ export class TaskWorkerClientError extends Error {
     this.name = 'TaskWorkerClientError'
     this.code = code
   }
+}
+
+export class NoteWorkerClientError extends Error {
+  readonly code: NoteRepositoryErrorCode
+
+  constructor(code: NoteRepositoryErrorCode) {
+    super('Note persistence worker request failed.')
+    this.name = 'NoteWorkerClientError'
+    this.code = code
+  }
+}
+
+type WorkerTransportFailure = 'UNAVAILABLE' | 'FAILED'
+
+type ClientRequestError = TaskWorkerClientError | NoteWorkerClientError
+
+type ParsedClientResponse =
+  | { readonly ok: true; readonly result: unknown }
+  | { readonly ok: false; readonly error: ClientRequestError }
+
+interface RequestOptions {
+  readonly parseResponse: (value: unknown) => ParsedClientResponse | null
+  readonly mapTransportFailure: (failure: WorkerTransportFailure) => ClientRequestError
+}
+
+const TASK_REQUEST_OPTIONS: RequestOptions = {
+  parseResponse: (value) => {
+    const response = parseTaskWorkerResponse(value)
+    if (response === null) {
+      return null
+    }
+    if (response.ok) {
+      return { ok: true, result: response.result }
+    }
+    const code = response.error.code
+    if (!isTaskRepositoryErrorCode(code)) {
+      return null
+    }
+    return { ok: false, error: new TaskWorkerClientError(code) }
+  },
+  mapTransportFailure: (failure) =>
+    new TaskWorkerClientError(
+      failure === 'UNAVAILABLE' ? 'PERSISTENCE_UNAVAILABLE' : 'PERSISTENCE_FAILED',
+    ),
+}
+
+const NOTE_REQUEST_OPTIONS: RequestOptions = {
+  parseResponse: (value) => {
+    const response = parseNoteWorkerResponse(value)
+    if (response === null) {
+      return null
+    }
+    if (response.ok) {
+      return { ok: true, result: response.result }
+    }
+    const code = response.error.code
+    if (!isNoteRepositoryErrorCode(code)) {
+      return null
+    }
+    return { ok: false, error: new NoteWorkerClientError(code) }
+  },
+  mapTransportFailure: () => new NoteWorkerClientError('PERSISTENCE_ERROR'),
+}
+
+interface PendingRequest {
+  readonly resolve: (value: unknown) => void
+  readonly reject: (error: ClientRequestError) => void
+  readonly options: RequestOptions
 }
 
 export function createTaskPersistenceWorker(): TaskWorkerEndpoint {
@@ -82,10 +156,10 @@ export class TaskWorkerClient {
       this.handleMessage(event.data)
     }
     worker.onerror = () => {
-      this.failAll('PERSISTENCE_UNAVAILABLE')
+      this.failAll('UNAVAILABLE')
     }
     worker.onmessageerror = () => {
-      this.failAll('PERSISTENCE_UNAVAILABLE')
+      this.failAll('UNAVAILABLE')
     }
   }
 
@@ -447,6 +521,68 @@ export class TaskWorkerClient {
     }))
   }
 
+  createNote(input: CreateNoteInput): Promise<unknown> {
+    return this.send(
+      (requestId) => ({
+        requestId,
+        type: 'note.create',
+        input,
+      }),
+      NOTE_REQUEST_OPTIONS,
+    )
+  }
+
+  getActiveNoteById(id: string): Promise<unknown> {
+    return this.send(
+      (requestId) => ({
+        requestId,
+        type: 'note.getActiveById',
+        id,
+      }),
+      NOTE_REQUEST_OPTIONS,
+    )
+  }
+
+  listActiveNotes(): Promise<unknown> {
+    return this.send(
+      (requestId) => ({ requestId, type: 'note.listActive' }),
+      NOTE_REQUEST_OPTIONS,
+    )
+  }
+
+  updateNote(input: UpdateNoteInput): Promise<unknown> {
+    return this.send(
+      (requestId) => ({
+        requestId,
+        type: 'note.updateNote',
+        input,
+      }),
+      NOTE_REQUEST_OPTIONS,
+    )
+  }
+
+  softDeleteNote(input: SoftDeleteNoteInput): Promise<unknown> {
+    return this.send(
+      (requestId) => ({
+        requestId,
+        type: 'note.softDelete',
+        input,
+      }),
+      NOTE_REQUEST_OPTIONS,
+    )
+  }
+
+  restoreNote(input: RestoreNoteInput): Promise<unknown> {
+    return this.send(
+      (requestId) => ({
+        requestId,
+        type: 'note.restore',
+        input,
+      }),
+      NOTE_REQUEST_OPTIONS,
+    )
+  }
+
   async shutdown(): Promise<void> {
     if (this.#terminated) {
       return
@@ -464,54 +600,82 @@ export class TaskWorkerClient {
     }
     this.#terminated = true
     this.#worker.terminate()
-    this.rejectPending('PERSISTENCE_UNAVAILABLE')
+    this.rejectPending('UNAVAILABLE')
   }
 
   private send(
     createRequest: (requestId: number) => TaskWorkerRequest,
+    options: RequestOptions = TASK_REQUEST_OPTIONS,
   ): Promise<unknown> {
     if (this.#terminated) {
-      return Promise.reject(
-        new TaskWorkerClientError('PERSISTENCE_UNAVAILABLE'),
-      )
+      return Promise.reject(options.mapTransportFailure('UNAVAILABLE'))
     }
 
     const requestId = this.#nextRequestId
     this.#nextRequestId += 1
     return new Promise((resolve, reject) => {
-      this.#pending.set(requestId, { resolve, reject })
+      this.#pending.set(requestId, { resolve, reject, options })
       try {
         this.#worker.postMessage(createRequest(requestId))
       } catch {
         this.#pending.delete(requestId)
-        reject(new TaskWorkerClientError('PERSISTENCE_UNAVAILABLE'))
+        reject(options.mapTransportFailure('UNAVAILABLE'))
       }
     })
   }
 
   private handleMessage(value: unknown): void {
-    const response = parseTaskWorkerResponse(value)
-    if (response === null) {
-      this.failAll('PERSISTENCE_FAILED')
+    const requestId = extractRequestId(value)
+    if (requestId === null) {
+      this.failAll('FAILED')
       return
     }
 
-    const pending = this.#pending.get(response.requestId)
+    const pending = this.#pending.get(requestId)
     if (pending === undefined) {
-      this.failAll('PERSISTENCE_FAILED')
+      this.failAll('FAILED')
       return
     }
-    this.#pending.delete(response.requestId)
 
-    if (response.ok) {
-      pending.resolve(response.result)
+    // Stage 1: shape-only parse. null means the response envelope is malformed
+    // for ANY domain (bad shape, wrong code field shape, etc.), which is the
+    // same class of failure as an unknown requestId — fail the whole client.
+    // Keep the pending in the map so rejectPending covers it.
+    if (!this.parseResponseShape(value)) {
+    this.failAll('FAILED')
+    return
+  }
+
+    this.#pending.delete(requestId)
+
+    // Stage 2: domain-specific parse. null here means the response envelope
+    // shape is valid but the error code belongs to a different domain. Reject
+    // only this pending request; do not terminate the worker.
+    const parsed = pending.options.parseResponse(value)
+    if (parsed === null) {
+      pending.reject(pending.options.mapTransportFailure('FAILED'))
+      return
+    }
+
+    if (parsed.ok) {
+      pending.resolve(parsed.result)
     } else {
-      pending.reject(new TaskWorkerClientError(response.error.code))
+      pending.reject(parsed.error)
     }
   }
 
-  private failAll(code: TaskRepositoryErrorCode): void {
-    this.rejectPending(code)
+  private parseResponseShape(value: unknown): boolean {
+    if (parseTaskWorkerResponse(value) !== null) {
+      return true
+    }
+    if (parseNoteWorkerResponse(value) !== null) {
+      return true
+    }
+    return false
+  }
+
+  private failAll(failure: WorkerTransportFailure): void {
+    this.rejectPending(failure)
     this.#initializePromise = null
     if (!this.#terminated) {
       this.#terminated = true
@@ -519,9 +683,9 @@ export class TaskWorkerClient {
     }
   }
 
-  private rejectPending(code: TaskRepositoryErrorCode): void {
+  private rejectPending(failure: WorkerTransportFailure): void {
     for (const pending of this.#pending.values()) {
-      pending.reject(new TaskWorkerClientError(code))
+      pending.reject(pending.options.mapTransportFailure(failure))
     }
     this.#pending.clear()
   }

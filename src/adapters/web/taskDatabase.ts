@@ -29,6 +29,14 @@ import type {
 } from '@/project/repository'
 import { isNonEmptyTagName, type Tag } from '@/tag/model'
 import type { CreateTagInput, RenameTagInput } from '@/tag/repository'
+import type { Note } from '@/note/model'
+import type {
+  CreateNoteInput,
+  NoteRepositoryErrorCode,
+  RestoreNoteInput,
+  SoftDeleteNoteInput,
+  UpdateNoteInput,
+} from '@/note/repository'
 import {
   isCanonicalCanvasId,
   isCanvasCoordinate,
@@ -76,11 +84,15 @@ import {
   SqliteWebMigrationStore,
 } from '@/adapters/web/webMigrations'
 
-export class TaskDatabaseError extends Error {
-  readonly code: TaskRepositoryErrorCode
+export type WebTaskDatabaseErrorCode =
+  | TaskRepositoryErrorCode
+  | NoteRepositoryErrorCode
 
-  constructor(code: TaskRepositoryErrorCode) {
-    super('Web task persistence operation failed.')
+export class TaskDatabaseError extends Error {
+  readonly code: WebTaskDatabaseErrorCode
+
+  constructor(code: WebTaskDatabaseErrorCode) {
+    super('Web persistence operation failed.')
     this.name = 'TaskDatabaseError'
     this.code = code
   }
@@ -97,6 +109,8 @@ const CANVAS_NODE_COLUMNS = `id, canvas_id, type, node_name, content_json, x, y,
 const CANVAS_EDGE_COLUMNS = `id, canvas_id, source_node_id, target_node_id,
                              relation_type, direction, line_style, membership_position,
                              created_at_ms, updated_at_ms, deleted_at_ms`
+const NOTE_COLUMNS =
+  'id, title, content, created_at_ms, updated_at_ms, deleted_at_ms'
 
 function parseCanvasRow(row: Record<string, unknown> | undefined): Canvas | null {
   if (row === undefined) return null
@@ -305,6 +319,71 @@ function validateStatusInput(input: ChangeTaskStatusInput): void {
   if (
     !isCanonicalLowercaseUuid(input.id) ||
     !isTaskStatusOperation(input.operation) ||
+    !isNonNegativeSafeIntegerMilliseconds(input.updatedAtMs)
+  ) {
+    throw new TaskDatabaseError('PERSISTENCE_FAILED')
+  }
+}
+
+function parseNoteRow(row: Record<string, unknown> | undefined): Note | null {
+  if (row === undefined) return null
+  const {
+    id,
+    title,
+    content,
+    created_at_ms: createdAtMs,
+    updated_at_ms: updatedAtMs,
+    deleted_at_ms: deletedAtMs,
+  } = row
+  if (
+    !isCanonicalLowercaseUuid(id) ||
+    typeof title !== 'string' ||
+    typeof content !== 'string' ||
+    !isNonNegativeSafeIntegerMilliseconds(createdAtMs) ||
+    !isNonNegativeSafeIntegerMilliseconds(updatedAtMs) ||
+    (deletedAtMs !== null &&
+      !isNonNegativeSafeIntegerMilliseconds(deletedAtMs))
+  ) {
+    throw new TaskDatabaseError('PERSISTENCE_FAILED')
+  }
+  return {
+    id,
+    title,
+    content,
+    createdAtMs,
+    updatedAtMs,
+    deletedAtMs,
+  }
+}
+
+function validateCreateNoteInput(input: CreateNoteInput): void {
+  if (
+    !isCanonicalLowercaseUuid(input.id) ||
+    typeof input.title !== 'string' ||
+    typeof input.content !== 'string' ||
+    !isNonNegativeSafeIntegerMilliseconds(input.createdAtMs)
+  ) {
+    throw new TaskDatabaseError('PERSISTENCE_FAILED')
+  }
+}
+
+function validateUpdateNoteInput(input: UpdateNoteInput): void {
+  if (
+    !isCanonicalLowercaseUuid(input.id) ||
+    typeof input.title !== 'string' ||
+    typeof input.content !== 'string' ||
+    !isNonNegativeSafeIntegerMilliseconds(input.updatedAtMs)
+  ) {
+    throw new TaskDatabaseError('PERSISTENCE_FAILED')
+  }
+}
+
+function validateNoteMutationInput(input: {
+  readonly id: string
+  readonly updatedAtMs: number
+}): void {
+  if (
+    !isCanonicalLowercaseUuid(input.id) ||
     !isNonNegativeSafeIntegerMilliseconds(input.updatedAtMs)
   ) {
     throw new TaskDatabaseError('PERSISTENCE_FAILED')
@@ -1973,6 +2052,143 @@ export class WebTaskDatabase {
       if (error instanceof TaskDatabaseError) throw error
       throw new TaskDatabaseError('PERSISTENCE_FAILED')
     }
+  }
+
+  createNote(input: CreateNoteInput): Note {
+    validateCreateNoteInput(input)
+    try {
+      return this.#database.transaction(() => {
+        this.#database.exec({
+          sql: `INSERT INTO notes
+                (id, title, content, created_at_ms, updated_at_ms, deleted_at_ms)
+                VALUES (?, ?, ?, ?, ?, NULL)`,
+          bind: [
+            input.id,
+            input.title,
+            input.content,
+            input.createdAtMs,
+            input.createdAtMs,
+          ],
+        })
+        return this.requireNote(input.id)
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  getActiveNote(id: string): Note | null {
+    if (!isCanonicalLowercaseUuid(id)) {
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+    try {
+      return parseNoteRow(
+        this.#database.selectObject(
+          `SELECT ${NOTE_COLUMNS}
+           FROM notes WHERE id = ? AND deleted_at_ms IS NULL`,
+          [id],
+        ),
+      )
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  listActiveNotes(): readonly Note[] {
+    try {
+      return this.#database
+        .selectObjects(
+          `SELECT ${NOTE_COLUMNS}
+           FROM notes WHERE deleted_at_ms IS NULL
+           ORDER BY updated_at_ms DESC, id ASC`,
+        )
+        .map((row) => {
+          const note = parseNoteRow(row)
+          if (note === null) {
+            throw new TaskDatabaseError('PERSISTENCE_FAILED')
+          }
+          return note
+        })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  updateNote(input: UpdateNoteInput): Note {
+    validateUpdateNoteInput(input)
+    try {
+      return this.#database.transaction(() => {
+        this.#database.exec({
+          sql: `UPDATE notes SET title = ?, content = ?, updated_at_ms = ?
+                WHERE id = ? AND deleted_at_ms IS NULL`,
+          bind: [input.title, input.content, input.updatedAtMs, input.id],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+        return this.requireNote(input.id)
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  softDeleteNote(input: SoftDeleteNoteInput): void {
+    validateNoteMutationInput(input)
+    try {
+      this.#database.transaction(() => {
+        this.#database.exec({
+          sql: `UPDATE notes
+                SET deleted_at_ms = ?, updated_at_ms = ?
+                WHERE id = ? AND deleted_at_ms IS NULL`,
+          bind: [input.updatedAtMs, input.updatedAtMs, input.id],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  restoreNote(input: RestoreNoteInput): void {
+    validateNoteMutationInput(input)
+    try {
+      this.#database.transaction(() => {
+        this.#database.exec({
+          sql: `UPDATE notes
+                SET deleted_at_ms = NULL, updated_at_ms = ?
+                WHERE id = ? AND deleted_at_ms IS NOT NULL`,
+          bind: [input.updatedAtMs, input.id],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
+  private requireNote(id: string): Note {
+    const note = parseNoteRow(
+      this.#database.selectObject(
+        `SELECT ${NOTE_COLUMNS}
+         FROM notes WHERE id = ? AND deleted_at_ms IS NULL`,
+        [id],
+      ),
+    )
+    if (note === null) {
+      throw new TaskDatabaseError('NOT_FOUND')
+    }
+    return note
   }
 
   private updatePlanningField(

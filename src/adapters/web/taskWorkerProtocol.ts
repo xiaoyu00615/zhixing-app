@@ -15,7 +15,6 @@ import {
   type SetTaskDeadlineInput,
   type SetTaskImportanceInput,
   type SetTaskUrgencyInput,
-  type TaskRepositoryErrorCode,
   type TrashTaskInput,
 } from '@/task/repository'
 import type {
@@ -58,6 +57,13 @@ import type {
   UpdateCanvasNodeContentInput,
   UpdateTextNodeInput,
 } from '@/canvas/repository'
+import {
+  isNoteRepositoryErrorCode,
+  type CreateNoteInput,
+  type RestoreNoteInput,
+  type SoftDeleteNoteInput,
+  type UpdateNoteInput,
+} from '@/note/repository'
 
 export type WebPersistenceCapability =
   | { readonly status: 'AVAILABLE' }
@@ -270,6 +276,32 @@ export type TaskWorkerRequest =
       readonly type: 'canvas.mutation.applyBatch'
       readonly input: import('@/canvas/repository').ApplyCanvasMutationBatchInput
     }
+  | {
+      readonly requestId: number
+      readonly type: 'note.create'
+      readonly input: CreateNoteInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'note.getActiveById'
+      readonly id: string
+    }
+  | { readonly requestId: number; readonly type: 'note.listActive' }
+  | {
+      readonly requestId: number
+      readonly type: 'note.updateNote'
+      readonly input: UpdateNoteInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'note.softDelete'
+      readonly input: SoftDeleteNoteInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'note.restore'
+      readonly input: RestoreNoteInput
+    }
   | { readonly requestId: number; readonly type: 'shutdown' }
 
 export interface TaskWorkerSuccessResponse {
@@ -282,7 +314,7 @@ export interface TaskWorkerErrorResponse {
   readonly requestId: number
   readonly ok: false
   readonly error: {
-    readonly code: TaskRepositoryErrorCode
+    readonly code: unknown
   }
 }
 
@@ -511,6 +543,36 @@ function isMoveCanvasNodesInput(value: unknown): value is MoveCanvasNodesInput {
   })
 }
 
+function isCreateNoteInput(value: unknown): value is CreateNoteInput {
+  return (
+    isRecord(value) &&
+    isCanonicalLowercaseUuid(value.id) &&
+    typeof value.title === 'string' &&
+    typeof value.content === 'string' &&
+    isNonNegativeSafeIntegerMilliseconds(value.createdAtMs)
+  )
+}
+
+function isUpdateNoteInput(value: unknown): value is UpdateNoteInput {
+  return (
+    isRecord(value) &&
+    isCanonicalLowercaseUuid(value.id) &&
+    typeof value.title === 'string' &&
+    typeof value.content === 'string' &&
+    isNonNegativeSafeIntegerMilliseconds(value.updatedAtMs)
+  )
+}
+
+function isNoteMutationInput(value: unknown): value is
+  | SoftDeleteNoteInput
+  | RestoreNoteInput {
+  return (
+    isRecord(value) &&
+    isCanonicalLowercaseUuid(value.id) &&
+    isNonNegativeSafeIntegerMilliseconds(value.updatedAtMs)
+  )
+}
+
 export function parseTaskWorkerRequest(
   value: unknown,
 ): TaskWorkerRequest | null {
@@ -525,6 +587,7 @@ export function parseTaskWorkerRequest(
     case 'project.list':
     case 'tag.list':
     case 'canvas.list':
+    case 'note.listActive':
     case 'shutdown':
       return { requestId: value.requestId, type: value.type }
     case 'task.create':
@@ -827,6 +890,35 @@ export function parseTaskWorkerRequest(
             input: value.input as import('@/canvas/repository').ApplyCanvasMutationBatchInput,
           }
         : null
+    case 'note.create':
+      return isCreateNoteInput(value.input)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input,
+          }
+        : null
+    case 'note.getActiveById':
+      return isCanonicalLowercaseUuid(value.id)
+        ? { requestId: value.requestId, type: value.type, id: value.id }
+        : null
+    case 'note.updateNote':
+      return isUpdateNoteInput(value.input)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input,
+          }
+        : null
+    case 'note.softDelete':
+    case 'note.restore':
+      return isNoteMutationInput(value.input)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input,
+          }
+        : null
     default:
       return null
   }
@@ -893,6 +985,39 @@ export function parseTaskWorkerResponse(
   }
 
   if (!isRecord(value.error) || !isTaskRepositoryErrorCode(value.error.code)) {
+    return null
+  }
+
+  return {
+    requestId: value.requestId,
+    ok: false,
+    error: { code: value.error.code },
+  }
+}
+
+export function parseNoteWorkerResponse(
+  value: unknown,
+): TaskWorkerResponse | null {
+  if (
+    !isRecord(value) ||
+    !isRequestId(value.requestId) ||
+    typeof value.ok !== 'boolean'
+  ) {
+    return null
+  }
+
+  if (value.ok) {
+    if (!('result' in value)) {
+      return null
+    }
+    return {
+      requestId: value.requestId,
+      ok: true,
+      result: value.result,
+    }
+  }
+
+  if (!isRecord(value.error) || !isNoteRepositoryErrorCode(value.error.code)) {
     return null
   }
 
