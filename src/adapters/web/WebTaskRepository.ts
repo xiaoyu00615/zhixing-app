@@ -380,28 +380,157 @@ export type OpenWebTaskRepositoryResult =
       >
     }
 
-export async function openWebTaskRepository(
-  options: OpenWebTaskRepositoryOptions = {},
+interface SharedWebPersistenceRepositories {
+  readonly repository: WebTaskRepository
+  readonly projectRepository: import('@/project/repository').ProjectRepository
+  readonly tagRepository: import('@/tag/repository').TagRepository
+  readonly canvasRepository: import('@/canvas/repository').CanvasRepository
+  readonly noteRepository: import('@/note/repository').NoteRepository
+}
+
+type SharedWebPersistenceOutcome =
+  | { readonly ok: true; readonly repositories: SharedWebPersistenceRepositories }
+  | {
+      readonly ok: false
+      readonly capability: Exclude<
+        WebPersistenceCapability,
+        { readonly status: 'AVAILABLE' }
+      >
+    }
+
+interface SharedWebPersistenceGeneration {
+  readonly client: TaskWorkerClient
+  readonly opening: Promise<SharedWebPersistenceOutcome>
+  refCount: number
+  closing: Promise<void> | null
+}
+
+let sharedWebPersistenceGeneration: SharedWebPersistenceGeneration | null = null
+
+function createSharedRepositories(
+  client: TaskWorkerClient,
+): SharedWebPersistenceRepositories {
+  return {
+    repository: new WebTaskRepository(client),
+    projectRepository: new WebProjectRepository(client),
+    tagRepository: new WebTagRepository(client),
+    canvasRepository: new WebCanvasRepository(client),
+    noteRepository: new WebNoteRepository(client),
+  }
+}
+
+async function initializeSharedGeneration(
+  client: TaskWorkerClient,
+): Promise<SharedWebPersistenceOutcome> {
+  try {
+    const capability = await client.initialize()
+    if (capability.status !== 'AVAILABLE') {
+      client.terminate()
+      return { ok: false, capability }
+    }
+    return { ok: true, repositories: createSharedRepositories(client) }
+  } catch {
+    client.terminate()
+    return {
+      ok: false,
+      capability: { status: 'UNAVAILABLE', reason: 'INITIALIZATION_FAILED' },
+    }
+  }
+}
+
+function createSharedGeneration(
+  client: TaskWorkerClient,
+): SharedWebPersistenceGeneration {
+  return {
+    client,
+    opening: initializeSharedGeneration(client),
+    refCount: 0,
+    closing: null,
+  }
+}
+
+function closeSharedGeneration(
+  generation: SharedWebPersistenceGeneration,
+): Promise<void> {
+  generation.closing ??= generation.client
+    .shutdown()
+    .catch(() => undefined)
+    .then(() => {
+      if (sharedWebPersistenceGeneration === generation) {
+        sharedWebPersistenceGeneration = null
+      }
+    })
+  return generation.closing
+}
+
+function createSharedLeaseDispose(
+  generation: SharedWebPersistenceGeneration,
+): () => Promise<void> {
+  let released = false
+  return async () => {
+    if (released) {
+      return
+    }
+    released = true
+    generation.refCount -= 1
+    if (generation.refCount > 0) {
+      return
+    }
+    await closeSharedGeneration(generation)
+  }
+}
+
+async function openSharedWebTaskRepository(): Promise<OpenWebTaskRepositoryResult> {
+  // Core generations are serialized through shutdown: never join or create a
+  // generation while the previous one is still closing against the same
+  // persistence file.
+  while (true) {
+    const current = sharedWebPersistenceGeneration
+    if (current === null || current.closing === null) {
+      break
+    }
+    await current.closing
+  }
+
+  let generation = sharedWebPersistenceGeneration
+  if (generation === null) {
+    let client: TaskWorkerClient
+    try {
+      client = new TaskWorkerClient(createTaskPersistenceWorker())
+    } catch {
+      return {
+        capability: { status: 'UNAVAILABLE', reason: 'INITIALIZATION_FAILED' },
+      }
+    }
+    generation = createSharedGeneration(client)
+    // Published synchronously, before awaiting initialization, so concurrent
+    // default opens join this generation instead of creating a second Worker.
+    sharedWebPersistenceGeneration = generation
+  }
+
+  generation.refCount += 1
+  const outcome = await generation.opening
+  if (!outcome.ok) {
+    if (sharedWebPersistenceGeneration === generation) {
+      sharedWebPersistenceGeneration = null
+    }
+    return { capability: outcome.capability }
+  }
+
+  return {
+    capability: { status: 'AVAILABLE' },
+    repository: outcome.repositories.repository,
+    projectRepository: outcome.repositories.projectRepository,
+    tagRepository: outcome.repositories.tagRepository,
+    canvasRepository: outcome.repositories.canvasRepository,
+    noteRepository: outcome.repositories.noteRepository,
+    dispose: createSharedLeaseDispose(generation),
+  }
+}
+
+async function openUnsharedWebTaskRepository(
+  options: OpenWebTaskRepositoryOptions,
 ): Promise<OpenWebTaskRepositoryResult> {
-  const workerSupported =
-    options.workerSupported ?? typeof globalThis.Worker !== 'undefined'
-  if (!workerSupported) {
-    return {
-      capability: { status: 'UNAVAILABLE', reason: 'WORKER_UNSUPPORTED' },
-    }
-  }
-
-  const isolated =
-    options.crossOriginIsolated ?? globalThis.crossOriginIsolated === true
-  if (!isolated) {
-    return {
-      capability: {
-        status: 'RESTRICTED',
-        reason: 'CROSS_ORIGIN_ISOLATION_REQUIRED',
-      },
-    }
-  }
-
   let client: TaskWorkerClient
   try {
     client = new TaskWorkerClient(
@@ -434,4 +563,37 @@ export async function openWebTaskRepository(
       capability: { status: 'UNAVAILABLE', reason: 'INITIALIZATION_FAILED' },
     }
   }
+}
+
+export async function openWebTaskRepository(
+  options: OpenWebTaskRepositoryOptions = {},
+): Promise<OpenWebTaskRepositoryResult> {
+  const workerSupported =
+    options.workerSupported ?? typeof globalThis.Worker !== 'undefined'
+  if (!workerSupported) {
+    return {
+      capability: { status: 'UNAVAILABLE', reason: 'WORKER_UNSUPPORTED' },
+    }
+  }
+
+  const isolated =
+    options.crossOriginIsolated ?? globalThis.crossOriginIsolated === true
+  if (!isolated) {
+    return {
+      capability: {
+        status: 'RESTRICTED',
+        reason: 'CROSS_ORIGIN_ISOLATION_REQUIRED',
+      },
+    }
+  }
+
+  const defaultSemanticOptions =
+    options.workerSupported === undefined &&
+    options.crossOriginIsolated === undefined &&
+    options.workerFactory === undefined
+  if (!defaultSemanticOptions) {
+    return openUnsharedWebTaskRepository(options)
+  }
+
+  return openSharedWebTaskRepository()
 }

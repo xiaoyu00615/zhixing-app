@@ -1,8 +1,9 @@
-import { describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import {
   openWebTaskRepository,
   WebTaskRepository,
+  type OpenWebTaskRepositoryResult,
 } from '@/adapters/web/WebTaskRepository'
 import {
   TaskWorkerClient,
@@ -489,6 +490,299 @@ describe('WebTaskRepository', () => {
       capability: { status: 'UNAVAILABLE', reason: 'OPFS_UNSUPPORTED' },
     })
     expect(worker.terminated).toBe(true)
+  })
+})
+
+const createdWorkers: SharedPersistenceFakeWorker[] = []
+
+class SharedPersistenceFakeWorker extends FakeWorker {
+  constructor() {
+    super()
+    createdWorkers.push(this)
+  }
+}
+
+type SharedLease = Extract<
+  OpenWebTaskRepositoryResult,
+  { readonly dispose: () => Promise<void> }
+>
+
+function requireLease(result: OpenWebTaskRepositoryResult): SharedLease {
+  if (!('dispose' in result)) {
+    throw new Error('Expected an available shared lease.')
+  }
+  return result
+}
+
+function requireCreatedWorker(index: number): SharedPersistenceFakeWorker {
+  const worker = createdWorkers[index]
+  if (worker === undefined) {
+    throw new Error('Expected a default persistence Worker.')
+  }
+  return worker
+}
+
+function stubDefaultOpenEnvironment(): void {
+  createdWorkers.length = 0
+  vi.stubGlobal('Worker', SharedPersistenceFakeWorker)
+  vi.stubGlobal('crossOriginIsolated', true)
+}
+
+async function openSharedPair(): Promise<readonly [SharedLease, SharedLease]> {
+  const first = openWebTaskRepository()
+  const second = openWebTaskRepository()
+  requireCreatedWorker(0).respondToLast({ status: 'AVAILABLE' })
+  return [requireLease(await first), requireLease(await second)]
+}
+
+async function releaseFinalLease(
+  lease: SharedLease,
+  worker: SharedPersistenceFakeWorker,
+): Promise<void> {
+  const closing = lease.dispose()
+  worker.respondToLast(null)
+  await closing
+}
+
+describe('shared default persistence core', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    createdWorkers.length = 0
+  })
+
+  test('A: two concurrent default opens share one Worker and one initialization', async () => {
+    stubDefaultOpenEnvironment()
+
+    const first = openWebTaskRepository()
+    const second = openWebTaskRepository()
+
+    expect(createdWorkers).toHaveLength(1)
+    const worker = requireCreatedWorker(0)
+    expect(worker.messages).toEqual([{ requestId: 1, type: 'initialize' }])
+
+    worker.respondToLast({ status: 'AVAILABLE' })
+    const firstLease = requireLease(await first)
+    const secondLease = requireLease(await second)
+    expect(createdWorkers).toHaveLength(1)
+    expect(worker.messages).toHaveLength(1)
+
+    const listed = secondLease.repository.listTasks()
+    expect(worker.messages.at(-1)).toMatchObject({ type: 'task.list' })
+    worker.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
+    await firstLease.dispose()
+    expect(worker.terminated).toBe(false)
+    await releaseFinalLease(secondLease, worker)
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('B: releasing the first lease keeps the shared core alive', async () => {
+    stubDefaultOpenEnvironment()
+    const [firstLease, secondLease] = await openSharedPair()
+    const worker = requireCreatedWorker(0)
+
+    await firstLease.dispose()
+
+    expect(worker.terminated).toBe(false)
+    expect(worker.messages.map((message) => message.type)).not.toContain(
+      'shutdown',
+    )
+
+    const listed = secondLease.repository.listTasks()
+    worker.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
+    await releaseFinalLease(secondLease, worker)
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('C: final release shuts the core down once and a later default open starts a new generation', async () => {
+    stubDefaultOpenEnvironment()
+    const [firstLease, secondLease] = await openSharedPair()
+    const firstWorker = requireCreatedWorker(0)
+
+    await firstLease.dispose()
+    const closing = secondLease.dispose()
+
+    expect(createdWorkers).toHaveLength(1)
+    expect(firstWorker.messages.at(-1)).toMatchObject({ type: 'shutdown' })
+    expect(
+      firstWorker.messages.filter((message) => message.type === 'shutdown'),
+    ).toHaveLength(1)
+
+    firstWorker.respondToLast(null)
+    await closing
+    expect(firstWorker.terminated).toBe(true)
+
+    const reopened = openWebTaskRepository()
+    expect(createdWorkers).toHaveLength(2)
+    const secondWorker = requireCreatedWorker(1)
+    secondWorker.respondToLast({ status: 'AVAILABLE' })
+    const thirdLease = requireLease(await reopened)
+    expect(thirdLease.capability).toEqual({ status: 'AVAILABLE' })
+
+    const listed = thirdLease.repository.listTasks()
+    secondWorker.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
+    await releaseFinalLease(thirdLease, secondWorker)
+    expect(secondWorker.terminated).toBe(true)
+  })
+
+  test('D: disposing one lease twice releases its ownership once', async () => {
+    stubDefaultOpenEnvironment()
+    const [firstLease, secondLease] = await openSharedPair()
+    const worker = requireCreatedWorker(0)
+
+    await firstLease.dispose()
+    await firstLease.dispose()
+
+    expect(worker.terminated).toBe(false)
+    expect(worker.messages.map((message) => message.type)).not.toContain(
+      'shutdown',
+    )
+
+    const listed = secondLease.repository.listTasks()
+    worker.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
+    await releaseFinalLease(secondLease, worker)
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('E: a stale lease release does not invalidate the live lease', async () => {
+    stubDefaultOpenEnvironment()
+
+    const first = openWebTaskRepository()
+    const second = openWebTaskRepository()
+    const worker = requireCreatedWorker(0)
+    expect(worker.messages).toEqual([{ requestId: 1, type: 'initialize' }])
+
+    worker.respondToLast({ status: 'AVAILABLE' })
+    const staleLease = requireLease(await first)
+    const liveLease = requireLease(await second)
+
+    await staleLease.dispose()
+    expect(worker.terminated).toBe(false)
+
+    const created = liveLease.repository.createTask({
+      id: ID,
+      title: 'Task',
+      createdAtMs: 100,
+    })
+    expect(worker.messages.at(-1)).toMatchObject({ type: 'task.create' })
+    worker.respondToLast(TASK)
+    await expect(created).resolves.toEqual(TASK)
+
+    await releaseFinalLease(liveLease, worker)
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('F: a failed default generation never poisons the shared slot', async () => {
+    stubDefaultOpenEnvironment()
+
+    const first = openWebTaskRepository()
+    const second = openWebTaskRepository()
+    const failedWorker = requireCreatedWorker(0)
+    failedWorker.respondToLast({
+      status: 'UNAVAILABLE',
+      reason: 'OPFS_UNSUPPORTED',
+    })
+
+    const unavailable = {
+      capability: { status: 'UNAVAILABLE', reason: 'OPFS_UNSUPPORTED' },
+    }
+    await expect(first).resolves.toEqual(unavailable)
+    await expect(second).resolves.toEqual(unavailable)
+    expect(createdWorkers).toHaveLength(1)
+    expect(failedWorker.terminated).toBe(true)
+
+    const broken = openWebTaskRepository()
+    const brokenWorker = requireCreatedWorker(1)
+    brokenWorker.emitError()
+    await expect(broken).resolves.toEqual({
+      capability: { status: 'UNAVAILABLE', reason: 'INITIALIZATION_FAILED' },
+    })
+    expect(brokenWorker.terminated).toBe(true)
+
+    const retried = openWebTaskRepository()
+    expect(createdWorkers).toHaveLength(3)
+    const retryWorker = requireCreatedWorker(2)
+    retryWorker.respondToLast({ status: 'AVAILABLE' })
+    const lease = requireLease(await retried)
+
+    const listed = lease.repository.listTasks()
+    retryWorker.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
+    await releaseFinalLease(lease, retryWorker)
+    expect(retryWorker.terminated).toBe(true)
+  })
+
+  test('G: explicit option opens stay isolated from the shared core', async () => {
+    stubDefaultOpenEnvironment()
+
+    const sharedOpen = openWebTaskRepository()
+    const sharedWorker = requireCreatedWorker(0)
+    sharedWorker.respondToLast({ status: 'AVAILABLE' })
+    const sharedLease = requireLease(await sharedOpen)
+
+    const customWorker = new FakeWorker()
+    const customOpen = openWebTaskRepository({
+      workerSupported: true,
+      crossOriginIsolated: true,
+      workerFactory: () => customWorker,
+    })
+    customWorker.respondToLast({ status: 'AVAILABLE' })
+    const customLease = requireLease(await customOpen)
+
+    expect(createdWorkers).toHaveLength(1)
+    expect(customWorker).not.toBe(sharedWorker)
+
+    const customClosing = customLease.dispose()
+    customWorker.respondToLast(null)
+    await customClosing
+    expect(customWorker.terminated).toBe(true)
+    expect(sharedWorker.terminated).toBe(false)
+
+    const listed = sharedLease.repository.listTasks()
+    sharedWorker.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
+    await releaseFinalLease(sharedLease, sharedWorker)
+    expect(sharedWorker.terminated).toBe(true)
+  })
+
+  test('H: a new default generation waits for the previous shutdown to finish', async () => {
+    stubDefaultOpenEnvironment()
+
+    const opened = openWebTaskRepository()
+    const firstWorker = requireCreatedWorker(0)
+    firstWorker.respondToLast({ status: 'AVAILABLE' })
+    const lease = requireLease(await opened)
+
+    const closing = lease.dispose()
+    expect(firstWorker.messages.at(-1)).toMatchObject({ type: 'shutdown' })
+
+    const reopened = openWebTaskRepository()
+    expect(createdWorkers).toHaveLength(1)
+
+    firstWorker.respondToLast(null)
+    await closing
+    expect(firstWorker.terminated).toBe(true)
+    expect(createdWorkers).toHaveLength(2)
+
+    const secondWorker = requireCreatedWorker(1)
+    secondWorker.respondToLast({ status: 'AVAILABLE' })
+    const reopenedLease = requireLease(await reopened)
+
+    const listed = reopenedLease.repository.listTasks()
+    secondWorker.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
+    await releaseFinalLease(reopenedLease, secondWorker)
+    expect(secondWorker.terminated).toBe(true)
   })
 })
 
