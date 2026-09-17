@@ -28,6 +28,14 @@ export default defineConfig(({ mode }) => {
       import.meta.url,
     ),
   )
+  const noteRuntimeEntry = fileURLToPath(
+    new URL(
+      process.env.TAURI_ENV_PLATFORM === undefined
+        ? './src/note/runtime.ts'
+        : './src/note/runtime.native.ts',
+      import.meta.url,
+    ),
+  )
 
   return {
     plugins: [react(), tailwindcss()],
@@ -55,6 +63,7 @@ export default defineConfig(({ mode }) => {
       alias: [
         { find: /^@\/task\/runtime$/, replacement: taskRuntimeEntry },
         { find: /^@\/canvas\/runtime$/, replacement: canvasRuntimeEntry },
+        { find: /^@\/note\/runtime$/, replacement: noteRuntimeEntry },
         {
           find: '@',
           replacement: fileURLToPath(new URL('./src', import.meta.url)),
