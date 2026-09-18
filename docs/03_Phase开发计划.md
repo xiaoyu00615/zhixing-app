@@ -286,7 +286,7 @@ Phase 3 下一正式阶段：
 
 ### Phase 4 Status: IN PROGRESS
 
-Phase 4 已实际启动，官方状态由 `NOT STARTED` 更新为 `IN PROGRESS`。本节以 P4-04B1 closeout commit `110b5c69aba651f04a187821d63bcc60eb364664` 为当前治理 baseline。
+Phase 4 已实际启动，官方状态由 `NOT STARTED` 更新为 `IN PROGRESS`。Note V1 已 CLOSED；当前治理 baseline 为 Note V1 closeout commit `d655340e8f3f7e960e93a8ca1cdd93dbd3df7f1f`（HEAD == origin/main，working tree CLEAN at closeout）。Phase 4 整体仍为 IN PROGRESS：Diary 尚未开始。
 
 已完成（DONE，使用真实历史 Step ID；不重新编号）：
 
@@ -297,20 +297,32 @@ Phase 4 已实际启动，官方状态由 `NOT STARTED` 更新为 `IN PROGRESS`�
 - P4-03｜Note / Diary Domain Contract：`src/note/model.ts` 与 `src/diary/model.ts`；
 - P4-03A｜Shared Import + Repository Contract Repair：`src/note/repository.ts` 与 `src/diary/repository.ts`；`NOTE_REPOSITORY_ERROR_CODES` 与 `DIARY_REPOSITORY_ERROR_CODES` 与 Task 独立；
 - P4-03B｜Non-Task Shared Validation Import Cleanup：canonical lowercase UUID 与非负 safe-integer ms timestamp 校验在 Native 侧复用；
-- P4-04B1｜Native Note Persistence：CLOSED，commit `110b5c69aba651f04a187821d63bcc60eb364664`。
+- P4-04B1｜Native Note Persistence：CLOSED，commit `110b5c69aba651f04a187821d63bcc60eb364664`；
+- P4-04B2｜Web Note Persistence：CLOSED；
+- NoteService + runtime composition（含 `noteRuntime.native.ts` 与 Web runtime）：CLOSED；
+- Note UI（workspace）：CLOSED；
+- Real Web persistence E2E（真实持久化在 reload 后存活）：CLOSED；
+- 基础设施维护：shared Web persistence lifecycle coordination fix，commit `79beff55d16136ecc189975ad43572bedaa0ccd0`（CLOSED）。
 
-NEXT（NOT STARTED）：
+Note V1 closeout commit：`d655340e8f3f7e960e93a8ca1cdd93dbd3df7f1f`，commit message `feat: add note workspace`。
 
-- P4-04B2｜Web Note Persistence。
+Note V1 closeout 后 committed gates（main HEAD `d655340`）：
+
+- Vitest：`809 passed / 0 failed`（`49 test files`）；
+- Playwright：`41 passed`（含 Note persistence E2E）；
+- typecheck、lint、build：PASS；
+- `git diff --check`：PASS。
 
 明确 NOT STARTED：
 
 - P4-04B3｜Native / Web Parity Hardening；
-- NoteService + runtime composition（含 `noteRuntime.native.ts`）；
-- Note UI；
 - Diary Persistence、Diary Service、Diary UI。
 
-本节不合并 NoteService、runtime composition 或 Note UI 至 persistence step。后续仍须遵循 Plan → 用户/架构审核 → Implementation → Tests → Review → Commit 流程。
+NEXT（design first，NOT implementation）：
+
+- Diary design / contract audit：在安排 Diary Persistence 之前先完成设计与契约审计（含 Web `sqlite-wasm` constraint classification 决策）。
+
+本计划不提前实现 Diary；本节不在这里设计 Diary 内容。后续仍须遵循 Plan → 用户/架构审核 → Implementation → Tests → Review → Commit 流程。
 
 ### P4-04B1｜Native Note Persistence（CLOSED）
 
@@ -351,30 +363,28 @@ P4-04B1 closeout 后 committed baseline（main HEAD `110b5c6`）：
 - `add13e8 feat: add note and diary domain contracts`：Rust 129 / Vitest 40 files / 639 tests；
 - P4-04B1 commit `110b5c6` 后更新为上表新数字。
 
-### P4-04B2｜Web Note Persistence（NOT STARTED / NEXT）
+### P4-04B2｜Web Note Persistence（CLOSED）
 
-Scope（后续独立 Step）：
+Closeout：随 Note V1 closeout commit `d655340e8f3f7e960e93a8ca1cdd93dbd3df7f1f` 提交至 main。
+
+完成范围：
 
 - Worker protocol `note.*` request / response variants 与 parsers；
 - Worker client `note` methods；
 - `taskDatabase` 中 Note SQL 方法；
 - `WebNoteRepository` 实现 `NoteRepository`；
 - 现有 Web factory 集成（`Native`/`Web` capability detection 收口）；
-- Web repository tests。
+- Web repository tests；
+- 真实 Web persistence 验证（reload 后数据存活）。
 
-必须复用：
+复用边界（已保持）：
 
 - existing Dedicated Worker；
 - existing `TaskWorkerClient`；
 - existing SQLite WASM runtime；
 - existing OPFS DB；
-- existing Web adapter selection 收口机制。
-
-明确不做（P4-04B2）：
-
-- 不新增第二套 Web Worker；
-- 不新增独立 Web SQLite connection；
-- 不提前引入 NoteService / runtime composition / UI。
+- existing Web adapter selection 收口机制；
+- 未新增第二套 Web Worker 或独立 Web SQLite connection。
 
 ### P4-04B3｜Native / Web Parity Hardening（NOT STARTED）
 
@@ -391,13 +401,46 @@ Scope（在 P4-04B1 + P4-04B2 均完成后）：
 
 P4-04B1 closeout 中的 Native restart verification 属于 contract-equivalent / infrastructure evidence（Native 侧 restart 数据不丢），不等于 Native/Web restart parity；真正跨平台 restart parity 仍留给 P4-04B3。
 
-### NoteService + Runtime Composition（LATER STEP）
+### NoteService + Runtime Composition（CLOSED）
 
-`NoteService`、UUID generator injection、`nowMs` injection、`noteRuntime.native.ts`、以及可能的 Web runtime composition 属于 persistence 完成之后的独立 Step。P4-04B1 / P4-04B2 / P4-04B3 均不实现。
+随 Note V1 closeout commit `d655340e8f3f7e960e93a8ca1cdd93dbd3df7f1f` 完成：`NoteService`、UUID generator injection、`nowMs` injection、`noteRuntime.native.ts` 与 Web runtime composition 均已进入 production。
 
-### Note UI（LATER STEP）
+稳定的 Note application contract 摘要（完整规范仍以 spec 为准）：
 
-Note UI 属于独立的后续 Step，进入 UI 前需另开 Plan / 用户批准。
+- `NoteApplicationError`：`VALIDATION`、`NOT_FOUND`、`UNAVAILABLE`；
+- identity：canonical lowercase UUID；
+- 空 title 合法；空 content 合法；
+- Markdown source 精确保存；
+- UI placeholder `无标题` 仅用于展示。
+
+### Note UI（CLOSED）
+
+随 Note V1 closeout commit `d655340e8f3f7e960e93a8ca1cdd93dbd3df7f1f` 完成：Note workspace（列表 + 编辑器）。
+
+当前 committed 产品行为：
+
+- 创建空 Note；
+- Note list / editor workspace；
+- autosave；
+- dirty-switch flush（切换条目时先落盘再切换）；
+- 删除确认 + 软删除；
+- StrictMode lifecycle regression 已修复；
+- 真实持久化在 reload 后存活。
+
+### Shared Web Persistence Lifecycle（CLOSED，infrastructure maintenance）
+
+Closeout commit：`79beff55d16136ecc189975ad43572bedaa0ccd0`（`fix: coordinate web persistence lifecycle`）。
+
+共享 core 的稳定事实（摘要，不展开实现细节）：
+
+- 默认语义下多次 open 共享同一个 generation；
+- 每个调用方持有独立 lease；
+- dispose 幂等；
+- 最后一个 lease 释放时执行 shutdown；
+- closing 与 reopen 串行化；
+- 显式的 worker / capability test options 仍保持非共享。
+
+`WebTaskRepository` 的 shared lifecycle 在当前状态标记为 CURRENT_SHARED。
 
 ### Diary Tracking
 
