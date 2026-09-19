@@ -64,6 +64,14 @@ import {
   type SoftDeleteNoteInput,
   type UpdateNoteInput,
 } from '@/note/repository'
+import {
+  isDiaryRepositoryErrorCode,
+  type ChangeDiaryDateInput,
+  type CreateDiaryEntryInput,
+  type RestoreDiaryEntryInput,
+  type SoftDeleteDiaryEntryInput,
+  type UpdateDiaryEntryInput,
+} from '@/diary/repository'
 
 export type WebPersistenceCapability =
   | { readonly status: 'AVAILABLE' }
@@ -301,6 +309,42 @@ export type TaskWorkerRequest =
       readonly requestId: number
       readonly type: 'note.restore'
       readonly input: RestoreNoteInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'diary.create'
+      readonly input: CreateDiaryEntryInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'diary.getActiveById'
+      readonly id: string
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'diary.getActiveByDiaryDate'
+      readonly diaryDate: string
+    }
+  | { readonly requestId: number; readonly type: 'diary.listActive' }
+  | {
+      readonly requestId: number
+      readonly type: 'diary.updateDiaryEntry'
+      readonly input: UpdateDiaryEntryInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'diary.changeDiaryDate'
+      readonly input: ChangeDiaryDateInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'diary.softDelete'
+      readonly input: SoftDeleteDiaryEntryInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'diary.restore'
+      readonly input: RestoreDiaryEntryInput
     }
   | { readonly requestId: number; readonly type: 'shutdown' }
 
@@ -573,6 +617,46 @@ function isNoteMutationInput(value: unknown): value is
   )
 }
 
+function isCreateDiaryInput(value: unknown): value is CreateDiaryEntryInput {
+  return (
+    isRecord(value) &&
+    isCanonicalLowercaseUuid(value.id) &&
+    isValidLocalDate(value.diaryDate) &&
+    typeof value.title === 'string' &&
+    typeof value.content === 'string' &&
+    isNonNegativeSafeIntegerMilliseconds(value.createdAtMs)
+  )
+}
+
+function isUpdateDiaryInput(value: unknown): value is UpdateDiaryEntryInput {
+  return (
+    isRecord(value) &&
+    isCanonicalLowercaseUuid(value.id) &&
+    typeof value.title === 'string' &&
+    typeof value.content === 'string' &&
+    isNonNegativeSafeIntegerMilliseconds(value.updatedAtMs)
+  )
+}
+
+function isChangeDiaryDateInput(value: unknown): value is ChangeDiaryDateInput {
+  return (
+    isRecord(value) &&
+    isCanonicalLowercaseUuid(value.id) &&
+    isValidLocalDate(value.diaryDate) &&
+    isNonNegativeSafeIntegerMilliseconds(value.updatedAtMs)
+  )
+}
+
+function isDiaryMutationInput(value: unknown): value is
+  | SoftDeleteDiaryEntryInput
+  | RestoreDiaryEntryInput {
+  return (
+    isRecord(value) &&
+    isCanonicalLowercaseUuid(value.id) &&
+    isNonNegativeSafeIntegerMilliseconds(value.updatedAtMs)
+  )
+}
+
 export function parseTaskWorkerRequest(
   value: unknown,
 ): TaskWorkerRequest | null {
@@ -588,6 +672,7 @@ export function parseTaskWorkerRequest(
     case 'tag.list':
     case 'canvas.list':
     case 'note.listActive':
+    case 'diary.listActive':
     case 'shutdown':
       return { requestId: value.requestId, type: value.type }
     case 'task.create':
@@ -919,6 +1004,51 @@ export function parseTaskWorkerRequest(
             input: value.input,
           }
         : null
+    case 'diary.create':
+      return isCreateDiaryInput(value.input)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input,
+          }
+        : null
+    case 'diary.getActiveById':
+      return isCanonicalLowercaseUuid(value.id)
+        ? { requestId: value.requestId, type: value.type, id: value.id }
+        : null
+    case 'diary.getActiveByDiaryDate':
+      return isValidLocalDate(value.diaryDate)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            diaryDate: value.diaryDate,
+          }
+        : null
+    case 'diary.updateDiaryEntry':
+      return isUpdateDiaryInput(value.input)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input,
+          }
+        : null
+    case 'diary.changeDiaryDate':
+      return isChangeDiaryDateInput(value.input)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input,
+          }
+        : null
+    case 'diary.softDelete':
+    case 'diary.restore':
+      return isDiaryMutationInput(value.input)
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            input: value.input,
+          }
+        : null
     default:
       return null
   }
@@ -1018,6 +1148,39 @@ export function parseNoteWorkerResponse(
   }
 
   if (!isRecord(value.error) || !isNoteRepositoryErrorCode(value.error.code)) {
+    return null
+  }
+
+  return {
+    requestId: value.requestId,
+    ok: false,
+    error: { code: value.error.code },
+  }
+}
+
+export function parseDiaryWorkerResponse(
+  value: unknown,
+): TaskWorkerResponse | null {
+  if (
+    !isRecord(value) ||
+    !isRequestId(value.requestId) ||
+    typeof value.ok !== 'boolean'
+  ) {
+    return null
+  }
+
+  if (value.ok) {
+    if (!('result' in value)) {
+      return null
+    }
+    return {
+      requestId: value.requestId,
+      ok: true,
+      result: value.result,
+    }
+  }
+
+  if (!isRecord(value.error) || !isDiaryRepositoryErrorCode(value.error.code)) {
     return null
   }
 

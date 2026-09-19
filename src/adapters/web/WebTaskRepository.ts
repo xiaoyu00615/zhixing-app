@@ -35,6 +35,7 @@ import { WebProjectRepository } from '@/adapters/web/WebProjectRepository'
 import { WebTagRepository } from '@/adapters/web/WebTagRepository'
 import { WebCanvasRepository } from '@/adapters/web/WebCanvasRepository'
 import { WebNoteRepository } from '@/adapters/web/WebNoteRepository'
+import { WebDiaryRepository } from '@/adapters/web/WebDiaryRepository'
 
 function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
   if (!isRecord(value)) {
@@ -371,6 +372,7 @@ export type OpenWebTaskRepositoryResult =
       readonly tagRepository: import('@/tag/repository').TagRepository
       readonly canvasRepository: import('@/canvas/repository').CanvasRepository
       readonly noteRepository: import('@/note/repository').NoteRepository
+      readonly diaryRepository: import('@/diary/repository').DiaryRepository
       readonly dispose: () => Promise<void>
     }
   | {
@@ -386,6 +388,7 @@ interface SharedWebPersistenceRepositories {
   readonly tagRepository: import('@/tag/repository').TagRepository
   readonly canvasRepository: import('@/canvas/repository').CanvasRepository
   readonly noteRepository: import('@/note/repository').NoteRepository
+  readonly diaryRepository: import('@/diary/repository').DiaryRepository
 }
 
 type SharedWebPersistenceOutcome =
@@ -416,6 +419,7 @@ function createSharedRepositories(
     tagRepository: new WebTagRepository(client),
     canvasRepository: new WebCanvasRepository(client),
     noteRepository: new WebNoteRepository(client),
+    diaryRepository: new WebDiaryRepository(client),
   }
 }
 
@@ -524,6 +528,7 @@ async function openSharedWebTaskRepository(): Promise<OpenWebTaskRepositoryResul
     tagRepository: outcome.repositories.tagRepository,
     canvasRepository: outcome.repositories.canvasRepository,
     noteRepository: outcome.repositories.noteRepository,
+    diaryRepository: outcome.repositories.diaryRepository,
     dispose: createSharedLeaseDispose(generation),
   }
 }
@@ -555,6 +560,7 @@ async function openUnsharedWebTaskRepository(
       tagRepository: new WebTagRepository(client),
       canvasRepository: new WebCanvasRepository(client),
       noteRepository: new WebNoteRepository(client),
+      diaryRepository: new WebDiaryRepository(client),
       dispose: () => client.shutdown(),
     }
   } catch {

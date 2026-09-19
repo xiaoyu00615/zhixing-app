@@ -17,6 +17,47 @@ import type { TaskRepositoryErrorCode } from '@/task/repository'
 import { isTaskRepositoryErrorCode } from '@/task/repository'
 import type { NoteRepositoryErrorCode } from '@/note/repository'
 import { isNoteRepositoryErrorCode } from '@/note/repository'
+import type { DiaryRepositoryErrorCode } from '@/diary/repository'
+import { isDiaryRepositoryErrorCode } from '@/diary/repository'
+
+type DiaryOperationType =
+  | 'diary.create'
+  | 'diary.getActiveById'
+  | 'diary.getActiveByDiaryDate'
+  | 'diary.listActive'
+  | 'diary.updateDiaryEntry'
+  | 'diary.changeDiaryDate'
+  | 'diary.softDelete'
+  | 'diary.restore'
+
+const DIARY_OPERATION_TYPES = new Set<DiaryOperationType>([
+  'diary.create',
+  'diary.getActiveById',
+  'diary.getActiveByDiaryDate',
+  'diary.listActive',
+  'diary.updateDiaryEntry',
+  'diary.changeDiaryDate',
+  'diary.softDelete',
+  'diary.restore',
+])
+
+function isDiaryOperation(type: string): boolean {
+  return DIARY_OPERATION_TYPES.has(type as DiaryOperationType)
+}
+
+/**
+ * True when the raw request envelope looks like a diary-domain request even
+ * though it failed domain parsing (malformed input or unknown diary op).
+ * Used so malformed / unknown diary.* requests fail through the Diary
+ * failure emitter instead of the Task failure emitter.
+ */
+function isDiaryRequestType(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.type === 'string' &&
+    value.type.startsWith('diary.')
+  )
+}
 
 type NoteOperationType =
   | 'note.create'
@@ -52,7 +93,6 @@ function isNoteRequestType(value: unknown): boolean {
     value.type.startsWith('note.')
   )
 }
-
 const DATABASE_FILENAME = '/zhixing.db'
 const workerScope = self as DedicatedWorkerGlobalScope
 
@@ -144,6 +184,15 @@ function noteFailure(requestId: number, code: NoteRepositoryErrorCode): void {
   workerScope.postMessage(response)
 }
 
+function diaryFailure(requestId: number, code: DiaryRepositoryErrorCode): void {
+  const response: TaskWorkerResponse = {
+    requestId,
+    ok: false,
+    error: { code },
+  }
+  workerScope.postMessage(response)
+}
+
 async function handleRequest(value: unknown): Promise<void> {
   const request = parseTaskWorkerRequest(value)
   if (request === null) {
@@ -151,6 +200,8 @@ async function handleRequest(value: unknown): Promise<void> {
     if (requestId !== null) {
       if (isNoteRequestType(value)) {
         noteFailure(requestId, 'PERSISTENCE_ERROR')
+      } else if (isDiaryRequestType(value)) {
+        diaryFailure(requestId, 'PERSISTENCE_ERROR')
       } else {
         failure(requestId, 'PERSISTENCE_FAILED')
       }
@@ -175,8 +226,66 @@ async function handleRequest(value: unknown): Promise<void> {
   if (state.capability.status !== 'AVAILABLE' || state.database === undefined) {
     if (isNoteOperation(request.type)) {
       noteFailure(request.requestId, 'PERSISTENCE_ERROR')
+    } else if (isDiaryOperation(request.type)) {
+      diaryFailure(request.requestId, 'PERSISTENCE_ERROR')
     } else {
       failure(request.requestId, 'PERSISTENCE_UNAVAILABLE')
+    }
+    return
+  }
+
+  if (isDiaryOperation(request.type)) {
+    try {
+      switch (request.type) {
+        case 'diary.create':
+          success(
+            request.requestId,
+            state.database.createDiaryEntry(request.input),
+          )
+          return
+        case 'diary.getActiveById':
+          success(
+            request.requestId,
+            state.database.getActiveDiaryEntry(request.id),
+          )
+          return
+        case 'diary.getActiveByDiaryDate':
+          success(
+            request.requestId,
+            state.database.getActiveDiaryEntryByDate(request.diaryDate),
+          )
+          return
+        case 'diary.listActive':
+          success(request.requestId, state.database.listActiveDiaryEntries())
+          return
+        case 'diary.updateDiaryEntry':
+          success(
+            request.requestId,
+            state.database.updateDiaryEntry(request.input),
+          )
+          return
+        case 'diary.changeDiaryDate':
+          success(
+            request.requestId,
+            state.database.changeDiaryDate(request.input),
+          )
+          return
+        case 'diary.softDelete':
+          state.database.softDeleteDiaryEntry(request.input)
+          success(request.requestId, null)
+          return
+        case 'diary.restore':
+          state.database.restoreDiaryEntry(request.input)
+          success(request.requestId, null)
+          return
+      }
+    } catch (error: unknown) {
+      const code: DiaryRepositoryErrorCode =
+        error instanceof TaskDatabaseError &&
+        isDiaryRepositoryErrorCode(error.code)
+          ? error.code
+          : 'PERSISTENCE_ERROR'
+      diaryFailure(request.requestId, code)
     }
     return
   }

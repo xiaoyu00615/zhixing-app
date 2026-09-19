@@ -37,6 +37,15 @@ import type {
   SoftDeleteNoteInput,
   UpdateNoteInput,
 } from '@/note/repository'
+import type { DiaryEntry } from '@/diary/model'
+import type {
+  ChangeDiaryDateInput,
+  CreateDiaryEntryInput,
+  DiaryRepositoryErrorCode,
+  RestoreDiaryEntryInput,
+  SoftDeleteDiaryEntryInput,
+  UpdateDiaryEntryInput,
+} from '@/diary/repository'
 import {
   isCanonicalCanvasId,
   isCanvasCoordinate,
@@ -87,6 +96,7 @@ import {
 export type WebTaskDatabaseErrorCode =
   | TaskRepositoryErrorCode
   | NoteRepositoryErrorCode
+  | DiaryRepositoryErrorCode
 
 export class TaskDatabaseError extends Error {
   readonly code: WebTaskDatabaseErrorCode
@@ -111,6 +121,8 @@ const CANVAS_EDGE_COLUMNS = `id, canvas_id, source_node_id, target_node_id,
                              created_at_ms, updated_at_ms, deleted_at_ms`
 const NOTE_COLUMNS =
   'id, title, content, created_at_ms, updated_at_ms, deleted_at_ms'
+const DIARY_COLUMNS =
+  'id, title, content, diary_date, created_at_ms, updated_at_ms, deleted_at_ms'
 
 function parseCanvasRow(row: Record<string, unknown> | undefined): Canvas | null {
   if (row === undefined) return null
@@ -387,6 +399,89 @@ function validateNoteMutationInput(input: {
     !isNonNegativeSafeIntegerMilliseconds(input.updatedAtMs)
   ) {
     throw new TaskDatabaseError('PERSISTENCE_FAILED')
+  }
+}
+
+function parseDiaryRow(
+  row: Record<string, unknown> | undefined,
+): DiaryEntry | null {
+  if (row === undefined) return null
+  const {
+    id,
+    title,
+    content,
+    diary_date: diaryDate,
+    created_at_ms: createdAtMs,
+    updated_at_ms: updatedAtMs,
+    deleted_at_ms: deletedAtMs,
+  } = row
+  if (
+    !isCanonicalLowercaseUuid(id) ||
+    typeof title !== 'string' ||
+    typeof content !== 'string' ||
+    !isValidLocalDate(diaryDate) ||
+    !isNonNegativeSafeIntegerMilliseconds(createdAtMs) ||
+    !isNonNegativeSafeIntegerMilliseconds(updatedAtMs) ||
+    (deletedAtMs !== null &&
+      !isNonNegativeSafeIntegerMilliseconds(deletedAtMs))
+  ) {
+    throw new TaskDatabaseError('PERSISTENCE_ERROR')
+  }
+  return {
+    id,
+    title,
+    content,
+    diaryDate,
+    createdAtMs,
+    updatedAtMs,
+    deletedAtMs,
+  }
+}
+
+function validateCreateDiaryEntryInput(input: CreateDiaryEntryInput): void {
+  if (!isCanonicalLowercaseUuid(input.id)) {
+    throw new TaskDatabaseError('INVALID_ID')
+  }
+  if (!isValidLocalDate(input.diaryDate)) {
+    throw new TaskDatabaseError('INVALID_DIARY_DATE')
+  }
+  if (
+    !isNonNegativeSafeIntegerMilliseconds(input.createdAtMs)
+  ) {
+    throw new TaskDatabaseError('PERSISTENCE_ERROR')
+  }
+}
+
+function validateUpdateDiaryEntryInput(input: UpdateDiaryEntryInput): void {
+  if (!isCanonicalLowercaseUuid(input.id)) {
+    throw new TaskDatabaseError('INVALID_ID')
+  }
+  if (!isNonNegativeSafeIntegerMilliseconds(input.updatedAtMs)) {
+    throw new TaskDatabaseError('PERSISTENCE_ERROR')
+  }
+}
+
+function validateChangeDiaryDateInput(input: ChangeDiaryDateInput): void {
+  if (!isCanonicalLowercaseUuid(input.id)) {
+    throw new TaskDatabaseError('INVALID_ID')
+  }
+  if (!isValidLocalDate(input.diaryDate)) {
+    throw new TaskDatabaseError('INVALID_DIARY_DATE')
+  }
+  if (!isNonNegativeSafeIntegerMilliseconds(input.updatedAtMs)) {
+    throw new TaskDatabaseError('PERSISTENCE_ERROR')
+  }
+}
+
+function validateDiaryMutationInput(input: {
+  readonly id: string
+  readonly updatedAtMs: number
+}): void {
+  if (!isCanonicalLowercaseUuid(input.id)) {
+    throw new TaskDatabaseError('INVALID_ID')
+  }
+  if (!isNonNegativeSafeIntegerMilliseconds(input.updatedAtMs)) {
+    throw new TaskDatabaseError('PERSISTENCE_ERROR')
   }
 }
 
@@ -2175,6 +2270,234 @@ export class WebTaskDatabase {
       if (error instanceof TaskDatabaseError) throw error
       throw new TaskDatabaseError('PERSISTENCE_FAILED')
     }
+  }
+
+  createDiaryEntry(input: CreateDiaryEntryInput): DiaryEntry {
+    validateCreateDiaryEntryInput(input)
+    try {
+      return this.#database.transaction(() => {
+        // Explicit active-date occupancy probe. Any integrity failure observed
+        // later during INSERT is unclassified and stays PERSISTENCE_ERROR.
+        if (this.activeDiaryDateOccupied(input.diaryDate, null)) {
+          throw new TaskDatabaseError('DIARY_DATE_CONFLICT')
+        }
+        this.#database.exec({
+          sql: `INSERT INTO diary_entries
+                (id, title, content, diary_date, created_at_ms, updated_at_ms,
+                 deleted_at_ms)
+                VALUES (?, ?, ?, ?, ?, ?, NULL)`,
+          bind: [
+            input.id,
+            input.title,
+            input.content,
+            input.diaryDate,
+            input.createdAtMs,
+            input.createdAtMs,
+          ],
+        })
+        return this.requireDiaryEntry(input.id)
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_ERROR')
+    }
+  }
+
+  getActiveDiaryEntry(id: string): DiaryEntry | null {
+    if (!isCanonicalLowercaseUuid(id)) {
+      throw new TaskDatabaseError('INVALID_ID')
+    }
+    try {
+      return parseDiaryRow(
+        this.#database.selectObject(
+          `SELECT ${DIARY_COLUMNS}
+           FROM diary_entries WHERE id = ? AND deleted_at_ms IS NULL`,
+          [id],
+        ),
+      )
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_ERROR')
+    }
+  }
+
+  getActiveDiaryEntryByDate(diaryDate: string): DiaryEntry | null {
+    // Canonical format only. Future dates are legal reads: rejection belongs
+    // to the future Diary Service, never to this Repository.
+    if (!isValidLocalDate(diaryDate)) {
+      throw new TaskDatabaseError('INVALID_DIARY_DATE')
+    }
+    try {
+      return parseDiaryRow(
+        this.#database.selectObject(
+          `SELECT ${DIARY_COLUMNS}
+           FROM diary_entries
+           WHERE diary_date = ? AND deleted_at_ms IS NULL`,
+          [diaryDate],
+        ),
+      )
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_ERROR')
+    }
+  }
+
+  listActiveDiaryEntries(): readonly DiaryEntry[] {
+    try {
+      return this.#database
+        .selectObjects(
+          `SELECT ${DIARY_COLUMNS}
+           FROM diary_entries WHERE deleted_at_ms IS NULL
+           ORDER BY diary_date DESC, updated_at_ms DESC, id ASC`,
+        )
+        .map((row) => {
+          const entry = parseDiaryRow(row)
+          if (entry === null) {
+            throw new TaskDatabaseError('PERSISTENCE_ERROR')
+          }
+          return entry
+        })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_ERROR')
+    }
+  }
+
+  updateDiaryEntry(input: UpdateDiaryEntryInput): DiaryEntry {
+    validateUpdateDiaryEntryInput(input)
+    try {
+      return this.#database.transaction(() => {
+        this.#database.exec({
+          sql: `UPDATE diary_entries
+                SET title = ?, content = ?, updated_at_ms = ?
+                WHERE id = ? AND deleted_at_ms IS NULL`,
+          bind: [input.title, input.content, input.updatedAtMs, input.id],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+        return this.requireDiaryEntry(input.id)
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_ERROR')
+    }
+  }
+
+  changeDiaryDate(input: ChangeDiaryDateInput): DiaryEntry {
+    validateChangeDiaryDateInput(input)
+    try {
+      return this.#database.transaction(() => {
+        this.requireDiaryEntry(input.id)
+        // excludeId prevents an entry from conflicting with its own date.
+        if (this.activeDiaryDateOccupied(input.diaryDate, input.id)) {
+          throw new TaskDatabaseError('DIARY_DATE_CONFLICT')
+        }
+        this.#database.exec({
+          sql: `UPDATE diary_entries
+                SET diary_date = ?, updated_at_ms = ?
+                WHERE id = ? AND deleted_at_ms IS NULL`,
+          bind: [input.diaryDate, input.updatedAtMs, input.id],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+        return this.requireDiaryEntry(input.id)
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_ERROR')
+    }
+  }
+
+  softDeleteDiaryEntry(input: SoftDeleteDiaryEntryInput): void {
+    validateDiaryMutationInput(input)
+    try {
+      this.#database.transaction(() => {
+        this.#database.exec({
+          sql: `UPDATE diary_entries
+                SET deleted_at_ms = ?, updated_at_ms = ?
+                WHERE id = ? AND deleted_at_ms IS NULL`,
+          bind: [input.updatedAtMs, input.updatedAtMs, input.id],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_ERROR')
+    }
+  }
+
+  restoreDiaryEntry(input: RestoreDiaryEntryInput): void {
+    validateDiaryMutationInput(input)
+    try {
+      this.#database.transaction(() => {
+        const diaryDate = this.#database.selectValue(
+          `SELECT diary_date FROM diary_entries
+           WHERE id = ? AND deleted_at_ms IS NOT NULL`,
+          [input.id],
+        )
+        if (typeof diaryDate !== 'string') {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+        if (this.activeDiaryDateOccupied(diaryDate, null)) {
+          throw new TaskDatabaseError('DIARY_DATE_CONFLICT')
+        }
+        this.#database.exec({
+          sql: `UPDATE diary_entries
+                SET deleted_at_ms = NULL, updated_at_ms = ?
+                WHERE id = ? AND deleted_at_ms IS NOT NULL`,
+          bind: [input.updatedAtMs, input.id],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_ERROR')
+    }
+  }
+
+  private requireDiaryEntry(id: string): DiaryEntry {
+    const entry = parseDiaryRow(
+      this.#database.selectObject(
+        `SELECT ${DIARY_COLUMNS}
+         FROM diary_entries WHERE id = ? AND deleted_at_ms IS NULL`,
+        [id],
+      ),
+    )
+    if (entry === null) {
+      throw new TaskDatabaseError('NOT_FOUND')
+    }
+    return entry
+  }
+
+  private activeDiaryDateOccupied(
+    diaryDate: string,
+    excludeId: string | null,
+  ): boolean {
+    const occupied =
+      excludeId === null
+        ? this.#database.selectValue(
+            `SELECT EXISTS(
+               SELECT 1 FROM diary_entries
+               WHERE diary_date = ? AND deleted_at_ms IS NULL
+             )`,
+            [diaryDate],
+          )
+        : this.#database.selectValue(
+            `SELECT EXISTS(
+               SELECT 1 FROM diary_entries
+               WHERE diary_date = ? AND deleted_at_ms IS NULL AND id <> ?
+             )`,
+            [diaryDate, excludeId],
+          )
+    if (occupied === 1) return true
+    if (occupied === 0) return false
+    throw new TaskDatabaseError('PERSISTENCE_ERROR')
   }
 
   private requireNote(id: string): Note {

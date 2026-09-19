@@ -25,6 +25,15 @@ import type {
 } from '@/note/repository'
 import { isNoteRepositoryErrorCode } from '@/note/repository'
 import type {
+  ChangeDiaryDateInput,
+  CreateDiaryEntryInput,
+  DiaryRepositoryErrorCode,
+  RestoreDiaryEntryInput,
+  SoftDeleteDiaryEntryInput,
+  UpdateDiaryEntryInput,
+} from '@/diary/repository'
+import { isDiaryRepositoryErrorCode } from '@/diary/repository'
+import type {
   CreateCanvasInput,
   CreateCanvasEdgeInput,
   CreateCanvasNodeInput,
@@ -43,6 +52,7 @@ import type {
 } from '@/canvas/repository'
 import {
   extractRequestId,
+  parseDiaryWorkerResponse,
   parseNoteWorkerResponse,
   parseTaskWorkerResponse,
   parseWebPersistenceCapability,
@@ -78,9 +88,22 @@ export class NoteWorkerClientError extends Error {
   }
 }
 
+export class DiaryWorkerClientError extends Error {
+  readonly code: DiaryRepositoryErrorCode
+
+  constructor(code: DiaryRepositoryErrorCode) {
+    super('Diary persistence worker request failed.')
+    this.name = 'DiaryWorkerClientError'
+    this.code = code
+  }
+}
+
 type WorkerTransportFailure = 'UNAVAILABLE' | 'FAILED'
 
-type ClientRequestError = TaskWorkerClientError | NoteWorkerClientError
+type ClientRequestError =
+  | TaskWorkerClientError
+  | NoteWorkerClientError
+  | DiaryWorkerClientError
 
 type ParsedClientResponse =
   | { readonly ok: true; readonly result: unknown }
@@ -128,6 +151,24 @@ const NOTE_REQUEST_OPTIONS: RequestOptions = {
     return { ok: false, error: new NoteWorkerClientError(code) }
   },
   mapTransportFailure: () => new NoteWorkerClientError('PERSISTENCE_ERROR'),
+}
+
+const DIARY_REQUEST_OPTIONS: RequestOptions = {
+  parseResponse: (value) => {
+    const response = parseDiaryWorkerResponse(value)
+    if (response === null) {
+      return null
+    }
+    if (response.ok) {
+      return { ok: true, result: response.result }
+    }
+    const code = response.error.code
+    if (!isDiaryRepositoryErrorCode(code)) {
+      return null
+    }
+    return { ok: false, error: new DiaryWorkerClientError(code) }
+  },
+  mapTransportFailure: () => new DiaryWorkerClientError('PERSISTENCE_ERROR'),
 }
 
 interface PendingRequest {
@@ -583,6 +624,90 @@ export class TaskWorkerClient {
     )
   }
 
+  createDiaryEntry(input: CreateDiaryEntryInput): Promise<unknown> {
+    return this.send(
+      (requestId) => ({
+        requestId,
+        type: 'diary.create',
+        input,
+      }),
+      DIARY_REQUEST_OPTIONS,
+    )
+  }
+
+  getActiveDiaryEntryById(id: string): Promise<unknown> {
+    return this.send(
+      (requestId) => ({
+        requestId,
+        type: 'diary.getActiveById',
+        id,
+      }),
+      DIARY_REQUEST_OPTIONS,
+    )
+  }
+
+  getActiveDiaryEntryByDate(diaryDate: string): Promise<unknown> {
+    return this.send(
+      (requestId) => ({
+        requestId,
+        type: 'diary.getActiveByDiaryDate',
+        diaryDate,
+      }),
+      DIARY_REQUEST_OPTIONS,
+    )
+  }
+
+  listActiveDiaryEntries(): Promise<unknown> {
+    return this.send(
+      (requestId) => ({ requestId, type: 'diary.listActive' }),
+      DIARY_REQUEST_OPTIONS,
+    )
+  }
+
+  updateDiaryEntry(input: UpdateDiaryEntryInput): Promise<unknown> {
+    return this.send(
+      (requestId) => ({
+        requestId,
+        type: 'diary.updateDiaryEntry',
+        input,
+      }),
+      DIARY_REQUEST_OPTIONS,
+    )
+  }
+
+  changeDiaryDate(input: ChangeDiaryDateInput): Promise<unknown> {
+    return this.send(
+      (requestId) => ({
+        requestId,
+        type: 'diary.changeDiaryDate',
+        input,
+      }),
+      DIARY_REQUEST_OPTIONS,
+    )
+  }
+
+  softDeleteDiaryEntry(input: SoftDeleteDiaryEntryInput): Promise<unknown> {
+    return this.send(
+      (requestId) => ({
+        requestId,
+        type: 'diary.softDelete',
+        input,
+      }),
+      DIARY_REQUEST_OPTIONS,
+    )
+  }
+
+  restoreDiaryEntry(input: RestoreDiaryEntryInput): Promise<unknown> {
+    return this.send(
+      (requestId) => ({
+        requestId,
+        type: 'diary.restore',
+        input,
+      }),
+      DIARY_REQUEST_OPTIONS,
+    )
+  }
+
   async shutdown(): Promise<void> {
     if (this.#terminated) {
       return
@@ -669,6 +794,9 @@ export class TaskWorkerClient {
       return true
     }
     if (parseNoteWorkerResponse(value) !== null) {
+      return true
+    }
+    if (parseDiaryWorkerResponse(value) !== null) {
       return true
     }
     return false

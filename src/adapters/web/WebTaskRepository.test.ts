@@ -786,6 +786,112 @@ describe('shared default persistence core', () => {
   })
 })
 
+describe('shared default persistence exposes Diary', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    createdWorkers.length = 0
+  })
+
+  test('default shared lease exposes a working diaryRepository', async () => {
+    stubDefaultOpenEnvironment()
+
+    const first = openWebTaskRepository()
+    const second = openWebTaskRepository()
+    const worker = requireCreatedWorker(0)
+    worker.respondToLast({ status: 'AVAILABLE' })
+    const firstLease = requireLease(await first)
+    const secondLease = requireLease(await second)
+
+    expect('diaryRepository' in firstLease).toBe(true)
+    expect('diaryRepository' in secondLease).toBe(true)
+    expect(createdWorkers).toHaveLength(1)
+
+    const listed = secondLease.diaryRepository.listActive()
+    expect(worker.messages.at(-1)).toMatchObject({ type: 'diary.listActive' })
+    worker.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
+    await firstLease.dispose()
+    expect(worker.terminated).toBe(false)
+    await releaseFinalLease(secondLease, worker)
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('two concurrent default opens share one Worker and both expose diaryRepository', async () => {
+    stubDefaultOpenEnvironment()
+
+    const first = openWebTaskRepository()
+    const second = openWebTaskRepository()
+    expect(createdWorkers).toHaveLength(1)
+    const worker = requireCreatedWorker(0)
+
+    worker.respondToLast({ status: 'AVAILABLE' })
+    const firstLease = requireLease(await first)
+    const secondLease = requireLease(await second)
+
+    expect(createdWorkers).toHaveLength(1)
+    expect(worker.messages).toHaveLength(1)
+    expect(firstLease.diaryRepository).toBeDefined()
+    expect(secondLease.diaryRepository).toBeDefined()
+
+    await firstLease.dispose()
+    await releaseFinalLease(secondLease, worker)
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('releasing one lease keeps the diaryRepository usable on the remaining lease', async () => {
+    stubDefaultOpenEnvironment()
+    const [firstLease, secondLease] = await openSharedPair()
+    const worker = requireCreatedWorker(0)
+
+    await firstLease.dispose()
+    expect(worker.terminated).toBe(false)
+
+    const listed = secondLease.diaryRepository.listActive()
+    worker.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
+    await releaseFinalLease(secondLease, worker)
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('explicit unshared option still exposes diaryRepository and stays isolated', async () => {
+    stubDefaultOpenEnvironment()
+
+    const sharedOpen = openWebTaskRepository()
+    const sharedWorker = requireCreatedWorker(0)
+    sharedWorker.respondToLast({ status: 'AVAILABLE' })
+    const sharedLease = requireLease(await sharedOpen)
+    expect(sharedLease.diaryRepository).toBeDefined()
+
+    const customWorker = new FakeWorker()
+    const customOpen = openWebTaskRepository({
+      workerSupported: true,
+      crossOriginIsolated: true,
+      workerFactory: () => customWorker,
+    })
+    customWorker.respondToLast({ status: 'AVAILABLE' })
+    const customLease = requireLease(await customOpen)
+
+    expect(createdWorkers).toHaveLength(1)
+    expect(customWorker).not.toBe(sharedWorker)
+    expect(customLease.diaryRepository).toBeDefined()
+
+    const customClosing = customLease.dispose()
+    customWorker.respondToLast(null)
+    await customClosing
+    expect(customWorker.terminated).toBe(true)
+    expect(sharedWorker.terminated).toBe(false)
+
+    const listed = sharedLease.diaryRepository.listActive()
+    sharedWorker.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
+    await releaseFinalLease(sharedLease, sharedWorker)
+    expect(sharedWorker.terminated).toBe(true)
+  })
+})
+
 defineTaskRepositoryContract('WebTaskRepository', createWebContractFixture)
 
 describe('Web migrations', () => {
