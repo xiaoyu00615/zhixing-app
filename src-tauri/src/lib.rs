@@ -30,6 +30,7 @@ mod bootstrap;
 mod canvas;
 mod commands;
 mod db;
+mod diary_db;
 mod diagnostics;
 mod notes_db;
 mod project;
@@ -234,7 +235,15 @@ pub fn run() {
             commands::note_list_active,
             commands::note_update,
             commands::note_soft_delete,
-            commands::note_restore
+            commands::note_restore,
+            commands::diary_create,
+            commands::diary_get_active_by_id,
+            commands::diary_get_active_by_diary_date,
+            commands::diary_list_active,
+            commands::diary_update,
+            commands::diary_change_date,
+            commands::diary_soft_delete,
+            commands::diary_restore
         ])
         .setup(|app| {
             // 🔒 冻结 §3：路径统一通过 PathResolver。

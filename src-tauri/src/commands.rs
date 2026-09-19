@@ -12,6 +12,10 @@ use crate::canvas::{
     UpdateCanvasEdgeDirectionInput, UpdateCanvasEdgeLineStyleInput, UpdateCanvasNodeContentInput,
     UpdateCanvasViewportInput,
 };
+use crate::diary_db::{
+    ChangeDiaryDateInput, CreateDiaryEntryInput, DiaryDbService, DiaryEntryRecord, DiaryError,
+    RestoreDiaryEntryInput, SoftDeleteDiaryEntryInput, UpdateDiaryEntryInput,
+};
 use crate::project::{
     CreateProjectInput, ProjectDbService, ProjectError, ProjectRecord, RenameProjectInput,
 };
@@ -1476,6 +1480,202 @@ pub(crate) fn note_restore(
         },
     )
     .map_err(note_error)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiaryEntryDto {
+    id: String,
+    title: String,
+    content: String,
+    diary_date: String,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    deleted_at_ms: Option<i64>,
+}
+
+impl From<DiaryEntryRecord> for DiaryEntryDto {
+    fn from(entry: DiaryEntryRecord) -> Self {
+        Self {
+            id: entry.id,
+            title: entry.title,
+            content: entry.content,
+            diary_date: entry.diary_date,
+            created_at_ms: entry.created_at_ms,
+            updated_at_ms: entry.updated_at_ms,
+            deleted_at_ms: entry.deleted_at_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreateDiaryEntryDto {
+    id: String,
+    diary_date: String,
+    title: String,
+    content: String,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateDiaryEntryDto {
+    id: String,
+    title: String,
+    content: String,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChangeDiaryDateDto {
+    id: String,
+    diary_date: String,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiaryLifecycleDto {
+    id: String,
+    updated_at_ms: i64,
+}
+
+fn diary_error(error: DiaryError) -> TaskCommandErrorDto {
+    TaskCommandErrorDto {
+        code: error.code(),
+        message: error.safe_message(),
+    }
+}
+
+#[tauri::command]
+pub(crate) fn diary_create(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: CreateDiaryEntryDto,
+) -> Result<DiaryEntryDto, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    DiaryDbService::create(
+        &connection,
+        CreateDiaryEntryInput {
+            id: input.id,
+            diary_date: input.diary_date,
+            title: input.title,
+            content: input.content,
+            created_at_ms: input.created_at_ms,
+        },
+    )
+    .map(DiaryEntryDto::from)
+    .map_err(diary_error)
+}
+
+#[tauri::command]
+pub(crate) fn diary_get_active_by_id(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    id: String,
+) -> Result<Option<DiaryEntryDto>, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    DiaryDbService::get_active_by_id(&connection, &id)
+        .map(|option| option.map(DiaryEntryDto::from))
+        .map_err(diary_error)
+}
+
+#[tauri::command]
+pub(crate) fn diary_get_active_by_diary_date(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    diary_date: String,
+) -> Result<Option<DiaryEntryDto>, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    DiaryDbService::get_active_by_diary_date(&connection, &diary_date)
+        .map(|option| option.map(DiaryEntryDto::from))
+        .map_err(diary_error)
+}
+
+#[tauri::command]
+pub(crate) fn diary_list_active(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+) -> Result<Vec<DiaryEntryDto>, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    DiaryDbService::list_active(&connection)
+        .map(|records| records.into_iter().map(DiaryEntryDto::from).collect())
+        .map_err(diary_error)
+}
+
+#[tauri::command]
+pub(crate) fn diary_update(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: UpdateDiaryEntryDto,
+) -> Result<DiaryEntryDto, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    DiaryDbService::update_diary_entry(
+        &connection,
+        UpdateDiaryEntryInput {
+            id: input.id,
+            title: input.title,
+            content: input.content,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(DiaryEntryDto::from)
+    .map_err(diary_error)
+}
+
+#[tauri::command]
+pub(crate) fn diary_change_date(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: ChangeDiaryDateDto,
+) -> Result<DiaryEntryDto, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    DiaryDbService::change_diary_date(
+        &connection,
+        ChangeDiaryDateInput {
+            id: input.id,
+            diary_date: input.diary_date,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(DiaryEntryDto::from)
+    .map_err(diary_error)
+}
+
+#[tauri::command]
+pub(crate) fn diary_soft_delete(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: DiaryLifecycleDto,
+) -> Result<(), TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    DiaryDbService::soft_delete(
+        &connection,
+        SoftDeleteDiaryEntryInput {
+            id: input.id,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map_err(diary_error)
+}
+
+#[tauri::command]
+pub(crate) fn diary_restore(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: DiaryLifecycleDto,
+) -> Result<(), TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    DiaryDbService::restore(
+        &connection,
+        RestoreDiaryEntryInput {
+            id: input.id,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map_err(diary_error)
 }
 
 #[tauri::command]
