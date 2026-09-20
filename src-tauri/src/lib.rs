@@ -34,6 +34,7 @@ mod diary_db;
 mod diagnostics;
 mod notes_db;
 mod project;
+mod search_db;
 mod storage;
 mod tag;
 mod task;
@@ -243,7 +244,8 @@ pub fn run() {
             commands::diary_update,
             commands::diary_change_date,
             commands::diary_soft_delete,
-            commands::diary_restore
+            commands::diary_restore,
+            commands::search_query
         ])
         .setup(|app| {
             // 🔒 冻结 §3：路径统一通过 PathResolver。

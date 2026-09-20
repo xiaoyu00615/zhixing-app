@@ -31,6 +31,7 @@ use crate::task::{
     TaskRecord, TaskStatusOperation, TrashTaskInput,
 };
 use crate::RuntimeStatus;
+use crate::search_db::{SearchDbService, SearchError, SearchQueryInput, SearchResultRecord};
 
 /// 最小健康检查命令：前端 → Tauri invoke → Rust 返回 "pong"。
 ///
@@ -1676,6 +1677,66 @@ pub(crate) fn diary_restore(
         },
     )
     .map_err(diary_error)
+}
+
+// ============================================================
+// Global Search (P5 S2 — Native query layer only)
+// ============================================================
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SearchQueryDto {
+    query: String,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SearchResultDto {
+    entity_type: String,
+    entity_id: String,
+    title: String,
+    snippet: String,
+    updated_at_ms: i64,
+}
+
+impl From<SearchResultRecord> for SearchResultDto {
+    fn from(record: SearchResultRecord) -> Self {
+        Self {
+            entity_type: record.entity_type,
+            entity_id: record.entity_id,
+            title: record.title,
+            snippet: record.snippet,
+            updated_at_ms: record.updated_at_ms,
+        }
+    }
+}
+
+fn search_error(error: SearchError) -> TaskCommandErrorDto {
+    TaskCommandErrorDto {
+        code: error.code(),
+        message: error.safe_message(),
+    }
+}
+
+#[tauri::command]
+pub(crate) fn search_query(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: SearchQueryDto,
+) -> Result<Vec<SearchResultDto>, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    let limit = input.limit.unwrap_or(50);
+    SearchDbService::query(
+        &connection,
+        SearchQueryInput {
+            raw_query: input.query,
+            limit,
+        },
+    )
+    .map(|records| records.into_iter().map(SearchResultDto::from).collect())
+    .map_err(search_error)
 }
 
 #[tauri::command]
