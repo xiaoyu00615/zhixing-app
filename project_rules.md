@@ -193,11 +193,25 @@ Timeline 当前不得自行定义为甘特图，也不得因此提前增加 `sta
 
 如保留 `@`，其语义为引用本地实体，不表示 @人员。
 
-## 10. Document / Diary / Note 冻结规则
+## 10. Diary / Note 冻结规则
 
-Diary 与 Note 在产品层是两个独立模块；数据层优先共用 `Document`，通过 `type = diary | note` 区分。
+Diary 与 Note 在产品层是两个独立模块；在架构层是**两个独立领域（separate domains）**，不是 `Document` + `type = diary | note` 的统一实体。
 
-`tag_ids`、`attachment_ids` 不作为 Document 的数组字段；它们是实体关联关系。
+- 各自独立的领域模型：`src/note/model.ts` 与 `src/diary/model.ts`；
+- 各自独立的 Repository 契约：`NoteRepository` 与 `DiaryRepository`；
+- 各自独立的 Application Service 与错误语义：`NoteApplicationError` 与 `DiaryApplicationError`；
+- 各自独立的持久化表：`notes` 与 `diary_entries`（均由 Migration 12 `0012_add_notes_and_diary` 建立）。
+
+二者允许的复用（Reuse Before Create，composition over premature genericization）：
+
+- 共享校验：`@/shared/validation` 中的 canonical lowercase UUID 与非负 safe-integer ms timestamp 校验；
+- 共享 Web 持久化基础设施：`WebTaskRepository` 共享 generation / lease / dispose 生命周期，Diary 仅是另一个使用该 generation 的 repository；
+- 共享 Worker / client / database 生命周期；
+- 共享 UI primitives 与实现模式（如 NotesPage 与 DiaryPage 的 workspace / autosave / StrictMode 模式）。
+
+严禁引入：`DocumentRepository`、`DocumentService`、`BaseDocument`、`GenericCrud`，或任何以 `type = note | diary` 区分的统一 Document 实体。
+
+`tag_ids`、`attachment_ids` 不作为实体的数组字段；它们是实体关联关系。
 
 Diary 使用独立逻辑日期字段，暂命名 `diary_date`，与 `created_at / updated_at` 分离，以支持补写过去日期。
 
