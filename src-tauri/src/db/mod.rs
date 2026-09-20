@@ -10,3 +10,6 @@ pub mod error;
 pub mod migration;
 pub mod policy;
 pub mod snapshot;
+
+#[cfg(test)]
+mod search_index_tests;

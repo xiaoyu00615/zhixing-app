@@ -2201,7 +2201,7 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(history.len(), 12);
+        assert_eq!(history.len(), 13);
         assert_eq!(history[5], (6, "0006_add_canvas_core".into()));
         assert_eq!(history[6], (7, "0007_add_canvas_edges".into()));
         assert_eq!(history[7], (8, "0008_add_sticky_canvas_nodes".into()));
@@ -2209,6 +2209,7 @@ mod tests {
         assert_eq!(history[9], (10, "0010_add_canvas_node_boxes".into()));
         assert_eq!(history[10], (11, "0011_add_canvas_node_soft_delete".into()));
         assert_eq!(history[11], (12, "0012_add_notes_and_diary".into()));
+        assert_eq!(history[12], (13, "0013_add_global_search".into()));
         for table in ["canvases", "canvas_nodes", "canvas_edges"] {
             let exists: i64 = connection
                 .query_row(
@@ -2415,7 +2416,7 @@ mod tests {
                 .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),
-            12
+            13
         );
 
         CanvasDbService::create_text_node(
@@ -2803,7 +2804,7 @@ mod tests {
                 .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),
-            12
+            13
         );
         assert_eq!(
             CanvasDbService::get_canvas(&connection, CANVAS_ID)

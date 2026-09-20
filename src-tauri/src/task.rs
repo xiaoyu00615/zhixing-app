@@ -960,6 +960,7 @@ mod tests {
                 (10, "0010_add_canvas_node_boxes".to_string()),
                 (11, "0011_add_canvas_node_soft_delete".to_string()),
                 (12, "0012_add_notes_and_diary".to_string()),
+                (13, "0013_add_global_search".to_string()),
             ]
         );
 
@@ -1054,7 +1055,7 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(history, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(history, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
 
         let foreign_keys: Vec<(String, String, String)> = connection
             .prepare("PRAGMA foreign_key_list('tasks')")
