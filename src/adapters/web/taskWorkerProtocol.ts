@@ -72,6 +72,7 @@ import {
   type SoftDeleteDiaryEntryInput,
   type UpdateDiaryEntryInput,
 } from '@/diary/repository'
+import { isSearchRepositoryErrorCode } from '@/search/model'
 
 export type WebPersistenceCapability =
   | { readonly status: 'AVAILABLE' }
@@ -345,6 +346,11 @@ export type TaskWorkerRequest =
       readonly requestId: number
       readonly type: 'diary.restore'
       readonly input: RestoreDiaryEntryInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'search.query'
+      readonly input: { readonly query: string; readonly limit: number }
     }
   | { readonly requestId: number; readonly type: 'shutdown' }
 
@@ -1049,6 +1055,21 @@ export function parseTaskWorkerRequest(
             input: value.input,
           }
         : null
+    case 'search.query': {
+      const input = value.input
+      if (
+        !isRecord(input) ||
+        typeof input.query !== 'string' ||
+        !Number.isSafeInteger(input.limit)
+      ) {
+        return null
+      }
+      return {
+        requestId: value.requestId,
+        type: value.type,
+        input: { query: input.query, limit: input.limit as number },
+      }
+    }
     default:
       return null
   }
@@ -1181,6 +1202,42 @@ export function parseDiaryWorkerResponse(
   }
 
   if (!isRecord(value.error) || !isDiaryRepositoryErrorCode(value.error.code)) {
+    return null
+  }
+
+  return {
+    requestId: value.requestId,
+    ok: false,
+    error: { code: value.error.code },
+  }
+}
+
+export function parseSearchWorkerResponse(
+  value: unknown,
+): TaskWorkerResponse | null {
+  if (
+    !isRecord(value) ||
+    !isRequestId(value.requestId) ||
+    typeof value.ok !== 'boolean'
+  ) {
+    return null
+  }
+
+  if (value.ok) {
+    if (!('result' in value)) {
+      return null
+    }
+    return {
+      requestId: value.requestId,
+      ok: true,
+      result: value.result,
+    }
+  }
+
+  if (
+    !isRecord(value.error) ||
+    !isSearchRepositoryErrorCode(value.error.code)
+  ) {
     return null
   }
 

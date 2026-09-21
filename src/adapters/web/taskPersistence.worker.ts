@@ -19,6 +19,7 @@ import type { NoteRepositoryErrorCode } from '@/note/repository'
 import { isNoteRepositoryErrorCode } from '@/note/repository'
 import type { DiaryRepositoryErrorCode } from '@/diary/repository'
 import { isDiaryRepositoryErrorCode } from '@/diary/repository'
+import { isSearchRepositoryErrorCode, type SearchRepositoryErrorCode } from '@/search/model'
 
 type DiaryOperationType =
   | 'diary.create'
@@ -91,6 +92,22 @@ function isNoteRequestType(value: unknown): boolean {
     isRecord(value) &&
     typeof value.type === 'string' &&
     value.type.startsWith('note.')
+  )
+}
+
+type SearchOperationType = 'search.query'
+
+const SEARCH_OPERATION_TYPES = new Set<SearchOperationType>(['search.query'])
+
+function isSearchOperation(type: string): boolean {
+  return SEARCH_OPERATION_TYPES.has(type as SearchOperationType)
+}
+
+function isSearchRequestType(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.type === 'string' &&
+    value.type.startsWith('search.')
   )
 }
 const DATABASE_FILENAME = '/zhixing.db'
@@ -193,6 +210,15 @@ function diaryFailure(requestId: number, code: DiaryRepositoryErrorCode): void {
   workerScope.postMessage(response)
 }
 
+function searchFailure(requestId: number, code: SearchRepositoryErrorCode): void {
+  const response: TaskWorkerResponse = {
+    requestId,
+    ok: false,
+    error: { code },
+  }
+  workerScope.postMessage(response)
+}
+
 async function handleRequest(value: unknown): Promise<void> {
   const request = parseTaskWorkerRequest(value)
   if (request === null) {
@@ -202,6 +228,8 @@ async function handleRequest(value: unknown): Promise<void> {
         noteFailure(requestId, 'PERSISTENCE_ERROR')
       } else if (isDiaryRequestType(value)) {
         diaryFailure(requestId, 'PERSISTENCE_ERROR')
+      } else if (isSearchRequestType(value)) {
+        searchFailure(requestId, 'PERSISTENCE_ERROR')
       } else {
         failure(requestId, 'PERSISTENCE_FAILED')
       }
@@ -228,8 +256,31 @@ async function handleRequest(value: unknown): Promise<void> {
       noteFailure(request.requestId, 'PERSISTENCE_ERROR')
     } else if (isDiaryOperation(request.type)) {
       diaryFailure(request.requestId, 'PERSISTENCE_ERROR')
+    } else if (isSearchOperation(request.type)) {
+      searchFailure(request.requestId, 'PERSISTENCE_ERROR')
     } else {
       failure(request.requestId, 'PERSISTENCE_UNAVAILABLE')
+    }
+    return
+  }
+
+  if (isSearchOperation(request.type)) {
+    try {
+      switch (request.type) {
+        case 'search.query':
+          success(
+            request.requestId,
+            state.database.searchQuery(request.input),
+          )
+          return
+      }
+    } catch (error: unknown) {
+      const code: SearchRepositoryErrorCode =
+        error instanceof TaskDatabaseError &&
+        isSearchRepositoryErrorCode(error.code)
+          ? error.code
+          : 'PERSISTENCE_ERROR'
+      searchFailure(request.requestId, code)
     }
     return
   }

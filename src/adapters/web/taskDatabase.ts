@@ -88,6 +88,7 @@ import type {
   UpdateCanvasNodeContentInput,
   UpdateTextNodeInput,
 } from '@/canvas/repository'
+import { type SearchRepositoryErrorCode, type SearchResult } from '@/search/model'
 import {
   runWebMigrations,
   SqliteWebMigrationStore,
@@ -97,6 +98,7 @@ export type WebTaskDatabaseErrorCode =
   | TaskRepositoryErrorCode
   | NoteRepositoryErrorCode
   | DiaryRepositoryErrorCode
+  | SearchRepositoryErrorCode
 
 export class TaskDatabaseError extends Error {
   readonly code: WebTaskDatabaseErrorCode
@@ -483,6 +485,85 @@ function validateDiaryMutationInput(input: {
   if (!isNonNegativeSafeIntegerMilliseconds(input.updatedAtMs)) {
     throw new TaskDatabaseError('PERSISTENCE_ERROR')
   }
+}
+
+// ------------------------------------------------------------
+// Global search query (P5 S3 — Web query layer only).
+// Mirrors the Native SearchDbService query contract over the
+// migration-0013 search_documents + search_fts projection. No writes.
+// The derived projection only ever contains active rows, so no
+// deleted_at_ms filter is needed (matches the Native query path).
+// ------------------------------------------------------------
+
+const SEARCH_SNIPPET_MAX_LEN = 128
+
+function searchSplitTerms(raw: string): string[] {
+  return raw.split(/\s+/).filter((term) => term.length > 0)
+}
+
+function searchCharCount(value: string): number {
+  return [...value].length
+}
+
+function searchEscapeFts(term: string): string {
+  return term.replace(/"/g, '""')
+}
+
+function searchLikePattern(term: string): string {
+  const escaped = term
+    .replace(/\\/g, '\\\\')
+    .replace(/%/g, '\\%')
+    .replace(/_/g, '\\_')
+  return `%${escaped}%`
+}
+
+function searchFindCharIndex(haystack: string, needle: string): number | null {
+  if (needle.length === 0) return null
+  const h = [...haystack]
+  const n = [...needle]
+  if (n.length > h.length) return null
+  const hLow = h.flatMap((c) => [...c.toLowerCase()])
+  const nLow = n.flatMap((c) => [...c.toLowerCase()])
+  for (let i = 0; i <= hLow.length - nLow.length; i++) {
+    let match = true
+    for (let j = 0; j < nLow.length; j++) {
+      if (hLow[i + j] !== nLow[j]) {
+        match = false
+        break
+      }
+    }
+    if (match) return i
+  }
+  return null
+}
+
+function searchWindowAround(text: string, matchCharIdx: number): string {
+  const chars = [...text]
+  if (chars.length === 0) return ''
+  const prefix = Math.floor(SEARCH_SNIPPET_MAX_LEN / 3)
+  let start = Math.max(0, matchCharIdx - prefix)
+  if (start + SEARCH_SNIPPET_MAX_LEN > chars.length) {
+    start = Math.max(0, chars.length - SEARCH_SNIPPET_MAX_LEN)
+  }
+  const end = Math.min(chars.length, start + SEARCH_SNIPPET_MAX_LEN)
+  return chars.slice(start, end).join('')
+}
+
+function searchMakeSnippet(
+  title: string,
+  body: string,
+  terms: string[],
+): string {
+  for (const term of terms) {
+    const idx = searchFindCharIndex(title, term)
+    if (idx !== null) return searchWindowAround(title, idx)
+  }
+  for (const term of terms) {
+    const idx = searchFindCharIndex(body, term)
+    if (idx !== null) return searchWindowAround(body, idx)
+  }
+  const src = body.length > 0 ? body : title
+  return searchWindowAround(src, 0)
 }
 
 export class WebTaskDatabase {
@@ -2807,6 +2888,127 @@ export class WebTaskDatabase {
     ) {
       throw new TaskDatabaseError('PERSISTENCE_FAILED')
     }
+  }
+
+  searchQuery(input: {
+    readonly query: string
+    readonly limit: number
+  }): SearchResult[] {
+    const limit = input.limit
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+      throw new TaskDatabaseError('INVALID_QUERY')
+    }
+
+    const terms = searchSplitTerms(input.query)
+    if (terms.length > 16) {
+      throw new TaskDatabaseError('INVALID_QUERY')
+    }
+    if (terms.length === 0) {
+      return []
+    }
+
+    const longTerms = terms.filter((term) => searchCharCount(term) >= 3)
+    const shortTerms = terms.filter((term) => searchCharCount(term) < 3)
+
+    try {
+      if (longTerms.length === 0) {
+        return this.searchQueryShortOnly(shortTerms, limit, terms)
+      }
+      return this.searchQueryWithFts(longTerms, shortTerms, limit, terms)
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_ERROR')
+    }
+  }
+
+  private searchQueryWithFts(
+    longTerms: string[],
+    shortTerms: string[],
+    limit: number,
+    terms: string[],
+  ): SearchResult[] {
+    const matchExpr = longTerms
+      .map((term) => `"${searchEscapeFts(term)}"`)
+      .join(' AND ')
+
+    const bind: Array<string | number> = [matchExpr]
+    let sql =
+      'SELECT d.id, d.entity_type, d.entity_id, d.title, d.body, d.updated_at_ms ' +
+      'FROM search_documents d ' +
+      'JOIN search_fts ON d.id = search_fts.rowid ' +
+      'WHERE search_fts MATCH ?'
+    for (const term of shortTerms) {
+      const pattern = searchLikePattern(term)
+      sql +=
+        " AND (d.title LIKE ? ESCAPE '\\' OR d.body LIKE ? ESCAPE '\\')"
+      bind.push(pattern, pattern)
+    }
+    sql +=
+      ' ORDER BY bm25(search_fts) ASC, d.updated_at_ms DESC, d.id ASC LIMIT ?'
+    bind.push(limit)
+
+    return this.mapSearchRows(
+      this.#database.selectObjects(sql, bind),
+      terms,
+    )
+  }
+
+  private searchQueryShortOnly(
+    shortTerms: string[],
+    limit: number,
+    terms: string[],
+  ): SearchResult[] {
+    const clauses: string[] = []
+    const bind: Array<string | number> = []
+    for (const term of shortTerms) {
+      clauses.push(
+        "(d.title LIKE ? ESCAPE '\\' OR d.body LIKE ? ESCAPE '\\')",
+      )
+      const pattern = searchLikePattern(term)
+      bind.push(pattern, pattern)
+    }
+    const where = clauses.join(' AND ')
+    const sql =
+      'SELECT d.id, d.entity_type, d.entity_id, d.title, d.body, d.updated_at_ms ' +
+      `FROM search_documents d WHERE ${where} ` +
+      'ORDER BY d.updated_at_ms DESC, d.id ASC LIMIT ?'
+    bind.push(limit)
+
+    return this.mapSearchRows(
+      this.#database.selectObjects(sql, bind),
+      terms,
+    )
+  }
+
+  private mapSearchRows(
+    rows: Record<string, unknown>[],
+    terms: string[],
+  ): SearchResult[] {
+    return rows.map((row) => {
+      const entityType = row.entity_type
+      const entityId = row.entity_id
+      const title = row.title
+      const body = row.body
+      const updatedAtMs = row.updated_at_ms
+      if (
+        typeof entityType !== 'string' ||
+        typeof entityId !== 'string' ||
+        typeof title !== 'string' ||
+        typeof body !== 'string' ||
+        typeof updatedAtMs !== 'number' ||
+        !Number.isSafeInteger(updatedAtMs) ||
+        updatedAtMs < 0
+      ) {
+        throw new TaskDatabaseError('PERSISTENCE_ERROR')
+      }
+      return {
+        entityType: entityType as SearchResult['entityType'],
+        entityId,
+        title,
+        snippet: searchMakeSnippet(title, body, terms),
+        updatedAtMs,
+      }
+    })
   }
 
   private validateNodeInput(

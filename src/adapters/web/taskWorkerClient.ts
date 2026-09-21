@@ -33,6 +33,7 @@ import type {
   UpdateDiaryEntryInput,
 } from '@/diary/repository'
 import { isDiaryRepositoryErrorCode } from '@/diary/repository'
+import { isSearchRepositoryErrorCode, type SearchRepositoryErrorCode } from '@/search/model'
 import type {
   CreateCanvasInput,
   CreateCanvasEdgeInput,
@@ -54,6 +55,7 @@ import {
   extractRequestId,
   parseDiaryWorkerResponse,
   parseNoteWorkerResponse,
+  parseSearchWorkerResponse,
   parseTaskWorkerResponse,
   parseWebPersistenceCapability,
   type TaskWorkerRequest,
@@ -98,12 +100,23 @@ export class DiaryWorkerClientError extends Error {
   }
 }
 
+export class SearchWorkerClientError extends Error {
+  readonly code: SearchRepositoryErrorCode
+
+  constructor(code: SearchRepositoryErrorCode) {
+    super('Search persistence worker request failed.')
+    this.name = 'SearchWorkerClientError'
+    this.code = code
+  }
+}
+
 type WorkerTransportFailure = 'UNAVAILABLE' | 'FAILED'
 
 type ClientRequestError =
   | TaskWorkerClientError
   | NoteWorkerClientError
   | DiaryWorkerClientError
+  | SearchWorkerClientError
 
 type ParsedClientResponse =
   | { readonly ok: true; readonly result: unknown }
@@ -169,6 +182,24 @@ const DIARY_REQUEST_OPTIONS: RequestOptions = {
     return { ok: false, error: new DiaryWorkerClientError(code) }
   },
   mapTransportFailure: () => new DiaryWorkerClientError('PERSISTENCE_ERROR'),
+}
+
+const SEARCH_REQUEST_OPTIONS: RequestOptions = {
+  parseResponse: (value) => {
+    const response = parseSearchWorkerResponse(value)
+    if (response === null) {
+      return null
+    }
+    if (response.ok) {
+      return { ok: true, result: response.result }
+    }
+    const code = response.error.code
+    if (!isSearchRepositoryErrorCode(code)) {
+      return null
+    }
+    return { ok: false, error: new SearchWorkerClientError(code) }
+  },
+  mapTransportFailure: () => new SearchWorkerClientError('PERSISTENCE_ERROR'),
 }
 
 interface PendingRequest {
@@ -708,6 +739,20 @@ export class TaskWorkerClient {
     )
   }
 
+  searchQuery(input: {
+    readonly query: string
+    readonly limit: number
+  }): Promise<unknown> {
+    return this.send(
+      (requestId) => ({
+        requestId,
+        type: 'search.query',
+        input,
+      }),
+      SEARCH_REQUEST_OPTIONS,
+    )
+  }
+
   async shutdown(): Promise<void> {
     if (this.#terminated) {
       return
@@ -797,6 +842,9 @@ export class TaskWorkerClient {
       return true
     }
     if (parseDiaryWorkerResponse(value) !== null) {
+      return true
+    }
+    if (parseSearchWorkerResponse(value) !== null) {
       return true
     }
     return false
