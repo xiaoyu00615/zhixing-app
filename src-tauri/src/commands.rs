@@ -32,6 +32,7 @@ use crate::task::{
 };
 use crate::RuntimeStatus;
 use crate::search_db::{SearchDbService, SearchError, SearchQueryInput, SearchResultRecord};
+use crate::trash_db::{TrashDbService, TrashError, TrashItemRecord};
 
 /// 最小健康检查命令：前端 → Tauri invoke → Rust 返回 "pong"。
 ///
@@ -1737,6 +1738,44 @@ pub(crate) fn search_query(
     )
     .map(|records| records.into_iter().map(SearchResultDto::from).collect())
     .map_err(search_error)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TrashItemDto {
+    entity_type: String,
+    entity_id: String,
+    title: String,
+    deleted_at_ms: i64,
+}
+
+impl From<TrashItemRecord> for TrashItemDto {
+    fn from(record: TrashItemRecord) -> Self {
+        Self {
+            entity_type: record.entity_type,
+            entity_id: record.entity_id,
+            title: record.title,
+            deleted_at_ms: record.deleted_at_ms,
+        }
+    }
+}
+
+fn trash_error(error: TrashError) -> TaskCommandErrorDto {
+    TaskCommandErrorDto {
+        code: error.code(),
+        message: error.safe_message(),
+    }
+}
+
+#[tauri::command]
+pub(crate) fn trash_list(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+) -> Result<Vec<TrashItemDto>, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    TrashDbService::list(&connection)
+        .map(|records| records.into_iter().map(TrashItemDto::from).collect())
+        .map_err(trash_error)
 }
 
 #[tauri::command]

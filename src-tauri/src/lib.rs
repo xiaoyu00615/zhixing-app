@@ -38,6 +38,7 @@ mod search_db;
 mod storage;
 mod tag;
 mod task;
+mod trash_db;
 
 use bootstrap::{BootstrapService, BootstrapState};
 use storage::{paths as storage_paths, DataRootService, InitMode};
@@ -245,7 +246,8 @@ pub fn run() {
             commands::diary_change_date,
             commands::diary_soft_delete,
             commands::diary_restore,
-            commands::search_query
+            commands::search_query,
+            commands::trash_list
         ])
         .setup(|app| {
             // 🔒 冻结 §3：路径统一通过 PathResolver。
