@@ -1,3 +1,4 @@
+import { StrictMode } from 'react'
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
@@ -5,7 +6,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import type { SearchEntityType, SearchResult } from '@/search/model'
 import { SearchPage } from '@/pages/SearchPage'
-import type { OpenSearchRuntime } from '@/search/runtime.types'
+import type { OpenSearchRuntime, SearchRuntime } from '@/search/runtime.types'
 import { SearchApplicationError, type SearchService } from '@/search/service'
 
 afterEach(() => {
@@ -67,6 +68,23 @@ async function renderReadyPage(service: SearchService) {
   const { openRuntime } = resolvedRuntime(service)
   const view = renderPage(openRuntime)
   await screen.findByText('输入关键词搜索任务、笔记、日记和画布')
+  return view
+}
+
+/**
+ * A runtime that stays "loading" until the test resolves it, which is how the
+ * real Web Worker / sqlite-wasm startup window is reproduced.
+ */
+function pendingRuntime() {
+  const dispose = vi.fn(() => Promise.resolve())
+  const opening = deferred<SearchRuntime>()
+  const openRuntime = vi.fn<OpenSearchRuntime>(() => opening.promise)
+  return { openRuntime, opening, dispose }
+}
+
+async function renderLoadingPage(openRuntime: OpenSearchRuntime) {
+  const view = renderPage(openRuntime)
+  await screen.findByRole('status', { name: '正在加载搜索' })
   return view
 }
 
@@ -383,5 +401,110 @@ describe('SearchPage', () => {
       await screen.findByText('输入关键词搜索任务、笔记、日记和画布'),
     ).toBeInTheDocument()
     await waitFor(() => expect(openRuntime).toHaveBeenCalledTimes(2))
+  })
+
+  test('runs an Enter submission made while the runtime is still loading', async () => {
+    const { openRuntime, opening, dispose } = pendingRuntime()
+    const search = vi.fn<SearchService['search']>(() =>
+      Promise.resolve([makeResult('task', 'task-1')]),
+    )
+    await renderLoadingPage(openRuntime)
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('搜索关键词'), '任务')
+    await user.keyboard('{Enter}')
+
+    expect(search).not.toHaveBeenCalled()
+
+    act(() => {
+      opening.resolve({ service: createService(search), dispose })
+    })
+    await act(async () => {})
+
+    expect(search).toHaveBeenCalledTimes(1)
+    expect(search).toHaveBeenCalledWith('任务')
+    expect(await screen.findByRole('list', { name: '搜索结果' })).toBeVisible()
+  })
+
+  test('the latest submission while the runtime is loading is the one that runs', async () => {
+    const { openRuntime, opening, dispose } = pendingRuntime()
+    const search = vi.fn<SearchService['search']>(() => Promise.resolve([]))
+    await renderLoadingPage(openRuntime)
+    const user = userEvent.setup()
+    const input = screen.getByLabelText('搜索关键词')
+
+    await user.type(input, 'A')
+    await user.click(screen.getByRole('button', { name: '搜索' }))
+    await user.clear(input)
+    await user.type(input, 'B')
+    await user.click(screen.getByRole('button', { name: '搜索' }))
+
+    act(() => {
+      opening.resolve({ service: createService(search), dispose })
+    })
+    await act(async () => {})
+
+    expect(search).toHaveBeenCalledTimes(1)
+    expect(search).toHaveBeenCalledWith('B')
+    expect(search).not.toHaveBeenCalledWith('A')
+  })
+
+  test('a whitespace-only submission while the runtime is loading is not queued', async () => {
+    const { openRuntime, opening, dispose } = pendingRuntime()
+    const search = vi.fn<SearchService['search']>(() => Promise.resolve([]))
+    await renderLoadingPage(openRuntime)
+
+    await submitQuery('   ')
+
+    act(() => {
+      opening.resolve({ service: createService(search), dispose })
+    })
+    await act(async () => {})
+
+    expect(search).not.toHaveBeenCalled()
+  })
+
+  test('runs a pending submission once under StrictMode', async () => {
+    const { openRuntime, opening, dispose } = pendingRuntime()
+    const search = vi.fn<SearchService['search']>(() =>
+      Promise.resolve([makeResult('task', 'task-1')]),
+    )
+
+    render(
+      <MemoryRouter>
+        <StrictMode>
+          <SearchPage openRuntime={openRuntime} />
+        </StrictMode>
+      </MemoryRouter>,
+    )
+    await screen.findByRole('status', { name: '正在加载搜索' })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('搜索关键词'), '任务')
+    await user.keyboard('{Enter}')
+
+    act(() => {
+      opening.resolve({ service: createService(search), dispose })
+    })
+    await act(async () => {})
+
+    expect(await screen.findByRole('list', { name: '搜索结果' })).toBeVisible()
+    expect(search).toHaveBeenCalledTimes(1)
+  })
+
+  test('does not run a pending submission after unmount', async () => {
+    const { openRuntime, opening, dispose } = pendingRuntime()
+    const search = vi.fn<SearchService['search']>(() => Promise.resolve([]))
+    const view = await renderLoadingPage(openRuntime)
+
+    await submitQuery('任务')
+    view.unmount()
+
+    act(() => {
+      opening.resolve({ service: createService(search), dispose })
+    })
+    await act(async () => {})
+
+    expect(search).not.toHaveBeenCalled()
   })
 })

@@ -1,5 +1,5 @@
 import { RotateCcw, Search } from 'lucide-react'
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 
 import { Button } from '@/components/ui/button'
@@ -108,6 +108,10 @@ export function SearchPage({
 
   const mountedRef = useRef(false)
   const requestIdRef = useRef(0)
+  // An explicit submission made before the Search runtime is ready is held here
+  // so the user never has to press Search twice. Only the latest submission is
+  // kept, and it is consumed exactly once when the service becomes available.
+  const pendingQueryRef = useRef<string | null>(null)
 
   useEffect(() => {
     mountedRef.current = true
@@ -115,6 +119,39 @@ export function SearchPage({
       mountedRef.current = false
     }
   }, [])
+
+  const executeSearch = useCallback(
+    (currentService: SearchService, query: string): void => {
+      requestIdRef.current += 1
+      const requestId = requestIdRef.current
+
+      setView({ kind: 'loading', query })
+
+      void (async () => {
+        try {
+          const results = await currentService.search(query)
+          if (!mountedRef.current || requestId !== requestIdRef.current) {
+            return
+          }
+          setView(
+            results.length === 0
+              ? { kind: 'no-results', query }
+              : { kind: 'results', query, results },
+          )
+        } catch (error: unknown) {
+          if (!mountedRef.current || requestId !== requestIdRef.current) {
+            return
+          }
+          const code =
+            error instanceof SearchApplicationError
+              ? error.code
+              : 'UNAVAILABLE'
+          setView({ kind: 'error', query, code })
+        }
+      })()
+    },
+    [],
+  )
 
   useEffect(() => {
     let active = true
@@ -141,8 +178,15 @@ export function SearchPage({
           await disposeRuntime()
           return
         }
+        // Consume the pending submission before dispatching it, so a replayed
+        // effect execution can never run the same query twice.
+        const pendingQuery = pendingQueryRef.current
+        pendingQueryRef.current = null
         setService(runtime.service)
         setRuntimePhase('ready')
+        if (pendingQuery !== null) {
+          executeSearch(runtime.service, pendingQuery)
+        }
       } catch {
         await disposeRuntime()
         if (active) {
@@ -155,45 +199,27 @@ export function SearchPage({
       active = false
       void disposeRuntime()
     }
-  }, [loadAttempt, openRuntime])
+  }, [executeSearch, loadAttempt, openRuntime])
 
   function runSearch(rawQuery: string): void {
     const query = rawQuery.trim()
     const currentService = service
 
-    requestIdRef.current += 1
-    const requestId = requestIdRef.current
-
     if (query === '') {
+      requestIdRef.current += 1
+      pendingQueryRef.current = null
       setView({ kind: 'empty' })
       return
     }
+
     if (currentService === null) {
+      // The runtime is still starting: remember this explicit submission
+      // instead of dropping it. A newer submission replaces the older one.
+      pendingQueryRef.current = query
       return
     }
 
-    setView({ kind: 'loading', query })
-
-    void (async () => {
-      try {
-        const results = await currentService.search(query)
-        if (!mountedRef.current || requestId !== requestIdRef.current) {
-          return
-        }
-        setView(
-          results.length === 0
-            ? { kind: 'no-results', query }
-            : { kind: 'results', query, results },
-        )
-      } catch (error: unknown) {
-        if (!mountedRef.current || requestId !== requestIdRef.current) {
-          return
-        }
-        const code =
-          error instanceof SearchApplicationError ? error.code : 'UNAVAILABLE'
-        setView({ kind: 'error', query, code })
-      }
-    })()
+    executeSearch(currentService, query)
   }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>): void {
