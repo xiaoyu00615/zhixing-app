@@ -31,6 +31,8 @@ import { isValidLocalDate, localDateFromDate } from '@/shared/validation'
 
 interface DiaryPageProps {
   readonly openRuntime?: OpenDiaryRuntime
+  /** P5 S4: the `?id=` deep-link value supplied by the route. */
+  readonly requestedDiaryId?: string | null
 }
 
 type DiaryPhase = 'loading' | 'ready' | 'error'
@@ -122,7 +124,10 @@ function LoadingState() {
   )
 }
 
-export function DiaryPage({ openRuntime = openDiaryRuntime }: DiaryPageProps) {
+export function DiaryPage({
+  openRuntime = openDiaryRuntime,
+  requestedDiaryId = null,
+}: DiaryPageProps) {
   const [loadAttempt, setLoadAttempt] = useState(0)
   const [phase, setPhase] = useState<DiaryPhase>('loading')
   const [service, setService] = useState<DiaryService | null>(null)
@@ -160,6 +165,28 @@ export function DiaryPage({ openRuntime = openDiaryRuntime }: DiaryPageProps) {
       mountedRef.current = false
     }
   }, [])
+
+  // P5 S4: apply the ?id= deep-link value through the existing selection
+  // mechanism. Diary stays date-oriented internally; the id is resolved to an
+  // already-loaded active entry. Absent, malformed or unknown ids are ignored.
+  // Only a *changed* requested id is applied.
+  const appliedRequestedIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (requestedDiaryId === null || requestedDiaryId === '') {
+      return
+    }
+    if (appliedRequestedIdRef.current === requestedDiaryId) {
+      return
+    }
+    const match = entries.find((entry) => entry.id === requestedDiaryId)
+    if (match === undefined) {
+      return
+    }
+    appliedRequestedIdRef.current = requestedDiaryId
+    void handleSwitchToEntry(match)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestedDiaryId, entries])
 
   useEffect(() => {
     let active = true

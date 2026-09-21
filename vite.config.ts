@@ -44,6 +44,14 @@ export default defineConfig(({ mode }) => {
       import.meta.url,
     ),
   )
+  const searchRuntimeEntry = fileURLToPath(
+    new URL(
+      process.env.TAURI_ENV_PLATFORM === undefined
+        ? './src/search/runtime.ts'
+        : './src/search/runtime.native.ts',
+      import.meta.url,
+    ),
+  )
 
   return {
     plugins: [react(), tailwindcss()],
@@ -73,6 +81,7 @@ export default defineConfig(({ mode }) => {
         { find: /^@\/canvas\/runtime$/, replacement: canvasRuntimeEntry },
         { find: /^@\/note\/runtime$/, replacement: noteRuntimeEntry },
         { find: /^@\/diary\/runtime$/, replacement: diaryRuntimeEntry },
+        { find: /^@\/search\/runtime$/, replacement: searchRuntimeEntry },
         {
           find: '@',
           replacement: fileURLToPath(new URL('./src', import.meta.url)),

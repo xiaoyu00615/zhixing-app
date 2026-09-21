@@ -44,6 +44,8 @@ import { TagApplicationError, type TagService } from '@/tag/service'
 interface TasksPageProps {
   readonly openRuntime?: OpenTaskRuntime
   readonly today?: LocalDate
+  /** P5 S4: the `?id=` deep-link value supplied by the route. */
+  readonly requestedTaskId?: string | null
 }
 
 interface RenameState {
@@ -91,6 +93,7 @@ function EmptyState({ onCreate }: { readonly onCreate: () => void }) {
 export function TasksPage({
   openRuntime = openTaskRuntime,
   today = localDateFromDate(new Date()),
+  requestedTaskId = null,
 }: TasksPageProps) {
   const mountedRef = useRef(false)
   const [loadAttempt, setLoadAttempt] = useState(0)
@@ -147,6 +150,30 @@ export function TasksPage({
       mountedRef.current = false
     }
   }, [])
+
+  // P5 S4: apply the ?id= deep-link value. The URL owns the value; the page
+  // only applies it once it matches an active task. Absent, malformed or
+  // unknown ids are ignored so the page stays usable.
+  // Only a *changed* requested id is applied, so closing the detail panel
+  // manually is never fought by a later list refresh.
+  // The value is applied while rendering instead of inside an effect: the URL
+  // selection lands in the same pass that already has the loaded tasks, so
+  // there is no cascading render and no selection that lags one frame behind.
+  const [appliedRequestedId, setAppliedRequestedId] = useState<string | null>(
+    null,
+  )
+
+  if (
+    requestedTaskId !== null &&
+    requestedTaskId !== '' &&
+    appliedRequestedId !== requestedTaskId
+  ) {
+    const match = tasks.find((task) => task.id === requestedTaskId)
+    if (match !== undefined) {
+      setAppliedRequestedId(requestedTaskId)
+      setDetailTaskId(match.id)
+    }
+  }
 
   useEffect(() => {
     let active = true

@@ -18,6 +18,8 @@ import { cn } from '@/lib/utils'
 
 interface NotesPageProps {
   readonly openRuntime?: OpenNoteRuntime
+  /** P5 S4: the `?id=` deep-link value supplied by the route. */
+  readonly requestedNoteId?: string | null
 }
 
 type NotesPhase = 'loading' | 'ready' | 'error'
@@ -73,7 +75,10 @@ function LoadingState() {
   )
 }
 
-export function NotesPage({ openRuntime = openNoteRuntime }: NotesPageProps) {
+export function NotesPage({
+  openRuntime = openNoteRuntime,
+  requestedNoteId = null,
+}: NotesPageProps) {
   const [loadAttempt, setLoadAttempt] = useState(0)
   const [phase, setPhase] = useState<NotesPhase>('loading')
   const [service, setService] = useState<NoteService | null>(null)
@@ -102,6 +107,27 @@ export function NotesPage({ openRuntime = openNoteRuntime }: NotesPageProps) {
       mountedRef.current = false
     }
   }, [])
+
+  // P5 S4: apply the ?id= deep-link value through the existing selection
+  // mechanism (no second editor, no autosave bypass). Absent, malformed or
+  // unknown ids are ignored. Only a *changed* requested id is applied.
+  const appliedRequestedIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (requestedNoteId === null || requestedNoteId === '') {
+      return
+    }
+    if (appliedRequestedIdRef.current === requestedNoteId) {
+      return
+    }
+    const match = notes.find((note) => note.id === requestedNoteId)
+    if (match === undefined) {
+      return
+    }
+    appliedRequestedIdRef.current = requestedNoteId
+    void handleSwitchToNote(match)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestedNoteId, notes])
 
   useEffect(() => {
     let active = true
