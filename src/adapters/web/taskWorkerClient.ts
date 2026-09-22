@@ -34,6 +34,7 @@ import type {
 } from '@/diary/repository'
 import { isDiaryRepositoryErrorCode } from '@/diary/repository'
 import { isSearchRepositoryErrorCode, type SearchRepositoryErrorCode } from '@/search/model'
+import { isTrashRepositoryErrorCode, type TrashRepositoryErrorCode } from '@/trash/model'
 import type {
   CreateCanvasInput,
   CreateCanvasEdgeInput,
@@ -57,6 +58,7 @@ import {
   parseNoteWorkerResponse,
   parseSearchWorkerResponse,
   parseTaskWorkerResponse,
+  parseTrashWorkerResponse,
   parseWebPersistenceCapability,
   type TaskWorkerRequest,
   type WebPersistenceCapability,
@@ -106,6 +108,16 @@ export class SearchWorkerClientError extends Error {
   constructor(code: SearchRepositoryErrorCode) {
     super('Search persistence worker request failed.')
     this.name = 'SearchWorkerClientError'
+    this.code = code
+  }
+}
+
+export class TrashWorkerClientError extends Error {
+  readonly code: TrashRepositoryErrorCode
+
+  constructor(code: TrashRepositoryErrorCode) {
+    super('Trash persistence worker request failed.')
+    this.name = 'TrashWorkerClientError'
     this.code = code
   }
 }
@@ -200,6 +212,24 @@ const SEARCH_REQUEST_OPTIONS: RequestOptions = {
     return { ok: false, error: new SearchWorkerClientError(code) }
   },
   mapTransportFailure: () => new SearchWorkerClientError('PERSISTENCE_ERROR'),
+}
+
+const TRASH_REQUEST_OPTIONS: RequestOptions = {
+  parseResponse: (value) => {
+    const response = parseTrashWorkerResponse(value)
+    if (response === null) {
+      return null
+    }
+    if (response.ok) {
+      return { ok: true, result: response.result }
+    }
+    const code = response.error.code
+    if (!isTrashRepositoryErrorCode(code)) {
+      return null
+    }
+    return { ok: false, error: new TrashWorkerClientError(code) }
+  },
+  mapTransportFailure: () => new TrashWorkerClientError('PERSISTENCE_ERROR'),
 }
 
 interface PendingRequest {
@@ -753,6 +783,16 @@ export class TaskWorkerClient {
     )
   }
 
+  listTrash(): Promise<unknown> {
+    return this.send(
+      (requestId) => ({
+        requestId,
+        type: 'trash.list',
+      }),
+      TRASH_REQUEST_OPTIONS,
+    )
+  }
+
   async shutdown(): Promise<void> {
     if (this.#terminated) {
       return
@@ -845,6 +885,9 @@ export class TaskWorkerClient {
       return true
     }
     if (parseSearchWorkerResponse(value) !== null) {
+      return true
+    }
+    if (parseTrashWorkerResponse(value) !== null) {
       return true
     }
     return false

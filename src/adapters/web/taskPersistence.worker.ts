@@ -20,6 +20,7 @@ import { isNoteRepositoryErrorCode } from '@/note/repository'
 import type { DiaryRepositoryErrorCode } from '@/diary/repository'
 import { isDiaryRepositoryErrorCode } from '@/diary/repository'
 import { isSearchRepositoryErrorCode, type SearchRepositoryErrorCode } from '@/search/model'
+import { isTrashRepositoryErrorCode, type TrashRepositoryErrorCode } from '@/trash/model'
 
 type DiaryOperationType =
   | 'diary.create'
@@ -108,6 +109,22 @@ function isSearchRequestType(value: unknown): boolean {
     isRecord(value) &&
     typeof value.type === 'string' &&
     value.type.startsWith('search.')
+  )
+}
+
+type TrashOperationType = 'trash.list'
+
+const TRASH_OPERATION_TYPES = new Set<TrashOperationType>(['trash.list'])
+
+function isTrashOperation(type: string): boolean {
+  return TRASH_OPERATION_TYPES.has(type as TrashOperationType)
+}
+
+function isTrashRequestType(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.type === 'string' &&
+    value.type.startsWith('trash.')
   )
 }
 const DATABASE_FILENAME = '/zhixing.db'
@@ -219,6 +236,15 @@ function searchFailure(requestId: number, code: SearchRepositoryErrorCode): void
   workerScope.postMessage(response)
 }
 
+function trashFailure(requestId: number, code: TrashRepositoryErrorCode): void {
+  const response: TaskWorkerResponse = {
+    requestId,
+    ok: false,
+    error: { code },
+  }
+  workerScope.postMessage(response)
+}
+
 async function handleRequest(value: unknown): Promise<void> {
   const request = parseTaskWorkerRequest(value)
   if (request === null) {
@@ -230,6 +256,8 @@ async function handleRequest(value: unknown): Promise<void> {
         diaryFailure(requestId, 'PERSISTENCE_ERROR')
       } else if (isSearchRequestType(value)) {
         searchFailure(requestId, 'PERSISTENCE_ERROR')
+      } else if (isTrashRequestType(value)) {
+        trashFailure(requestId, 'PERSISTENCE_ERROR')
       } else {
         failure(requestId, 'PERSISTENCE_FAILED')
       }
@@ -258,6 +286,8 @@ async function handleRequest(value: unknown): Promise<void> {
       diaryFailure(request.requestId, 'PERSISTENCE_ERROR')
     } else if (isSearchOperation(request.type)) {
       searchFailure(request.requestId, 'PERSISTENCE_ERROR')
+    } else if (isTrashOperation(request.type)) {
+      trashFailure(request.requestId, 'PERSISTENCE_ERROR')
     } else {
       failure(request.requestId, 'PERSISTENCE_UNAVAILABLE')
     }
@@ -281,6 +311,24 @@ async function handleRequest(value: unknown): Promise<void> {
           ? error.code
           : 'PERSISTENCE_ERROR'
       searchFailure(request.requestId, code)
+    }
+    return
+  }
+
+  if (isTrashOperation(request.type)) {
+    try {
+      switch (request.type) {
+        case 'trash.list':
+          success(request.requestId, state.database.listTrash())
+          return
+      }
+    } catch (error: unknown) {
+      const code: TrashRepositoryErrorCode =
+        error instanceof TaskDatabaseError &&
+        isTrashRepositoryErrorCode(error.code)
+          ? error.code
+          : 'PERSISTENCE_ERROR'
+      trashFailure(request.requestId, code)
     }
     return
   }

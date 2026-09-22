@@ -37,7 +37,9 @@ import { WebCanvasRepository } from '@/adapters/web/WebCanvasRepository'
 import { WebNoteRepository } from '@/adapters/web/WebNoteRepository'
 import { WebDiaryRepository } from '@/adapters/web/WebDiaryRepository'
 import { WebSearchRepository } from '@/adapters/web/WebSearchRepository'
+import { WebTrashRepository } from '@/adapters/web/WebTrashRepository'
 import type { SearchRepository } from '@/search/repository'
+import type { TrashRepository } from '@/trash/repository'
 
 function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
   if (!isRecord(value)) {
@@ -376,6 +378,7 @@ export type OpenWebTaskRepositoryResult =
       readonly noteRepository: import('@/note/repository').NoteRepository
       readonly diaryRepository: import('@/diary/repository').DiaryRepository
       readonly searchRepository: SearchRepository
+      readonly trashRepository: TrashRepository
       readonly dispose: () => Promise<void>
     }
   | {
@@ -393,6 +396,7 @@ interface SharedWebPersistenceRepositories {
   readonly noteRepository: import('@/note/repository').NoteRepository
   readonly diaryRepository: import('@/diary/repository').DiaryRepository
   readonly searchRepository: SearchRepository
+  readonly trashRepository: TrashRepository
 }
 
 type SharedWebPersistenceOutcome =
@@ -425,6 +429,7 @@ function createSharedRepositories(
     noteRepository: new WebNoteRepository(client),
     diaryRepository: new WebDiaryRepository(client),
     searchRepository: new WebSearchRepository(client),
+    trashRepository: new WebTrashRepository(client),
   }
 }
 
@@ -535,6 +540,7 @@ async function openSharedWebTaskRepository(): Promise<OpenWebTaskRepositoryResul
     noteRepository: outcome.repositories.noteRepository,
     diaryRepository: outcome.repositories.diaryRepository,
     searchRepository: outcome.repositories.searchRepository,
+    trashRepository: outcome.repositories.trashRepository,
     dispose: createSharedLeaseDispose(generation),
   }
 }
@@ -568,6 +574,7 @@ async function openUnsharedWebTaskRepository(
       noteRepository: new WebNoteRepository(client),
       diaryRepository: new WebDiaryRepository(client),
       searchRepository: new WebSearchRepository(client),
+      trashRepository: new WebTrashRepository(client),
       dispose: () => client.shutdown(),
     }
   } catch {

@@ -17,6 +17,7 @@ import {
   type SetTaskUrgencyInput,
   type TrashTaskInput,
 } from '@/task/repository'
+import { isTrashRepositoryErrorCode } from '@/trash/model'
 import type {
   CreateProjectInput,
   RenameProjectInput,
@@ -352,6 +353,7 @@ export type TaskWorkerRequest =
       readonly type: 'search.query'
       readonly input: { readonly query: string; readonly limit: number }
     }
+  | { readonly requestId: number; readonly type: 'trash.list' }
   | { readonly requestId: number; readonly type: 'shutdown' }
 
 export interface TaskWorkerSuccessResponse {
@@ -1070,6 +1072,9 @@ export function parseTaskWorkerRequest(
         input: { query: input.query, limit: input.limit as number },
       }
     }
+    case 'trash.list':
+      // Read-only request without an input payload.
+      return { requestId: value.requestId, type: value.type }
     default:
       return null
   }
@@ -1237,6 +1242,42 @@ export function parseSearchWorkerResponse(
   if (
     !isRecord(value.error) ||
     !isSearchRepositoryErrorCode(value.error.code)
+  ) {
+    return null
+  }
+
+  return {
+    requestId: value.requestId,
+    ok: false,
+    error: { code: value.error.code },
+  }
+}
+
+export function parseTrashWorkerResponse(
+  value: unknown,
+): TaskWorkerResponse | null {
+  if (
+    !isRecord(value) ||
+    !isRequestId(value.requestId) ||
+    typeof value.ok !== 'boolean'
+  ) {
+    return null
+  }
+
+  if (value.ok) {
+    if (!('result' in value)) {
+      return null
+    }
+    return {
+      requestId: value.requestId,
+      ok: true,
+      result: value.result,
+    }
+  }
+
+  if (
+    !isRecord(value.error) ||
+    !isTrashRepositoryErrorCode(value.error.code)
   ) {
     return null
   }

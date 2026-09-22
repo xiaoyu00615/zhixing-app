@@ -5,6 +5,7 @@ import {
   WebTaskRepository,
   type OpenWebTaskRepositoryResult,
 } from '@/adapters/web/WebTaskRepository'
+import { WebTrashRepository } from '@/adapters/web/WebTrashRepository'
 import {
   TaskWorkerClient,
   TaskWorkerClientError,
@@ -990,6 +991,113 @@ describe('shared default persistence exposes Search', () => {
     expect(sharedWorker.terminated).toBe(false)
 
     const listed = sharedLease.searchRepository.query({ query: 'planning', limit: 50 })
+    sharedWorker.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
+    await releaseFinalLease(sharedLease, sharedWorker)
+    expect(sharedWorker.terminated).toBe(true)
+  })
+})
+
+describe('shared default persistence exposes Trash', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    createdWorkers.length = 0
+  })
+
+  test('default shared lease exposes a working trashRepository', async () => {
+    stubDefaultOpenEnvironment()
+
+    const first = openWebTaskRepository()
+    const second = openWebTaskRepository()
+    const worker = requireCreatedWorker(0)
+    worker.respondToLast({ status: 'AVAILABLE' })
+    const firstLease = requireLease(await first)
+    const secondLease = requireLease(await second)
+
+    expect('trashRepository' in firstLease).toBe(true)
+    expect('trashRepository' in secondLease).toBe(true)
+    expect(secondLease.trashRepository).toBeInstanceOf(WebTrashRepository)
+    expect(createdWorkers).toHaveLength(1)
+
+    const listed = secondLease.trashRepository.list()
+    expect(worker.messages.at(-1)).toMatchObject({ type: 'trash.list' })
+    worker.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
+    await firstLease.dispose()
+    expect(worker.terminated).toBe(false)
+    await releaseFinalLease(secondLease, worker)
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('two concurrent default opens share one Worker and both expose trashRepository', async () => {
+    stubDefaultOpenEnvironment()
+
+    const first = openWebTaskRepository()
+    const second = openWebTaskRepository()
+    expect(createdWorkers).toHaveLength(1)
+    const worker = requireCreatedWorker(0)
+
+    worker.respondToLast({ status: 'AVAILABLE' })
+    const firstLease = requireLease(await first)
+    const secondLease = requireLease(await second)
+
+    expect(createdWorkers).toHaveLength(1)
+    expect(worker.messages).toHaveLength(1)
+    expect(firstLease.trashRepository).toBeDefined()
+    expect(secondLease.trashRepository).toBeDefined()
+
+    await firstLease.dispose()
+    await releaseFinalLease(secondLease, worker)
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('releasing one lease keeps the trashRepository usable on the remaining lease', async () => {
+    stubDefaultOpenEnvironment()
+    const [firstLease, secondLease] = await openSharedPair()
+    const worker = requireCreatedWorker(0)
+
+    await firstLease.dispose()
+    expect(worker.terminated).toBe(false)
+
+    const listed = secondLease.trashRepository.list()
+    worker.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
+    await releaseFinalLease(secondLease, worker)
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('explicit unshared option still exposes trashRepository and stays isolated', async () => {
+    stubDefaultOpenEnvironment()
+
+    const sharedOpen = openWebTaskRepository()
+    const sharedWorker = requireCreatedWorker(0)
+    sharedWorker.respondToLast({ status: 'AVAILABLE' })
+    const sharedLease = requireLease(await sharedOpen)
+    expect(sharedLease.trashRepository).toBeDefined()
+
+    const customWorker = new FakeWorker()
+    const customOpen = openWebTaskRepository({
+      workerSupported: true,
+      crossOriginIsolated: true,
+      workerFactory: () => customWorker,
+    })
+    customWorker.respondToLast({ status: 'AVAILABLE' })
+    const customLease = requireLease(await customOpen)
+
+    expect(createdWorkers).toHaveLength(1)
+    expect(customWorker).not.toBe(sharedWorker)
+    expect(customLease.trashRepository).toBeDefined()
+
+    const customClosing = customLease.dispose()
+    customWorker.respondToLast(null)
+    await customClosing
+    expect(customWorker.terminated).toBe(true)
+    expect(sharedWorker.terminated).toBe(false)
+
+    const listed = sharedLease.trashRepository.list()
     sharedWorker.respondToLast([])
     await expect(listed).resolves.toEqual([])
 

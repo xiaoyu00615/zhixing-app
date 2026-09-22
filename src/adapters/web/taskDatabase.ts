@@ -46,6 +46,7 @@ import type {
   SoftDeleteDiaryEntryInput,
   UpdateDiaryEntryInput,
 } from '@/diary/repository'
+import type { TrashItem } from '@/trash/model'
 import {
   isCanonicalCanvasId,
   isCanvasCoordinate,
@@ -3007,6 +3008,60 @@ export class WebTaskDatabase {
         title,
         snippet: searchMakeSnippet(title, body, terms),
         updatedAtMs,
+      }
+    })
+  }
+
+  listTrash(): TrashItem[] {
+    // Unified Trash V1 read-only view (P5B S1/S2). Mirrors the frozen Native
+    // `TrashDbService::list`: a single UNION ALL over the three soft-delete
+    // domain tables, canvas excluded, ordered most-recently-trashed first
+    // with a stable deterministic tie-break. No writes, no schema change.
+    const sql =
+      "SELECT 'task' AS entity_type, id AS entity_id, title, deleted_at_ms " +
+      'FROM tasks WHERE deleted_at_ms IS NOT NULL ' +
+      'UNION ALL ' +
+      "SELECT 'note' AS entity_type, id AS entity_id, title, deleted_at_ms " +
+      'FROM notes WHERE deleted_at_ms IS NOT NULL ' +
+      'UNION ALL ' +
+      "SELECT 'diary' AS entity_type, id AS entity_id, title, deleted_at_ms " +
+      'FROM diary_entries WHERE deleted_at_ms IS NOT NULL ' +
+      'ORDER BY deleted_at_ms DESC, entity_type ASC, entity_id ASC'
+
+    try {
+      return this.mapTrashRows(this.#database.selectObjects(sql, []))
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_ERROR')
+    }
+  }
+
+  private mapTrashRows(rows: Record<string, unknown>[]): TrashItem[] {
+    return rows.map((row) => {
+      const entityType = row.entity_type
+      const entityId = row.entity_id
+      const title = row.title
+      const deletedAtMs = row.deleted_at_ms
+      if (
+        typeof entityType !== 'string' ||
+        typeof entityId !== 'string' ||
+        typeof title !== 'string' ||
+        typeof deletedAtMs !== 'number' ||
+        !Number.isSafeInteger(deletedAtMs) ||
+        deletedAtMs < 0 ||
+        !(
+          entityType === 'task' ||
+          entityType === 'note' ||
+          entityType === 'diary'
+        )
+      ) {
+        throw new TaskDatabaseError('PERSISTENCE_ERROR')
+      }
+      return {
+        entityType,
+        entityId,
+        title,
+        deletedAtMs,
       }
     })
   }
