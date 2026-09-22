@@ -52,6 +52,14 @@ export default defineConfig(({ mode }) => {
       import.meta.url,
     ),
   )
+  const trashRuntimeEntry = fileURLToPath(
+    new URL(
+      process.env.TAURI_ENV_PLATFORM === undefined
+        ? './src/trash/runtime.ts'
+        : './src/trash/runtime.native.ts',
+      import.meta.url,
+    ),
+  )
 
   return {
     plugins: [react(), tailwindcss()],
@@ -82,6 +90,7 @@ export default defineConfig(({ mode }) => {
         { find: /^@\/note\/runtime$/, replacement: noteRuntimeEntry },
         { find: /^@\/diary\/runtime$/, replacement: diaryRuntimeEntry },
         { find: /^@\/search\/runtime$/, replacement: searchRuntimeEntry },
+        { find: /^@\/trash\/runtime$/, replacement: trashRuntimeEntry },
         {
           find: '@',
           replacement: fileURLToPath(new URL('./src', import.meta.url)),

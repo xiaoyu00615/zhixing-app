@@ -1,38 +1,52 @@
-import {
-  CalendarDays,
-  Clock3,
-  RotateCcw,
-  Star,
-  Tags,
-  Trash2,
-  Zap,
-} from 'lucide-react'
+import { Clock3, RotateCcw, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import { ProjectChip } from '@/components/tasks/ProjectChip'
-import { TagChip } from '@/components/tasks/TagChip'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import type { Project } from '@/project/model'
-import type { Tag } from '@/tag/model'
-import type { Task } from '@/task/model'
-import { openTaskRuntime } from '@/task/runtime'
-import type { OpenTaskRuntime } from '@/task/runtime.types'
-import type { TaskService } from '@/task/service'
+import type { TrashEntityType, TrashItem } from '@/trash/model'
+import { openTrashRuntime } from '@/trash/runtime'
+import type { OpenTrashRuntime } from '@/trash/runtime.types'
+import type { TrashService } from '@/trash/service'
 
 interface TrashPageProps {
-  readonly openRuntime?: OpenTaskRuntime
+  readonly openRuntime?: OpenTrashRuntime
 }
 
-const STATUS_LABELS: Record<Task['status'], string> = {
-  todo: '待开始',
-  doing: '进行中',
-  completed: '已完成',
-  cancelled: '已取消',
+/** Exhaustive entity labels: adding a V2 entity type becomes a compile error. */
+const ENTITY_LABELS: Record<TrashEntityType, string> = {
+  task: '任务',
+  note: '笔记',
+  diary: '日记',
 }
 
-function formatDateTime(timestamp: number | null): string {
-  if (timestamp === null) return '时间未知'
+/** UI-owned title fallback. Persistence still returns the canonical title. */
+const EMPTY_TITLE_FALLBACK: Record<TrashEntityType, string> = {
+  task: '未命名任务',
+  note: '未命名笔记',
+  diary: '未命名日记',
+}
+
+const RESTORE_FAILURE_MESSAGE = '恢复失败，请重试'
+
+type RuntimePhase = 'loading' | 'ready' | 'error'
+type ListPhase = 'loading' | 'ready' | 'error'
+
+interface Feedback {
+  readonly tone: 'info' | 'error'
+  readonly message: string
+}
+
+function displayTitle(item: TrashItem): string {
+  return item.title.trim() === ''
+    ? EMPTY_TITLE_FALLBACK[item.entityType]
+    : item.title
+}
+
+function rowKey(item: TrashItem): string {
+  return `${item.entityType}:${item.entityId}`
+}
+
+function formatDateTime(timestamp: number): string {
   return new Intl.DateTimeFormat('zh-CN', {
     year: 'numeric',
     month: '2-digit',
@@ -42,16 +56,16 @@ function formatDateTime(timestamp: number | null): string {
   }).format(new Date(timestamp))
 }
 
-export function TrashPage({ openRuntime = openTaskRuntime }: TrashPageProps) {
+export function TrashPage({ openRuntime = openTrashRuntime }: TrashPageProps) {
   const mountedRef = useRef(false)
   const [attempt, setAttempt] = useState(0)
-  const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
-  const [service, setService] = useState<TaskService | null>(null)
-  const [tasks, setTasks] = useState<readonly Task[]>([])
-  const [projects, setProjects] = useState<readonly Project[]>([])
-  const [tags, setTags] = useState<readonly Tag[]>([])
+  const [runtimePhase, setRuntimePhase] = useState<RuntimePhase>('loading')
+  const [service, setService] = useState<TrashService | null>(null)
+  const [listAttempt, setListAttempt] = useState(0)
+  const [listPhase, setListPhase] = useState<ListPhase>('loading')
+  const [items, setItems] = useState<readonly TrashItem[]>([])
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set())
-  const [feedback, setFeedback] = useState<string | null>(null)
+  const [feedback, setFeedback] = useState<Feedback | null>(null)
 
   useEffect(() => {
     mountedRef.current = true
@@ -62,7 +76,7 @@ export function TrashPage({ openRuntime = openTaskRuntime }: TrashPageProps) {
 
   useEffect(() => {
     let active = true
-    let runtime: Awaited<ReturnType<OpenTaskRuntime>> | null = null
+    let runtime: Awaited<ReturnType<OpenTrashRuntime>> | null = null
     let disposed = false
 
     async function disposeRuntime(): Promise<void> {
@@ -76,30 +90,21 @@ export function TrashPage({ openRuntime = openTaskRuntime }: TrashPageProps) {
     }
 
     void (async () => {
-      setPhase('loading')
+      setRuntimePhase('loading')
       try {
         runtime = await openRuntime()
         if (!active) {
           await disposeRuntime()
           return
         }
-        const [loadedTasks, loadedProjects, loadedTags] = await Promise.all([
-          runtime.service.listTrashedTasks(),
-          runtime.projectService.listProjects(),
-          runtime.tagService.listTags(),
-        ])
-        if (!active) {
-          await disposeRuntime()
-          return
-        }
         setService(runtime.service)
-        setTasks(loadedTasks)
-        setProjects(loadedProjects)
-        setTags(loadedTags)
-        setPhase('ready')
+        setRuntimePhase('ready')
       } catch {
         await disposeRuntime()
-        if (active) setPhase('error')
+        if (active) {
+          setService(null)
+          setRuntimePhase('error')
+        }
       }
     })()
 
@@ -109,25 +114,55 @@ export function TrashPage({ openRuntime = openTaskRuntime }: TrashPageProps) {
     }
   }, [attempt, openRuntime])
 
-  const restoreTask = useCallback(
-    async (task: Task) => {
-      if (service === null || pending.has(task.id)) return
-      setPending((current) => new Set(current).add(task.id))
+  // The list is only loaded once the runtime service exists.
+  useEffect(() => {
+    if (service === null) return
+    let active = true
+
+    void (async () => {
+      setListPhase('loading')
+      try {
+        const loaded = await service.list()
+        if (!active) return
+        setItems(loaded)
+        setListPhase('ready')
+      } catch {
+        if (active) setListPhase('error')
+      }
+    })()
+
+    return () => {
+      active = false
+    }
+  }, [service, listAttempt])
+
+  const restoreItem = useCallback(
+    async (item: TrashItem) => {
+      const key = rowKey(item)
+      if (service === null || pending.has(key)) return
+      setPending((current) => new Set(current).add(key))
       setFeedback(null)
       try {
-        await service.restoreTask(task.id)
-        const loadedTasks = await service.listTrashedTasks()
-        if (mountedRef.current) {
-          setTasks(loadedTasks)
-          setFeedback(`“${task.title}”已恢复到任务列表。`)
-        }
+        await service.restore({
+          entityType: item.entityType,
+          entityId: item.entityId,
+        })
+        if (!mountedRef.current) return
+        // The row disappears only after the canonical restore succeeded.
+        setItems((current) => current.filter((row) => rowKey(row) !== key))
+        setFeedback({
+          tone: 'info',
+          message: `“${displayTitle(item)}”已恢复。`,
+        })
       } catch {
-        if (mountedRef.current) setFeedback('恢复失败，请稍后重试。')
+        if (mountedRef.current) {
+          setFeedback({ tone: 'error', message: RESTORE_FAILURE_MESSAGE })
+        }
       } finally {
         if (mountedRef.current) {
           setPending((current) => {
             const next = new Set(current)
-            next.delete(task.id)
+            next.delete(key)
             return next
           })
         }
@@ -136,8 +171,20 @@ export function TrashPage({ openRuntime = openTaskRuntime }: TrashPageProps) {
     [pending, service],
   )
 
-  const projectsById = new Map(projects.map((project) => [project.id, project]))
-  const tagsById = new Map(tags.map((tag) => [tag.id, tag]))
+  const loading =
+    runtimePhase === 'loading' ||
+    (runtimePhase === 'ready' && listPhase === 'loading')
+  const failed = runtimePhase === 'error' || listPhase === 'error'
+  const ready = runtimePhase === 'ready' && listPhase === 'ready'
+
+  function retry(): void {
+    setFeedback(null)
+    if (runtimePhase === 'error') {
+      setAttempt((value) => value + 1)
+      return
+    }
+    setListAttempt((value) => value + 1)
+  }
 
   return (
     <section className="mx-auto w-full max-w-[1440px] space-y-6 pb-8">
@@ -147,35 +194,39 @@ export function TrashPage({ openRuntime = openTaskRuntime }: TrashPageProps) {
             回收站
           </h2>
           <p className="mt-2 text-body text-foreground-secondary">
-            已移入回收站的任务会保留原有信息，可随时恢复。
+            已移入回收站的任务、笔记和日记会保留原有信息，可随时恢复。
           </p>
         </div>
-        {phase === 'ready' && tasks.length > 0 && (
-          <Badge variant="outline">{tasks.length} 项任务</Badge>
+        {ready && items.length > 0 && (
+          <Badge variant="outline">{items.length} 项</Badge>
         )}
       </header>
 
       {feedback !== null && (
         <div
-          className="rounded-sm border border-info/20 bg-info-soft/50 px-4 py-3 text-body text-foreground"
-          role="status"
+          className={
+            feedback.tone === 'error'
+              ? 'rounded-sm border border-danger/20 bg-danger-soft/50 px-4 py-3 text-body text-foreground'
+              : 'rounded-sm border border-info/20 bg-info-soft/50 px-4 py-3 text-body text-foreground'
+          }
+          role={feedback.tone === 'error' ? 'alert' : 'status'}
         >
-          {feedback}
+          {feedback.message}
         </div>
       )}
 
-      {phase === 'loading' && (
+      {loading && (
         <div className="space-y-3" role="status" aria-label="正在加载回收站">
           {[0, 1].map((item) => (
             <div
-              className="h-32 animate-pulse rounded-lg border border-border bg-surface-secondary/40"
+              className="h-24 animate-pulse rounded-lg border border-border bg-surface-secondary/40"
               key={item}
             />
           ))}
         </div>
       )}
 
-      {phase === 'error' && (
+      {failed && (
         <div
           className="flex min-h-72 flex-col items-center justify-center rounded-lg border border-danger/15 bg-danger-soft/30 p-8 text-center"
           role="alert"
@@ -183,110 +234,60 @@ export function TrashPage({ openRuntime = openTaskRuntime }: TrashPageProps) {
           <Trash2 className="size-9 text-danger" aria-hidden="true" />
           <h3 className="mt-4 text-module font-semibold">无法加载回收站</h3>
           <p className="mt-2 text-body text-foreground-secondary">
-            本地任务数据暂时不可用，请稍后重试。
+            本地数据暂时不可用，请稍后重试。
           </p>
-          <Button
-            className="mt-5"
-            onClick={() => setAttempt((value) => value + 1)}
-            type="button"
-          >
+          <Button className="mt-5" onClick={retry} type="button">
             <RotateCcw data-icon="inline-start" />
             重试
           </Button>
         </div>
       )}
 
-      {phase === 'ready' && tasks.length === 0 && (
+      {ready && items.length === 0 && (
         <div className="flex min-h-72 flex-col items-center justify-center rounded-lg border border-dashed border-border bg-surface-secondary/20 p-8 text-center">
           <div className="flex size-14 items-center justify-center rounded-xl bg-surface-secondary text-foreground-tertiary">
             <Trash2 className="size-7" aria-hidden="true" />
           </div>
           <h3 className="mt-4 text-module font-semibold">回收站是空的</h3>
           <p className="mt-2 text-body text-foreground-secondary">
-            移入回收站的任务会显示在这里。
+            移入回收站的任务、笔记和日记会显示在这里。
           </p>
         </div>
       )}
 
-      {phase === 'ready' && tasks.length > 0 && (
-        <ul aria-label="回收站任务" className="grid gap-3">
-          {tasks.map((task) => {
-            const project =
-              task.projectId === null
-                ? undefined
-                : projectsById.get(task.projectId)
+      {ready && items.length > 0 && (
+        <ul aria-label="回收站条目" className="grid gap-3">
+          {items.map((item) => {
+            const key = rowKey(item)
+            const restoring = pending.has(key)
             return (
               <li
                 className="rounded-lg border border-border bg-surface px-5 py-4 shadow-xs"
-                key={task.id}
+                key={key}
               >
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="min-w-0 break-words text-[15px] leading-6 font-semibold text-foreground">
-                        {task.title}
-                      </h3>
                       <Badge variant="outline">
-                        {STATUS_LABELS[task.status]}
+                        {ENTITY_LABELS[item.entityType]}
                       </Badge>
-                      {task.isImportant && (
-                        <Badge variant="destructive">重要</Badge>
-                      )}
-                      {task.isUrgent && (
-                        <Badge
-                          className="border-warning/20 bg-warning-soft text-warning"
-                          variant="outline"
-                        >
-                          基础紧急
-                        </Badge>
-                      )}
-                    </div>
-                    <div className="mt-3 flex flex-wrap items-center gap-2 text-caption text-foreground-secondary">
-                      {project !== undefined && (
-                        <ProjectChip project={project} />
-                      )}
-                      {task.tagIds.map((tagId) => {
-                        const tag = tagsById.get(tagId)
-                        return tag === undefined ? null : (
-                          <TagChip key={tag.id} tag={tag} />
-                        )
-                      })}
-                      {task.tagIds.length === 0 && (
-                        <span className="inline-flex items-center gap-1">
-                          <Tags className="size-3.5" aria-hidden="true" />
-                          无标签
-                        </span>
-                      )}
-                      <span className="inline-flex items-center gap-1">
-                        <CalendarDays className="size-3.5" aria-hidden="true" />
-                        {task.dueDate ?? '无截止日期'}
-                      </span>
-                      {task.isImportant && (
-                        <Star
-                          className="size-3.5 text-danger"
-                          aria-label="重要"
-                        />
-                      )}
-                      {task.isUrgent && (
-                        <Zap
-                          className="size-3.5 text-warning"
-                          aria-label="基础紧急"
-                        />
-                      )}
+                      <h3 className="min-w-0 break-words text-[15px] leading-6 font-semibold text-foreground">
+                        {displayTitle(item)}
+                      </h3>
                     </div>
                     <p className="mt-3 flex items-center gap-1.5 text-caption text-foreground-tertiary">
                       <Clock3 className="size-3.5" aria-hidden="true" />
-                      删除于 {formatDateTime(task.deletedAtMs)}
+                      删除于 {formatDateTime(item.deletedAtMs)}
                     </p>
                   </div>
                   <Button
-                    disabled={pending.has(task.id)}
-                    onClick={() => void restoreTask(task)}
+                    disabled={restoring}
+                    onClick={() => void restoreItem(item)}
                     type="button"
                     variant="outline"
                   >
                     <RotateCcw data-icon="inline-start" />
-                    {pending.has(task.id) ? '恢复中…' : '恢复任务'}
+                    {restoring ? '恢复中…' : '恢复'}
                   </Button>
                 </div>
               </li>
