@@ -13,6 +13,7 @@ import {
   getTaskQuadrant,
   groupTasksByDate,
   groupTasksByQuadrant,
+  isActiveTask,
   isNonEmptyTaskTitle,
   isNonNegativeSafeIntegerMilliseconds,
   isTaskEffectivelyUrgent,
@@ -54,6 +55,7 @@ const TASK: Task = {
   projectId: null,
   tagIds: [],
   deletedAtMs: null,
+  archivedAtMs: null,
 }
 
 describe('Task model persistence contract', () => {
@@ -78,6 +80,35 @@ describe('Task model persistence contract', () => {
     expect(filterTasks([trashed], DEFAULT_TASK_FILTER, '2026-08-23')).toEqual(
       [],
     )
+  })
+
+  test('excludes ARCHIVED tasks from active urgency, date, quadrant, calendar, and filters', () => {
+    const archived: Task = {
+      ...TASK,
+      isImportant: true,
+      isUrgent: true,
+      dueDate: '2026-08-22',
+      archivedAtMs: 200,
+    }
+
+    expect(isActiveTask(archived)).toBe(false)
+    expect(isTaskOverdue(archived, '2026-08-23')).toBe(false)
+    expect(isTaskEffectivelyUrgent(archived, '2026-08-23')).toBe(false)
+    expect(getTaskQuadrant(archived, '2026-08-23')).toBeNull()
+    expect(getTaskDateGroup(archived, '2026-08-23')).toBeNull()
+    expect(
+      buildTaskCalendarMonth([archived], { year: 2026, month: 8 }).every(
+        (day) => day.tasks.length === 0,
+      ),
+    ).toBe(true)
+    expect(filterTasks([archived], DEFAULT_TASK_FILTER, '2026-08-23')).toEqual(
+      [],
+    )
+    // Archive is orthogonal to delete: an active row is unaffected.
+    expect(isActiveTask(TASK)).toBe(true)
+    expect(
+      isActiveTask({ ...TASK, deletedAtMs: 200, archivedAtMs: 200 }),
+    ).toBe(false)
   })
 
   test.each(LEGAL_TRANSITIONS)(

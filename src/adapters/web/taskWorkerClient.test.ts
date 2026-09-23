@@ -185,3 +185,83 @@ describe('TaskWorkerClient error isolation', () => {
     })
   })
 })
+
+describe('TaskWorkerClient archive lifecycle envelopes', () => {
+  const ID = '00000000-0000-4000-8000-000000000001'
+
+  test('sends the exact task.archive / task.unarchive envelopes', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    void client.archiveTask({ id: ID, updatedAtMs: 200 })
+    await flush()
+    void client.unarchiveTask({ id: ID, updatedAtMs: 300 })
+    await flush()
+
+    expect(worker.messages).toEqual([
+      { requestId: 1, type: 'task.archive', input: { id: ID, updatedAtMs: 200 } },
+      {
+        requestId: 2,
+        type: 'task.unarchive',
+        input: { id: ID, updatedAtMs: 300 },
+      },
+    ])
+  })
+
+  test('sends the exact note.archive / note.unarchive envelopes', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    void client.archiveNote({ id: ID, updatedAtMs: 200 })
+    await flush()
+    void client.unarchiveNote({ id: ID, updatedAtMs: 300 })
+    await flush()
+
+    expect(worker.messages).toEqual([
+      { requestId: 1, type: 'note.archive', input: { id: ID, updatedAtMs: 200 } },
+      {
+        requestId: 2,
+        type: 'note.unarchive',
+        input: { id: ID, updatedAtMs: 300 },
+      },
+    ])
+  })
+
+  test('note.archive failure routes to NoteWorkerClientError, never the Task emitter', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    const promise = client.archiveNote({ id: ID, updatedAtMs: 200 })
+    await flush()
+    worker.send({
+      requestId: worker.messages[0]?.requestId ?? 1,
+      ok: false,
+      error: { code: 'NOT_FOUND' },
+    })
+    await flush()
+
+    await expect(promise).rejects.toSatisfy((error) => {
+      expectNoteError(error, 'NOT_FOUND')
+      return true
+    })
+  })
+
+  test('task.archive failure routes to TaskWorkerClientError', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    const promise = client.archiveTask({ id: ID, updatedAtMs: 200 })
+    await flush()
+    worker.send({
+      requestId: worker.messages[0]?.requestId ?? 1,
+      ok: false,
+      error: { code: 'NOT_FOUND' },
+    })
+    await flush()
+
+    await expect(promise).rejects.toSatisfy((error) => {
+      expectTaskError(error, 'NOT_FOUND')
+      return true
+    })
+  })
+})

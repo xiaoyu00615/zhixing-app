@@ -45,6 +45,7 @@ function task(id: number, title: string): Task {
     projectId: null,
     tagIds: [],
     deletedAtMs: null,
+    archivedAtMs: null,
   }
 }
 
@@ -56,6 +57,7 @@ function note(id: number, title: string, content: string): Note {
     createdAtMs: 100,
     updatedAtMs: 100,
     deletedAtMs: null,
+    archivedAtMs: null,
   }
 }
 
@@ -80,6 +82,8 @@ function createTaskService(tasks: readonly Task[]): TaskService {
     listTrashedTasks: vi.fn(() => Promise.resolve([])),
     trashTask: vi.fn(resolved),
     restoreTask: vi.fn(resolved),
+    archiveTask: vi.fn(resolved),
+    unarchiveTask: vi.fn(resolved),
     renameTask: vi.fn(resolved),
     startTask: vi.fn(resolved),
     completeTask: vi.fn(resolved),
@@ -156,6 +160,8 @@ function createNoteRuntime(notes: Note[]) {
     updateNote: vi.fn(() => Promise.resolve(first)),
     softDelete: vi.fn(() => Promise.resolve()),
     restore: vi.fn(() => Promise.resolve()),
+    archive: vi.fn(() => Promise.resolve()),
+    unarchive: vi.fn(() => Promise.resolve()),
   }
   const runtime: NoteRuntime = { service, dispose }
   const openRuntime = vi.fn<OpenNoteRuntime>(() => Promise.resolve(runtime))

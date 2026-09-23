@@ -12,6 +12,7 @@ const NOTE: Note = {
   createdAtMs: 100,
   updatedAtMs: 100,
   deletedAtMs: null,
+  archivedAtMs: null,
 }
 
 const runtimeMocks = vi.hoisted(() => ({

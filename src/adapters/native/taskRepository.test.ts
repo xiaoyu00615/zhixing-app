@@ -36,6 +36,7 @@ const TASK = {
   projectId: null,
   tagIds: [],
   deletedAtMs: null,
+  archivedAtMs: null,
 } as const
 
 function createNativeContractFixture(): TaskRepositoryContractFixture {
@@ -57,6 +58,14 @@ function createNativeContractFixture(): TaskRepositoryContractFixture {
         case 'task_restore':
           return backend.restoreTask(
             args?.input as import('@/task/repository').RestoreTaskInput,
+          )
+        case 'task_archive':
+          return backend.archiveTask(
+            args?.input as import('@/task/repository').ArchiveTaskInput,
+          )
+        case 'task_unarchive':
+          return backend.unarchiveTask(
+            args?.input as import('@/task/repository').UnarchiveTaskInput,
           )
         case 'task_rename':
           return backend.renameTask(args?.input as RenameTaskInput)

@@ -8,11 +8,13 @@ import type {
 import {
   NOTE_REPOSITORY_ERROR_CODES,
   NoteRepositoryError,
+  type ArchiveNoteInput,
   type CreateNoteInput,
   type NoteRepositoryErrorCode,
   type NoteRepositoryOperation,
   type RestoreNoteInput,
   type SoftDeleteNoteInput,
+  type UnarchiveNoteInput,
   type UpdateNoteInput,
 } from '@/note/repository'
 import type { Note } from '@/note/model'
@@ -23,6 +25,12 @@ const IDs = {
   c: '00000000-0000-4000-8000-000000000003',
   missing: '00000000-0000-4000-8000-000000000099',
 } as const
+
+/** Archive V1 (P5C-S1): Active = not deleted AND not archived. */
+function isActiveNote(note: Note): boolean {
+  return note.deletedAtMs === null && note.archivedAtMs === null
+}
+
 
 class NoteContractBackendError extends Error {
   readonly code: NoteRepositoryErrorCode
@@ -58,6 +66,7 @@ class NoteContractBackend {
       createdAtMs: input.createdAtMs,
       updatedAtMs: input.createdAtMs,
       deletedAtMs: null,
+      archivedAtMs: null,
     }
     this.#notes.set(note.id, note)
     return { ...note }
@@ -66,7 +75,7 @@ class NoteContractBackend {
   getActiveNote(id: string): Note | null {
     this.consumeFailure()
     const current = this.#notes.get(id)
-    if (current === undefined || current.deletedAtMs !== null) {
+    if (current === undefined || !isActiveNote(current)) {
       return null
     }
     return { ...current }
@@ -75,7 +84,7 @@ class NoteContractBackend {
   listActiveNotes(): Note[] {
     this.consumeFailure()
     return [...this.#notes.values()]
-      .filter((note) => note.deletedAtMs === null)
+      .filter((note) => isActiveNote(note))
       .sort((a, b) => b.updatedAtMs - a.updatedAtMs || a.id.localeCompare(b.id))
       .map((note) => ({ ...note }))
   }
@@ -83,7 +92,7 @@ class NoteContractBackend {
   updateNote(input: UpdateNoteInput): Note {
     this.consumeFailure()
     const current = this.#notes.get(input.id)
-    if (current === undefined || current.deletedAtMs !== null) {
+    if (current === undefined || !isActiveNote(current)) {
       throw new NoteContractBackendError(
         'NOT_FOUND',
         'SELECT note SQL=UPDATE notes',
@@ -125,6 +134,36 @@ class NoteContractBackend {
     })
   }
 
+  archiveNote(input: ArchiveNoteInput): void {
+    this.consumeFailure()
+    const current = this.#notes.get(input.id)
+    if (current === undefined || !isActiveNote(current)) {
+      throw new NoteContractBackendError('NOT_FOUND', 'note not active')
+    }
+    this.#notes.set(input.id, {
+      ...current,
+      archivedAtMs: input.updatedAtMs,
+      updatedAtMs: input.updatedAtMs,
+    })
+  }
+
+  unarchiveNote(input: UnarchiveNoteInput): void {
+    this.consumeFailure()
+    const current = this.#notes.get(input.id)
+    if (
+      current === undefined ||
+      current.deletedAtMs !== null ||
+      current.archivedAtMs === null
+    ) {
+      throw new NoteContractBackendError('NOT_FOUND', 'note not archived')
+    }
+    this.#notes.set(input.id, {
+      ...current,
+      archivedAtMs: null,
+      updatedAtMs: input.updatedAtMs,
+    })
+  }
+
   private consumeFailure(): void {
     if (this.#nextFailure === null) return
     const failure = this.#nextFailure
@@ -161,6 +200,14 @@ class NoteWorker implements TaskWorkerEndpoint {
           break
         case 'note.restore':
           this.backend.restoreNote(request.input)
+          result = null
+          break
+        case 'note.archive':
+          this.backend.archiveNote(request.input)
+          result = null
+          break
+        case 'note.unarchive':
+          this.backend.unarchiveNote(request.input)
           result = null
           break
         default:
@@ -236,6 +283,7 @@ describe('WebNoteRepository', () => {
       createdAtMs: 1000,
       updatedAtMs: 1000,
       deletedAtMs: null,
+      archivedAtMs: null,
     })
   })
 
@@ -350,6 +398,98 @@ describe('WebNoteRepository', () => {
       updatedAtMs: 3,
       deletedAtMs: null,
     })
+  })
+
+  test('archive hides the note from active reads while preserving title and content verbatim', async () => {
+    const { repository } = createFixture()
+    const content = '  body with   spacing\n\n'
+    await repository.create({ id: IDs.a, title: ' Note ', content, createdAtMs: 1 })
+    await repository.archive({ id: IDs.a, updatedAtMs: 2 })
+
+    expect(await repository.getActiveById(IDs.a)).toBeNull()
+    expect(await repository.listActive()).toEqual([])
+    await expectSafeError(
+      repository.updateNote({
+        id: IDs.a,
+        title: 'changed',
+        content: 'changed',
+        updatedAtMs: 3,
+      }),
+      'NOT_FOUND',
+      'updateNote',
+    )
+    const restored = await repository.unarchive({ id: IDs.a, updatedAtMs: 4 })
+    expect(restored).toBeUndefined()
+    const unarchived = await repository.getActiveById(IDs.a)
+    expect(unarchived).toMatchObject({
+      id: IDs.a,
+      title: ' Note ',
+      content,
+      createdAtMs: 1,
+      updatedAtMs: 4,
+      deletedAtMs: null,
+      archivedAtMs: null,
+    })
+  })
+
+  test('accepts Archive -> Trash -> Restore -> Archive preserving archivedAtMs', async () => {
+    const { repository } = createFixture()
+    await repository.create({ id: IDs.a, title: 'a', content: 'a', createdAtMs: 1 })
+    await repository.archive({ id: IDs.a, updatedAtMs: 2 })
+    await repository.softDelete({ id: IDs.a, updatedAtMs: 3 })
+    await repository.restore({ id: IDs.a, updatedAtMs: 4 })
+
+    // Restored from Trash it is ARCHIVED again, not active.
+    expect(await repository.getActiveById(IDs.a)).toBeNull()
+    expect(await repository.listActive()).toEqual([])
+
+    await repository.unarchive({ id: IDs.a, updatedAtMs: 5 })
+    const active = await repository.getActiveById(IDs.a)
+    expect(active).toMatchObject({
+      id: IDs.a,
+      updatedAtMs: 5,
+      deletedAtMs: null,
+      archivedAtMs: null,
+    })
+  })
+
+  test('fails closed for archive and unarchive on invalid lifecycle targets', async () => {
+    const { repository } = createFixture()
+    await expectSafeError(
+      repository.archive({ id: IDs.missing, updatedAtMs: 1 }),
+      'NOT_FOUND',
+      'archive',
+    )
+    await expectSafeError(
+      repository.unarchive({ id: IDs.missing, updatedAtMs: 1 }),
+      'NOT_FOUND',
+      'unarchive',
+    )
+
+    await repository.create({ id: IDs.a, title: 'a', content: 'a', createdAtMs: 1 })
+    await expectSafeError(
+      repository.unarchive({ id: IDs.a, updatedAtMs: 2 }),
+      'NOT_FOUND',
+      'unarchive',
+    )
+    await repository.archive({ id: IDs.a, updatedAtMs: 2 })
+    await expectSafeError(
+      repository.archive({ id: IDs.a, updatedAtMs: 3 }),
+      'NOT_FOUND',
+      'archive',
+    )
+
+    await repository.softDelete({ id: IDs.a, updatedAtMs: 4 })
+    await expectSafeError(
+      repository.archive({ id: IDs.a, updatedAtMs: 5 }),
+      'NOT_FOUND',
+      'archive',
+    )
+    await expectSafeError(
+      repository.unarchive({ id: IDs.a, updatedAtMs: 5 }),
+      'NOT_FOUND',
+      'unarchive',
+    )
   })
 
   test('restore on a missing or active note throws NOT_FOUND', async () => {

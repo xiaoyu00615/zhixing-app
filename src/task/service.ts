@@ -253,6 +253,31 @@ export function createTaskService({
       return callRepository(() => repository.restoreTask({ id, updatedAtMs }))
     },
 
+    /**
+     * Archive V1: move an ACTIVE task into the archived state.
+     *
+     * Only the identity and the timestamp are forwarded; the canonical Task
+     * persistence owns the state transition and preserves every other field
+     * (status, importance, urgency, deadline, project, tags, title).
+     */
+    async archiveTask(id: string): Promise<Task> {
+      validateTaskId(id)
+      const updatedAtMs = readNowMs(nowMs)
+      return callRepository(() => repository.archiveTask({ id, updatedAtMs }))
+    },
+
+    /**
+     * Archive V1: return an ARCHIVED task to the active workspace.
+     *
+     * Deliberately not named `restore`: Trash restore and Archive unarchive are
+     * different lifecycle operations.
+     */
+    async unarchiveTask(id: string): Promise<Task> {
+      validateTaskId(id)
+      const updatedAtMs = readNowMs(nowMs)
+      return callRepository(() => repository.unarchiveTask({ id, updatedAtMs }))
+    },
+
     async renameTask(input: {
       readonly id: string
       readonly title: string

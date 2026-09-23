@@ -173,6 +173,33 @@ fn object_exists(connection: &Connection, name: &str) -> bool {
     count > 0
 }
 
+fn column_exists(connection: &Connection, table: &str, column: &str) -> bool {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .unwrap();
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    names.iter().any(|name| name == column)
+}
+
+/// 全部 trigger 的 (name, sql) 有序快照，用于证明某个迁移没有改动触发器。
+fn trigger_sql(connection: &Connection) -> Vec<(String, String)> {
+    let mut statement = connection
+        .prepare(
+            "SELECT name, COALESCE(sql, '') FROM sqlite_schema \
+             WHERE type = 'trigger' ORDER BY name ASC",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
 fn projection_count(connection: &Connection, entity_type: &str) -> i64 {
     connection
         .query_row(
@@ -270,7 +297,8 @@ fn migration_0013_creates_derived_objects_on_fresh_database() {
     let result = MigrationRunner::new(MIGRATIONS, SqliteBackupSnapshot)
         .run(&mut connection, &backup)
         .unwrap();
-    assert_eq!(result.current_version, 13);
+    // MIGRATIONS 覆盖到最新版本（当前 0014）；0013 的派生对象仍需存在。
+    assert_eq!(result.current_version, 14);
 
     assert!(object_exists(&connection, "search_documents"));
     assert!(object_exists(&connection, "search_fts"));
@@ -329,6 +357,73 @@ fn migration_0013_backfills_only_active_existing_content() {
     assert!(!projection_row_exists(&connection, "task", "t-deleted"));
     assert!(!projection_row_exists(&connection, "note", "n-deleted"));
     assert!(!projection_row_exists(&connection, "diary", "d-deleted"));
+}
+
+/// Archive V1 (P5C-S1): 0014 是 additive nullable column 迁移。
+/// 升级必须保留既有行、把 `archived_at_ms` 置为 NULL、并保持 0013
+/// Search 触发器组不变（Search/Archive 集成属于 P5C-S2.5）。
+#[test]
+fn migration_0014_adds_archive_state_without_touching_search_triggers() {
+    let (_sandbox, backup, mut connection) = open_sandbox();
+    MigrationRunner::new(&MIGRATIONS[..13], SqliteBackupSnapshot)
+        .run(&mut connection, &backup)
+        .unwrap();
+
+    assert!(!column_exists(&connection, "tasks", "archived_at_ms"));
+    assert!(!column_exists(&connection, "notes", "archived_at_ms"));
+
+    insert_task(&connection, "t-legacy", "Legacy task", None);
+    insert_note(&connection, "n-legacy", "  Legacy note  ", "raw\n\nbody", None);
+    let triggers_before = trigger_sql(&connection);
+
+    let result = MigrationRunner::new(MIGRATIONS, SqliteBackupSnapshot)
+        .run(&mut connection, &backup)
+        .unwrap();
+    assert_eq!(result.current_version, 14, "0014 必须被应用");
+
+    assert!(column_exists(&connection, "tasks", "archived_at_ms"));
+    assert!(column_exists(&connection, "notes", "archived_at_ms"));
+
+    // 既有行完整保留，且归档维度默认为 NULL
+    let (title, created_at_ms, archived_at_ms): (String, i64, Option<i64>) = connection
+        .query_row(
+            "SELECT title, created_at_ms, archived_at_ms FROM tasks WHERE id='t-legacy'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(title, "Legacy task");
+    assert_eq!(created_at_ms, 10);
+    assert_eq!(archived_at_ms, None);
+
+    let (note_title, note_content, note_archived): (String, String, Option<i64>) = connection
+        .query_row(
+            "SELECT title, content, archived_at_ms FROM notes WHERE id='n-legacy'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(note_title, "  Legacy note  ", "title 不得被 trim");
+    assert_eq!(note_content, "raw\n\nbody", "content 不得被规范化");
+    assert_eq!(note_archived, None);
+
+    // 非负 CHECK 生效
+    let invalid = connection.execute(
+        "UPDATE tasks SET archived_at_ms = -1 WHERE id='t-legacy'",
+        [],
+    );
+    assert!(invalid.is_err(), "archived_at_ms 必须受非负 CHECK 约束");
+
+    // TRASHED_FROM_ARCHIVE 是合法状态，不得被禁止
+    connection
+        .execute(
+            "UPDATE tasks SET deleted_at_ms = 500, archived_at_ms = 400 WHERE id='t-legacy'",
+            [],
+        )
+        .unwrap();
+
+    // 0013 Search 触发器必须逐字节不变
+    assert_eq!(trigger_sql(&connection), triggers_before);
 }
 
 #[test]

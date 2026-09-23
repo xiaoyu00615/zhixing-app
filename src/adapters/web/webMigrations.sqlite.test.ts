@@ -31,7 +31,7 @@ function listTables(db: Database): string[] {
 }
 
 describe('Web SQLite migration 12 (real sqlite-wasm)', () => {
-  test('applies all 13 migrations and creates notes + diary_entries', async () => {
+  test('applies all 14 migrations and creates notes + diary_entries', async () => {
     const db = openInMemoryDatabase()
     try {
       await runWebMigrations(new SqliteWebMigrationStore(db), WEB_MIGRATIONS, () => 123)
@@ -46,20 +46,20 @@ describe('Web SQLite migration 12 (real sqlite-wasm)', () => {
          FROM schema_migrations ORDER BY version ASC`,
       )
       expect(history.map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
       ])
       const last = history.at(-1)
       expect(last).toMatchObject({
-        version: 13,
-        id: '0013_add_global_search',
-        checksum_sha256: await sha256Hex(WEB_MIGRATIONS[12]?.sql ?? ''),
+        version: 14,
+        id: '0014_add_archive_state',
+        checksum_sha256: await sha256Hex(WEB_MIGRATIONS[13]?.sql ?? ''),
       })
     } finally {
       db.close()
     }
   })
 
-  test('WebTaskDatabase.initialize passes sanity after migration 12', async () => {
+  test('WebTaskDatabase.initialize passes sanity after migration 14', async () => {
     const raw = openInMemoryDatabase()
     await WebTaskDatabase.initialize(raw)
   })
@@ -99,7 +99,7 @@ describe('Web SQLite migration 12 (real sqlite-wasm)', () => {
     }
   })
 
-  test('fresh 1→13 and upgrade 11→13 both reach a contiguous history with correct checksums', async () => {
+  test('fresh 1→14 and upgrade 11→14 both reach a contiguous history with correct checksums', async () => {
     const fresh = openInMemoryDatabase()
     try {
       await runWebMigrations(
@@ -111,9 +111,9 @@ describe('Web SQLite migration 12 (real sqlite-wasm)', () => {
         'SELECT version, id, checksum_sha256 FROM schema_migrations ORDER BY version ASC',
       )
       expect(freshHistory.map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
       ])
-      for (let i = 0; i < 13; i += 1) {
+      for (let i = 0; i < 14; i += 1) {
         const row = freshHistory[i]
         const definition = WEB_MIGRATIONS[i]
         expect(row).toMatchObject({
@@ -139,13 +139,13 @@ describe('Web SQLite migration 12 (real sqlite-wasm)', () => {
         'SELECT version, id, checksum_sha256, applied_at_ms FROM schema_migrations ORDER BY version ASC',
       )
       expect(upgradeHistory.map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
       ])
       const last = upgradeHistory.at(-1)
       expect(last).toMatchObject({
-        version: 13,
-        id: '0013_add_global_search',
-        checksum_sha256: await sha256Hex(WEB_MIGRATIONS[12]?.sql ?? ''),
+        version: 14,
+        id: '0014_add_archive_state',
+        checksum_sha256: await sha256Hex(WEB_MIGRATIONS[13]?.sql ?? ''),
         applied_at_ms: 456,
       })
 
@@ -154,6 +154,160 @@ describe('Web SQLite migration 12 (real sqlite-wasm)', () => {
       expect(tables).toContain('diary_entries')
     } finally {
       upgrade.close()
+    }
+  })
+})
+
+describe('Web SQLite migration 14 archive state (real sqlite-wasm)', () => {
+  function columnNames(db: Database, table: string): string[] {
+    const rows = db.selectObjects(`PRAGMA table_info(${table})`)
+    return rows.map((row) => row.name as string)
+  }
+
+  test('adds archived_at_ms to tasks and notes as a nullable additive column', async () => {
+    const db = openInMemoryDatabase()
+    try {
+      await runWebMigrations(
+        new SqliteWebMigrationStore(db),
+        WEB_MIGRATIONS.slice(0, 13),
+        () => 123,
+      )
+      expect(columnNames(db, 'tasks')).not.toContain('archived_at_ms')
+      expect(columnNames(db, 'notes')).not.toContain('archived_at_ms')
+
+      await runWebMigrations(
+        new SqliteWebMigrationStore(db),
+        WEB_MIGRATIONS,
+        () => 456,
+      )
+      expect(columnNames(db, 'tasks')).toContain('archived_at_ms')
+      expect(columnNames(db, 'notes')).toContain('archived_at_ms')
+    } finally {
+      db.close()
+    }
+  })
+
+  test('preserves existing Task and Note rows and defaults them to archived_at_ms = NULL', async () => {
+    const db = openInMemoryDatabase()
+    try {
+      // Upgrade a real pre-0014 database that already holds user rows.
+      await runWebMigrations(
+        new SqliteWebMigrationStore(db),
+        WEB_MIGRATIONS.slice(0, 13),
+        () => 123,
+      )
+      db.exec({
+        sql: `INSERT INTO tasks
+                (id, title, status, created_at_ms, updated_at_ms,
+                 is_important, is_urgent, due_date, project_id, deleted_at_ms)
+              VALUES ('task-1', 'Legacy task', 'doing', 10, 20, 1, 0, NULL, NULL, NULL)`,
+      })
+      db.exec({
+        sql: `INSERT INTO notes
+                (id, title, content, created_at_ms, updated_at_ms, deleted_at_ms)
+              VALUES ('note-1', '  Legacy note  ', 'raw  content\n\n', 30, 40, NULL)`,
+      })
+
+      await runWebMigrations(
+        new SqliteWebMigrationStore(db),
+        WEB_MIGRATIONS,
+        () => 456,
+      )
+
+      const task = db
+        .selectObjects('SELECT * FROM tasks WHERE id = ?', ['task-1'])
+        .shift() as Record<string, unknown>
+      expect(task).toMatchObject({
+        title: 'Legacy task',
+        status: 'doing',
+        created_at_ms: 10,
+        updated_at_ms: 20,
+        is_important: 1,
+        is_urgent: 0,
+        archived_at_ms: null,
+      })
+
+      const note = db
+        .selectObjects('SELECT * FROM notes WHERE id = ?', ['note-1'])
+        .shift() as Record<string, unknown>
+      expect(note).toMatchObject({
+        title: '  Legacy note  ',
+        content: 'raw  content\n\n',
+        created_at_ms: 30,
+        updated_at_ms: 40,
+        deleted_at_ms: null,
+        archived_at_ms: null,
+      })
+    } finally {
+      db.close()
+    }
+  })
+
+  test('enforces the archived_at_ms non-negative CHECK constraint', async () => {
+    const db = openInMemoryDatabase()
+    try {
+      await runWebMigrations(
+        new SqliteWebMigrationStore(db),
+        WEB_MIGRATIONS,
+        () => 123,
+      )
+      expect(() =>
+        db.exec({
+          sql: `INSERT INTO tasks
+                  (id, title, status, created_at_ms, updated_at_ms,
+                   is_important, is_urgent, due_date, project_id, deleted_at_ms,
+                   archived_at_ms)
+                VALUES ('t-neg', 'x', 'todo', 1, 1, 0, 0, NULL, NULL, NULL, -1)`,
+        }),
+      ).toThrow()
+      expect(() =>
+        db.exec({
+          sql: `INSERT INTO notes
+                  (id, title, content, created_at_ms, updated_at_ms, deleted_at_ms,
+                   archived_at_ms)
+                VALUES ('n-neg', 'x', 'y', 1, 1, NULL, -5)`,
+        }),
+      ).toThrow()
+
+      // `deleted_at_ms IS NOT NULL AND archived_at_ms IS NOT NULL` is legal.
+      db.exec({
+        sql: `INSERT INTO notes
+                (id, title, content, created_at_ms, updated_at_ms, deleted_at_ms,
+                 archived_at_ms)
+              VALUES ('n-ok', 'x', 'y', 1, 1, 500, 400)`,
+      })
+      const row = db
+        .selectObjects('SELECT * FROM notes WHERE id = ?', ['n-ok'])
+        .shift() as Record<string, unknown>
+      expect(row).toMatchObject({ deleted_at_ms: 500, archived_at_ms: 400 })
+    } finally {
+      db.close()
+    }
+  })
+
+  test('leaves the 0013 Search projection triggers untouched', async () => {
+    const db = openInMemoryDatabase()
+    try {
+      await runWebMigrations(
+        new SqliteWebMigrationStore(db),
+        WEB_MIGRATIONS.slice(0, 13),
+        () => 123,
+      )
+      const before = db.selectObjects(
+        "SELECT name, sql FROM sqlite_schema WHERE type = 'trigger' ORDER BY name ASC",
+      )
+      await runWebMigrations(
+        new SqliteWebMigrationStore(db),
+        WEB_MIGRATIONS,
+        () => 456,
+      )
+      const after = db.selectObjects(
+        "SELECT name, sql FROM sqlite_schema WHERE type = 'trigger' ORDER BY name ASC",
+      )
+      expect(after).toEqual(before)
+      expect(before.length).toBeGreaterThan(0)
+    } finally {
+      db.close()
     }
   })
 })

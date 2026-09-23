@@ -21,6 +21,7 @@ interface BrowserTask {
   readonly projectId: string | null
   readonly tagIds: readonly string[]
   readonly deletedAtMs: number | null
+  readonly archivedAtMs: number | null
 }
 
 interface BrowserProject {
@@ -385,6 +386,7 @@ test('persists Task operations in OPFS across a browser restart', async ({
         projectId: null,
         tagIds: [TAG_IDS.deep],
         deletedAtMs: null,
+        archivedAtMs: null,
       },
       {
         id: TASK_IDS.b,
@@ -398,6 +400,7 @@ test('persists Task operations in OPFS across a browser restart', async ({
         projectId: null,
         tagIds: [],
         deletedAtMs: null,
+        archivedAtMs: null,
       },
       {
         id: TASK_IDS.c,
@@ -411,6 +414,7 @@ test('persists Task operations in OPFS across a browser restart', async ({
         projectId: PROJECT_ID,
         tagIds: [TAG_IDS.focus],
         deletedAtMs: null,
+        archivedAtMs: null,
       },
     ]
     await expect(

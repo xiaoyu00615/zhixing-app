@@ -103,6 +103,9 @@ pub(crate) struct TaskRecord {
     pub(crate) project_id: Option<String>,
     pub(crate) tag_ids: Vec<String>,
     pub(crate) deleted_at_ms: Option<i64>,
+    /// Archive V1 (P5C-S1). Orthogonal to `deleted_at_ms`; preserved by
+    /// canonical Trash restore so an archived row returns to the archived state.
+    pub(crate) archived_at_ms: Option<i64>,
 }
 
 pub(crate) struct CreateTaskInput {
@@ -184,6 +187,18 @@ pub(crate) struct RestoreTaskInput {
     pub(crate) updated_at_ms: i64,
 }
 
+/// Archive V1 (P5C-S1): Active -> Archived.
+pub(crate) struct ArchiveTaskInput {
+    pub(crate) id: String,
+    pub(crate) updated_at_ms: i64,
+}
+
+/// Archive V1 (P5C-S1): Archived -> Active.
+pub(crate) struct UnarchiveTaskInput {
+    pub(crate) id: String,
+    pub(crate) updated_at_ms: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(crate) enum TaskError {
     #[error("task not found")]
@@ -227,6 +242,7 @@ struct RawTaskRecord {
     due_date: Option<String>,
     project_id: Option<String>,
     deleted_at_ms: Option<i64>,
+    archived_at_ms: Option<i64>,
 }
 
 impl RawTaskRecord {
@@ -235,6 +251,9 @@ impl RawTaskRecord {
         validate_timestamp(self.updated_at_ms)?;
         if let Some(deleted_at_ms) = self.deleted_at_ms {
             validate_timestamp(deleted_at_ms)?;
+        }
+        if let Some(archived_at_ms) = self.archived_at_ms {
+            validate_timestamp(archived_at_ms)?;
         }
         if self.updated_at_ms < self.created_at_ms
             || !matches!(self.is_important, 0 | 1)
@@ -258,6 +277,7 @@ impl RawTaskRecord {
             project_id: self.project_id,
             tag_ids,
             deleted_at_ms: self.deleted_at_ms,
+            archived_at_ms: self.archived_at_ms,
         })
     }
 }
@@ -274,6 +294,7 @@ fn raw_task_from_row(row: &Row<'_>) -> rusqlite::Result<RawTaskRecord> {
         due_date: row.get(7)?,
         project_id: row.get(8)?,
         deleted_at_ms: row.get(9)?,
+        archived_at_ms: row.get(10)?,
     })
 }
 
@@ -448,7 +469,7 @@ impl TaskDbService {
                  id, title, created_at_ms, updated_at_ms, is_important, is_urgent, due_date, project_id \
              ) VALUES(?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7) \
              RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                       is_important, is_urgent, due_date, project_id, deleted_at_ms",
+                       is_important, is_urgent, due_date, project_id, deleted_at_ms, archived_at_ms",
             params![
                 &input.id,
                 &input.title,
@@ -482,8 +503,8 @@ impl TaskDbService {
         let mut statement = conn
             .prepare(
                 "SELECT id, title, status, created_at_ms, updated_at_ms, \
-                        is_important, is_urgent, due_date, project_id, deleted_at_ms \
-                 FROM tasks WHERE deleted_at_ms IS NULL \
+                        is_important, is_urgent, due_date, project_id, deleted_at_ms, archived_at_ms \
+                 FROM tasks WHERE deleted_at_ms IS NULL AND archived_at_ms IS NULL \
                  ORDER BY updated_at_ms DESC, id ASC",
             )
             .map_err(|_| TaskError::PersistenceFailed)?;
@@ -505,7 +526,7 @@ impl TaskDbService {
         let mut statement = conn
             .prepare(
                 "SELECT id, title, status, created_at_ms, updated_at_ms, \
-                        is_important, is_urgent, due_date, project_id, deleted_at_ms \
+                        is_important, is_urgent, due_date, project_id, deleted_at_ms, archived_at_ms \
                  FROM tasks WHERE deleted_at_ms IS NOT NULL \
                  ORDER BY deleted_at_ms DESC, id ASC",
             )
@@ -533,7 +554,7 @@ impl TaskDbService {
                  SET deleted_at_ms = ?1, updated_at_ms = ?1 \
                  WHERE id = ?2 AND deleted_at_ms IS NULL \
                  RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                           is_important, is_urgent, due_date, project_id, deleted_at_ms",
+                           is_important, is_urgent, due_date, project_id, deleted_at_ms, archived_at_ms",
                 params![input.updated_at_ms, input.id],
                 raw_task_from_row,
             )
@@ -554,7 +575,62 @@ impl TaskDbService {
                  SET deleted_at_ms = NULL, updated_at_ms = ?1 \
                  WHERE id = ?2 AND deleted_at_ms IS NOT NULL \
                  RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                           is_important, is_urgent, due_date, project_id, deleted_at_ms",
+                           is_important, is_urgent, due_date, project_id, deleted_at_ms, archived_at_ms",
+                params![input.updated_at_ms, input.id],
+                raw_task_from_row,
+            )
+            .optional()
+            .map_err(|_| TaskError::PersistenceFailed)?;
+        task_from_raw(conn, raw.ok_or(TaskError::NotFound)?)
+    }
+
+    /// Archive V1 (P5C-S1): Active -> Archived.
+    ///
+    /// Target precondition is the ACTIVE state
+    /// (`deleted_at_ms IS NULL AND archived_at_ms IS NULL`), so archiving a
+    /// deleted row or an already archived row fails closed with NOT_FOUND
+    /// instead of silently mutating it. Only the archive state and
+    /// `updated_at_ms` change: status, project, tags, deadline, planning flags
+    /// and title are preserved by construction.
+    pub(crate) fn archive(
+        conn: &Connection,
+        input: ArchiveTaskInput,
+    ) -> Result<TaskRecord, TaskError> {
+        validate_id(&input.id)?;
+        validate_timestamp(input.updated_at_ms)?;
+        let raw = conn
+            .query_row(
+                "UPDATE tasks \
+                 SET archived_at_ms = ?1, updated_at_ms = ?1 \
+                 WHERE id = ?2 AND deleted_at_ms IS NULL AND archived_at_ms IS NULL \
+                 RETURNING id, title, status, created_at_ms, updated_at_ms, \
+                           is_important, is_urgent, due_date, project_id, deleted_at_ms, archived_at_ms",
+                params![input.updated_at_ms, input.id],
+                raw_task_from_row,
+            )
+            .optional()
+            .map_err(|_| TaskError::PersistenceFailed)?;
+        task_from_raw(conn, raw.ok_or(TaskError::NotFound)?)
+    }
+
+    /// Archive V1 (P5C-S1): Archived -> Active.
+    ///
+    /// Target precondition is the ARCHIVED state
+    /// (`deleted_at_ms IS NULL AND archived_at_ms IS NOT NULL`), so unarchiving
+    /// a deleted row or an already active row fails closed with NOT_FOUND.
+    pub(crate) fn unarchive(
+        conn: &Connection,
+        input: UnarchiveTaskInput,
+    ) -> Result<TaskRecord, TaskError> {
+        validate_id(&input.id)?;
+        validate_timestamp(input.updated_at_ms)?;
+        let raw = conn
+            .query_row(
+                "UPDATE tasks \
+                 SET archived_at_ms = NULL, updated_at_ms = ?1 \
+                 WHERE id = ?2 AND deleted_at_ms IS NULL AND archived_at_ms IS NOT NULL \
+                 RETURNING id, title, status, created_at_ms, updated_at_ms, \
+                           is_important, is_urgent, due_date, project_id, deleted_at_ms, archived_at_ms",
                 params![input.updated_at_ms, input.id],
                 raw_task_from_row,
             )
@@ -574,9 +650,9 @@ impl TaskDbService {
         let task = conn
             .query_row(
                 "UPDATE tasks SET title = ?1, updated_at_ms = ?2 \
-                 WHERE id = ?3 AND deleted_at_ms IS NULL \
+                 WHERE id = ?3 AND deleted_at_ms IS NULL AND archived_at_ms IS NULL \
                  RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                           is_important, is_urgent, due_date, project_id, deleted_at_ms",
+                           is_important, is_urgent, due_date, project_id, deleted_at_ms, archived_at_ms",
                 params![input.title, input.updated_at_ms, input.id],
                 raw_task_from_row,
             )
@@ -598,7 +674,8 @@ impl TaskDbService {
             .map_err(|_| TaskError::PersistenceFailed)?;
         let current_raw = transaction
             .query_row(
-                "SELECT status FROM tasks WHERE id = ?1 AND deleted_at_ms IS NULL",
+                "SELECT status FROM tasks WHERE id = ?1 AND deleted_at_ms IS NULL \
+                  AND archived_at_ms IS NULL",
                 [&input.id],
                 |row| row.get::<_, String>(0),
             )
@@ -631,9 +708,9 @@ impl TaskDbService {
         update_planning_value(
             conn,
             "UPDATE tasks SET is_important = ?1, updated_at_ms = ?2 \
-             WHERE id = ?3 AND deleted_at_ms IS NULL \
+             WHERE id = ?3 AND deleted_at_ms IS NULL AND archived_at_ms IS NULL \
              RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                       is_important, is_urgent, due_date, project_id, deleted_at_ms",
+                       is_important, is_urgent, due_date, project_id, deleted_at_ms, archived_at_ms",
             input.is_important,
             input.updated_at_ms,
             &input.id,
@@ -649,9 +726,9 @@ impl TaskDbService {
         update_planning_value(
             conn,
             "UPDATE tasks SET is_urgent = ?1, updated_at_ms = ?2 \
-             WHERE id = ?3 AND deleted_at_ms IS NULL \
+             WHERE id = ?3 AND deleted_at_ms IS NULL AND archived_at_ms IS NULL \
              RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                       is_important, is_urgent, due_date, project_id, deleted_at_ms",
+                       is_important, is_urgent, due_date, project_id, deleted_at_ms, archived_at_ms",
             input.is_urgent,
             input.updated_at_ms,
             &input.id,
@@ -668,9 +745,9 @@ impl TaskDbService {
         update_planning_value(
             conn,
             "UPDATE tasks SET due_date = ?1, updated_at_ms = ?2 \
-             WHERE id = ?3 AND deleted_at_ms IS NULL \
+             WHERE id = ?3 AND deleted_at_ms IS NULL AND archived_at_ms IS NULL \
              RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                       is_important, is_urgent, due_date, project_id, deleted_at_ms",
+                       is_important, is_urgent, due_date, project_id, deleted_at_ms, archived_at_ms",
             input.due_date,
             input.updated_at_ms,
             &input.id,
@@ -686,9 +763,9 @@ impl TaskDbService {
         let task = conn
             .query_row(
                 "UPDATE tasks SET due_date = NULL, updated_at_ms = ?1 \
-                 WHERE id = ?2 AND deleted_at_ms IS NULL \
+                 WHERE id = ?2 AND deleted_at_ms IS NULL AND archived_at_ms IS NULL \
                  RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                           is_important, is_urgent, due_date, project_id, deleted_at_ms",
+                           is_important, is_urgent, due_date, project_id, deleted_at_ms, archived_at_ms",
                 params![input.updated_at_ms, input.id],
                 raw_task_from_row,
             )
@@ -718,9 +795,9 @@ impl TaskDbService {
         update_planning_value(
             conn,
             "UPDATE tasks SET project_id = ?1, updated_at_ms = ?2 \
-             WHERE id = ?3 AND deleted_at_ms IS NULL \
+             WHERE id = ?3 AND deleted_at_ms IS NULL AND archived_at_ms IS NULL \
              RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                       is_important, is_urgent, due_date, project_id, deleted_at_ms",
+                       is_important, is_urgent, due_date, project_id, deleted_at_ms, archived_at_ms",
             input.project_id,
             input.updated_at_ms,
             &input.id,
@@ -736,9 +813,9 @@ impl TaskDbService {
         let task = conn
             .query_row(
                 "UPDATE tasks SET project_id = NULL, updated_at_ms = ?1 \
-                 WHERE id = ?2 AND deleted_at_ms IS NULL \
+                 WHERE id = ?2 AND deleted_at_ms IS NULL AND archived_at_ms IS NULL \
                  RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                           is_important, is_urgent, due_date, project_id, deleted_at_ms",
+                           is_important, is_urgent, due_date, project_id, deleted_at_ms, archived_at_ms",
                 params![input.updated_at_ms, input.id],
                 raw_task_from_row,
             )
@@ -760,7 +837,8 @@ impl TaskDbService {
 
         let task_exists = transaction
             .query_row(
-                "SELECT 1 FROM tasks WHERE id = ?1 AND deleted_at_ms IS NULL",
+                "SELECT 1 FROM tasks WHERE id = ?1 AND deleted_at_ms IS NULL \
+                  AND archived_at_ms IS NULL",
                 [&input.id],
                 |_| Ok(()),
             )
@@ -785,9 +863,9 @@ impl TaskDbService {
         let raw = transaction
             .query_row(
                 "UPDATE tasks SET updated_at_ms = ?1 \
-                 WHERE id = ?2 AND deleted_at_ms IS NULL \
+                 WHERE id = ?2 AND deleted_at_ms IS NULL AND archived_at_ms IS NULL \
                  RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                           is_important, is_urgent, due_date, project_id, deleted_at_ms",
+                           is_important, is_urgent, due_date, project_id, deleted_at_ms, archived_at_ms",
                 params![input.updated_at_ms, &input.id],
                 raw_task_from_row,
             )
@@ -811,7 +889,8 @@ impl TaskDbService {
             .map_err(|_| TaskError::PersistenceFailed)?;
         let task_exists = transaction
             .query_row(
-                "SELECT 1 FROM tasks WHERE id = ?1 AND deleted_at_ms IS NULL",
+                "SELECT 1 FROM tasks WHERE id = ?1 AND deleted_at_ms IS NULL \
+                  AND archived_at_ms IS NULL",
                 [&input.id],
                 |_| Ok(()),
             )
@@ -832,9 +911,9 @@ impl TaskDbService {
         let raw = transaction
             .query_row(
                 "UPDATE tasks SET updated_at_ms = ?1 \
-                 WHERE id = ?2 AND deleted_at_ms IS NULL \
+                 WHERE id = ?2 AND deleted_at_ms IS NULL AND archived_at_ms IS NULL \
                  RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                           is_important, is_urgent, due_date, project_id, deleted_at_ms",
+                           is_important, is_urgent, due_date, project_id, deleted_at_ms, archived_at_ms",
                 params![input.updated_at_ms, &input.id],
                 raw_task_from_row,
             )
@@ -872,8 +951,9 @@ fn compare_and_set_status(
         .query_row(
             "UPDATE tasks SET status = ?1, updated_at_ms = ?2 \
              WHERE id = ?3 AND status = ?4 AND deleted_at_ms IS NULL \
+               AND archived_at_ms IS NULL \
              RETURNING id, title, status, created_at_ms, updated_at_ms, \
-                       is_important, is_urgent, due_date, project_id, deleted_at_ms",
+                       is_important, is_urgent, due_date, project_id, deleted_at_ms, archived_at_ms",
             params![target.as_str(), updated_at_ms, id, previous.as_str()],
             raw_task_from_row,
         )
@@ -961,6 +1041,7 @@ mod tests {
                 (11, "0011_add_canvas_node_soft_delete".to_string()),
                 (12, "0012_add_notes_and_diary".to_string()),
                 (13, "0013_add_global_search".to_string()),
+                (14, "0014_add_archive_state".to_string()),
             ]
         );
 
@@ -997,6 +1078,7 @@ mod tests {
                 ("due_date".into(), "TEXT".into(), 0, None, 0),
                 ("project_id".into(), "TEXT".into(), 0, None, 0),
                 ("deleted_at_ms".into(), "INTEGER".into(), 0, None, 0),
+                ("archived_at_ms".into(), "INTEGER".into(), 0, None, 0),
             ]
         );
 
@@ -1046,6 +1128,7 @@ mod tests {
                 project_id: None,
                 tag_ids: vec![],
                 deleted_at_ms: None,
+                archived_at_ms: None,
             }]
         );
         let history: Vec<i64> = connection
@@ -1055,7 +1138,10 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(history, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        assert_eq!(
+            history,
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        );
 
         let foreign_keys: Vec<(String, String, String)> = connection
             .prepare("PRAGMA foreign_key_list('tasks')")
@@ -1224,6 +1310,209 @@ mod tests {
                 },
             ),
             Err(TaskError::NotFound)
+        );
+    }
+
+    #[test]
+    fn archive_and_unarchive_move_task_between_archived_and_active_workspace() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        let created = TaskDbService::create(
+            &connection,
+            CreateTaskInput {
+                id: ID_A.into(),
+                title: "Archivable".into(),
+                created_at_ms: 10,
+                is_important: true,
+                is_urgent: true,
+                due_date: Some("2026-08-31".into()),
+                project_id: None,
+                tag_ids: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(created.archived_at_ms, None, "新建任务必须是 ACTIVE");
+
+        let archived = TaskDbService::archive(
+            &connection,
+            ArchiveTaskInput {
+                id: ID_A.into(),
+                updated_at_ms: 20,
+            },
+        )
+        .unwrap();
+        assert_eq!(archived.archived_at_ms, Some(20));
+        assert_eq!(archived.updated_at_ms, 20);
+        assert_eq!(archived.deleted_at_ms, None, "归档不是删除");
+        assert_eq!(archived.title, "Archivable");
+        assert_eq!(archived.created_at_ms, 10);
+        assert!(archived.is_important);
+        assert!(archived.is_urgent);
+        assert_eq!(archived.due_date.as_deref(), Some("2026-08-31"));
+        assert!(TaskDbService::list(&connection).unwrap().is_empty());
+        assert!(TaskDbService::list_trashed(&connection).unwrap().is_empty());
+
+        // active-only 写入必须 fail closed
+        assert_eq!(
+            TaskDbService::rename(
+                &connection,
+                RenameTaskInput {
+                    id: ID_A.into(),
+                    title: "Hidden rename".into(),
+                    updated_at_ms: 30,
+                },
+            ),
+            Err(TaskError::NotFound)
+        );
+        assert_eq!(
+            TaskDbService::archive(
+                &connection,
+                ArchiveTaskInput {
+                    id: ID_A.into(),
+                    updated_at_ms: 30,
+                },
+            ),
+            Err(TaskError::NotFound),
+            "重复归档必须 fail closed，不得静默幂等"
+        );
+
+        let unarchived = TaskDbService::unarchive(
+            &connection,
+            UnarchiveTaskInput {
+                id: ID_A.into(),
+                updated_at_ms: 40,
+            },
+        )
+        .unwrap();
+        assert_eq!(unarchived.archived_at_ms, None);
+        assert_eq!(unarchived.updated_at_ms, 40);
+        assert_eq!(TaskDbService::list(&connection).unwrap(), [unarchived]);
+        assert_eq!(
+            TaskDbService::unarchive(
+                &connection,
+                UnarchiveTaskInput {
+                    id: ID_A.into(),
+                    updated_at_ms: 50,
+                },
+            ),
+            Err(TaskError::NotFound),
+            "对 active 行取消归档必须 fail closed"
+        );
+    }
+
+    #[test]
+    fn archive_state_survives_trash_restore_round_trip() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_task(&connection, ID_A, "Round trip", 10);
+
+        let archived = TaskDbService::archive(
+            &connection,
+            ArchiveTaskInput {
+                id: ID_A.into(),
+                updated_at_ms: 20,
+            },
+        )
+        .unwrap();
+        assert_eq!(archived.archived_at_ms, Some(20));
+
+        // Archived -> Trash：保留 archived_at_ms，只设置 deleted_at_ms
+        let trashed = TaskDbService::trash(
+            &connection,
+            TrashTaskInput {
+                id: ID_A.into(),
+                updated_at_ms: 30,
+            },
+        )
+        .unwrap();
+        assert_eq!(trashed.deleted_at_ms, Some(30));
+        assert_eq!(trashed.archived_at_ms, Some(20));
+        assert_eq!(trashed.updated_at_ms, 30);
+
+        // Trash -> Restore：清 deleted_at_ms，保留 archived_at_ms
+        let restored = TaskDbService::restore(
+            &connection,
+            RestoreTaskInput {
+                id: ID_A.into(),
+                updated_at_ms: 40,
+            },
+        )
+        .unwrap();
+        assert_eq!(restored.deleted_at_ms, None);
+        assert_eq!(restored.archived_at_ms, Some(20));
+        assert!(
+            TaskDbService::list(&connection).unwrap().is_empty(),
+            "恢复后仍是 ARCHIVED，不得出现在活跃列表"
+        );
+        assert!(TaskDbService::list_trashed(&connection).unwrap().is_empty());
+
+        // Archive -> Active
+        let unarchived = TaskDbService::unarchive(
+            &connection,
+            UnarchiveTaskInput {
+                id: ID_A.into(),
+                updated_at_ms: 50,
+            },
+        )
+        .unwrap();
+        assert_eq!(unarchived.archived_at_ms, None);
+        assert_eq!(TaskDbService::list(&connection).unwrap(), [unarchived]);
+    }
+
+    #[test]
+    fn archive_and_unarchive_fail_closed_for_deleted_rows() {
+        let (_sandbox, _database_path, connection) = migrated_database();
+        create_task(&connection, ID_A, "Deleted", 10);
+        TaskDbService::archive(
+            &connection,
+            ArchiveTaskInput {
+                id: ID_A.into(),
+                updated_at_ms: 20,
+            },
+        )
+        .unwrap();
+        let trashed = TaskDbService::trash(
+            &connection,
+            TrashTaskInput {
+                id: ID_A.into(),
+                updated_at_ms: 30,
+            },
+        )
+        .unwrap();
+        assert_eq!(trashed.archived_at_ms, Some(20));
+
+        assert_eq!(
+            TaskDbService::archive(
+                &connection,
+                ArchiveTaskInput {
+                    id: ID_A.into(),
+                    updated_at_ms: 40,
+                },
+            ),
+            Err(TaskError::NotFound),
+            "对已删除行归档必须 fail closed，不得隐式恢复"
+        );
+        assert_eq!(
+            TaskDbService::unarchive(
+                &connection,
+                UnarchiveTaskInput {
+                    id: ID_A.into(),
+                    updated_at_ms: 40,
+                },
+            ),
+            Err(TaskError::NotFound),
+            "对已删除行取消归档必须 fail closed"
+        );
+        assert_eq!(TaskDbService::list_trashed(&connection).unwrap(), [trashed]);
+
+        assert_eq!(
+            TaskDbService::archive(
+                &connection,
+                ArchiveTaskInput {
+                    id: ID_B.into(),
+                    updated_at_ms: 40,
+                },
+            ),
+            Err(TaskError::NotFound),
+            "缺失行必须 fail closed"
         );
     }
 
@@ -2038,6 +2327,7 @@ mod tests {
                 project_id: None,
                 tag_ids: vec![],
                 deleted_at_ms: None,
+                archived_at_ms: None,
             }]
         );
     }
@@ -2119,6 +2409,7 @@ mod tests {
                 ("created_at_ms".into(), "INTEGER".into()),
                 ("updated_at_ms".into(), "INTEGER".into()),
                 ("deleted_at_ms".into(), "INTEGER".into()),
+                ("archived_at_ms".into(), "INTEGER".into()),
             ]
         );
 

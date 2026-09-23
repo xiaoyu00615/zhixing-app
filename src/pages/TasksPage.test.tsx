@@ -32,6 +32,7 @@ const TASK: Task = {
   projectId: null,
   tagIds: [],
   deletedAtMs: null,
+  archivedAtMs: null,
 }
 
 function taskFixture(
@@ -84,6 +85,10 @@ function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
   addTaskTag.mockResolvedValue(TASK)
   const removeTaskTag = vi.fn<TaskService['removeTaskTag']>()
   removeTaskTag.mockResolvedValue(TASK)
+  const archiveTask = vi.fn<TaskService['archiveTask']>()
+  archiveTask.mockResolvedValue(TASK)
+  const unarchiveTask = vi.fn<TaskService['unarchiveTask']>()
+  unarchiveTask.mockResolvedValue(TASK)
 
   const service: TaskService = {
     createTask,
@@ -91,6 +96,8 @@ function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
     listTrashedTasks,
     trashTask,
     restoreTask,
+    archiveTask,
+    unarchiveTask,
     renameTask,
     startTask,
     completeTask,

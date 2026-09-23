@@ -68,6 +68,8 @@ type NoteOperationType =
   | 'note.updateNote'
   | 'note.softDelete'
   | 'note.restore'
+  | 'note.archive'
+  | 'note.unarchive'
 
 const NOTE_OPERATION_TYPES = new Set<NoteOperationType>([
   'note.create',
@@ -76,6 +78,8 @@ const NOTE_OPERATION_TYPES = new Set<NoteOperationType>([
   'note.updateNote',
   'note.softDelete',
   'note.restore',
+  'note.archive',
+  'note.unarchive',
 ])
 
 function isNoteOperation(type: string): boolean {
@@ -410,6 +414,12 @@ async function handleRequest(value: unknown): Promise<void> {
         case 'note.restore':
           success(request.requestId, state.database.restoreNote(request.input))
           return
+        case 'note.archive':
+          success(request.requestId, state.database.archiveNote(request.input))
+          return
+        case 'note.unarchive':
+          success(request.requestId, state.database.unarchiveNote(request.input))
+          return
       }
     } catch (error: unknown) {
       const code: NoteRepositoryErrorCode =
@@ -438,6 +448,12 @@ async function handleRequest(value: unknown): Promise<void> {
         return
       case 'task.restore':
         success(request.requestId, state.database.restoreTask(request.input))
+        return
+      case 'task.archive':
+        success(request.requestId, state.database.archiveTask(request.input))
+        return
+      case 'task.unarchive':
+        success(request.requestId, state.database.unarchiveTask(request.input))
         return
       case 'task.rename':
         success(request.requestId, state.database.renameTask(request.input))

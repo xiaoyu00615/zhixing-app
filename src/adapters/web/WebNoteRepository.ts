@@ -1,11 +1,13 @@
 import type { Note } from '@/note/model'
 import {
   NoteRepositoryError,
+  type ArchiveNoteInput,
   type CreateNoteInput,
   type NoteRepository,
   type NoteRepositoryOperation,
   type RestoreNoteInput,
   type SoftDeleteNoteInput,
+  type UnarchiveNoteInput,
   type UpdateNoteInput,
 } from '@/note/repository'
 import {
@@ -27,6 +29,7 @@ function parseNote(value: unknown, operation: NoteRepositoryOperation): Note {
     createdAtMs,
     updatedAtMs,
     deletedAtMs,
+    archivedAtMs,
   } = value
   if (
     !isCanonicalLowercaseUuid(id) ||
@@ -35,7 +38,9 @@ function parseNote(value: unknown, operation: NoteRepositoryOperation): Note {
     !isNonNegativeSafeIntegerMilliseconds(createdAtMs) ||
     !isNonNegativeSafeIntegerMilliseconds(updatedAtMs) ||
     (deletedAtMs !== null &&
-      !isNonNegativeSafeIntegerMilliseconds(deletedAtMs))
+      !isNonNegativeSafeIntegerMilliseconds(deletedAtMs)) ||
+    (archivedAtMs !== null &&
+      !isNonNegativeSafeIntegerMilliseconds(archivedAtMs))
   ) {
     throw new NoteRepositoryError('PERSISTENCE_ERROR', operation)
   }
@@ -46,6 +51,7 @@ function parseNote(value: unknown, operation: NoteRepositoryOperation): Note {
     createdAtMs,
     updatedAtMs,
     deletedAtMs,
+    archivedAtMs,
   }
 }
 
@@ -166,6 +172,30 @@ export class WebNoteRepository implements NoteRepository {
     validateTimestamp(input.updatedAtMs, operation)
     try {
       await this.#client.restoreNote(input)
+    } catch (error: unknown) {
+      throw mapClientError(error, operation)
+    }
+  }
+
+  /** Archive V1 (P5C-S1): Active -> Archived. */
+  async archive(input: ArchiveNoteInput): Promise<void> {
+    const operation = 'archive'
+    validateId(input.id, operation)
+    validateTimestamp(input.updatedAtMs, operation)
+    try {
+      await this.#client.archiveNote(input)
+    } catch (error: unknown) {
+      throw mapClientError(error, operation)
+    }
+  }
+
+  /** Archive V1 (P5C-S1): Archived -> Active. */
+  async unarchive(input: UnarchiveNoteInput): Promise<void> {
+    const operation = 'unarchive'
+    validateId(input.id, operation)
+    validateTimestamp(input.updatedAtMs, operation)
+    try {
+      await this.#client.unarchiveNote(input)
     } catch (error: unknown) {
       throw mapClientError(error, operation)
     }

@@ -7,6 +7,7 @@ import {
 } from '@/task/model'
 import {
   isTaskRepositoryErrorCode,
+  type ArchiveTaskInput,
   type ChangeTaskStatusInput,
   type ClearTaskDeadlineInput,
   type CreateTaskInput,
@@ -16,6 +17,7 @@ import {
   type SetTaskImportanceInput,
   type SetTaskUrgencyInput,
   type TrashTaskInput,
+  type UnarchiveTaskInput,
 } from '@/task/repository'
 import { isTrashRepositoryErrorCode } from '@/trash/model'
 import type {
@@ -60,9 +62,11 @@ import type {
 } from '@/canvas/repository'
 import {
   isNoteRepositoryErrorCode,
+  type ArchiveNoteInput,
   type CreateNoteInput,
   type RestoreNoteInput,
   type SoftDeleteNoteInput,
+  type UnarchiveNoteInput,
   type UpdateNoteInput,
 } from '@/note/repository'
 import {
@@ -105,6 +109,16 @@ export type TaskWorkerRequest =
       readonly requestId: number
       readonly type: 'task.restore'
       readonly input: RestoreTaskInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'task.archive'
+      readonly input: ArchiveTaskInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'task.unarchive'
+      readonly input: UnarchiveTaskInput
     }
   | {
       readonly requestId: number
@@ -311,6 +325,16 @@ export type TaskWorkerRequest =
       readonly requestId: number
       readonly type: 'note.restore'
       readonly input: RestoreNoteInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'note.archive'
+      readonly input: ArchiveNoteInput
+    }
+  | {
+      readonly requestId: number
+      readonly type: 'note.unarchive'
+      readonly input: UnarchiveNoteInput
     }
   | {
       readonly requestId: number
@@ -737,6 +761,8 @@ export function parseTaskWorkerRequest(
     case 'task.clearDeadline':
     case 'task.trash':
     case 'task.restore':
+    case 'task.archive':
+    case 'task.unarchive':
       return isPlanningBaseInput(value.input)
         ? {
             requestId: value.requestId,
@@ -1005,6 +1031,8 @@ export function parseTaskWorkerRequest(
         : null
     case 'note.softDelete':
     case 'note.restore':
+    case 'note.archive':
+    case 'note.unarchive':
       return isNoteMutationInput(value.input)
         ? {
             requestId: value.requestId,

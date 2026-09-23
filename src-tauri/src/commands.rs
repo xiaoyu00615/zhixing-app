@@ -20,15 +20,15 @@ use crate::project::{
     CreateProjectInput, ProjectDbService, ProjectError, ProjectRecord, RenameProjectInput,
 };
 use crate::notes_db::{
-    CreateNoteInput, NoteDbService, NoteError, NoteRecord, RestoreNoteInput, SoftDeleteNoteInput,
-    UpdateNoteInput,
+    ArchiveNoteInput, CreateNoteInput, NoteDbService, NoteError, NoteRecord, RestoreNoteInput,
+    SoftDeleteNoteInput, UnarchiveNoteInput, UpdateNoteInput,
 };
 use crate::tag::{CreateTagInput, RenameTagInput, TagDbService, TagError, TagRecord};
 use crate::task::{
-    AddTaskTagInput, ChangeTaskStatusInput, ClearTaskDeadlineInput, ClearTaskProjectInput,
-    CreateTaskInput, RemoveTaskTagInput, RenameTaskInput, RestoreTaskInput, SetTaskDeadlineInput,
-    SetTaskImportanceInput, SetTaskProjectInput, SetTaskUrgencyInput, TaskDbService, TaskError,
-    TaskRecord, TaskStatusOperation, TrashTaskInput,
+    AddTaskTagInput, ArchiveTaskInput, ChangeTaskStatusInput, ClearTaskDeadlineInput,
+    ClearTaskProjectInput, CreateTaskInput, RemoveTaskTagInput, RenameTaskInput, RestoreTaskInput,
+    SetTaskDeadlineInput, SetTaskImportanceInput, SetTaskProjectInput, SetTaskUrgencyInput,
+    TaskDbService, TaskError, TaskRecord, TaskStatusOperation, TrashTaskInput, UnarchiveTaskInput,
 };
 use crate::RuntimeStatus;
 use crate::search_db::{SearchDbService, SearchError, SearchQueryInput, SearchResultRecord};
@@ -151,6 +151,7 @@ pub(crate) struct TaskDto {
     project_id: Option<String>,
     tag_ids: Vec<String>,
     deleted_at_ms: Option<i64>,
+    archived_at_ms: Option<i64>,
 }
 
 impl From<TaskRecord> for TaskDto {
@@ -167,6 +168,7 @@ impl From<TaskRecord> for TaskDto {
             project_id: task.project_id,
             tag_ids: task.tag_ids,
             deleted_at_ms: task.deleted_at_ms,
+            archived_at_ms: task.archived_at_ms,
         }
     }
 }
@@ -274,6 +276,42 @@ pub(crate) fn task_restore(
     TaskDbService::restore(
         &connection,
         RestoreTaskInput {
+            id: input.id,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(TaskDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn task_archive(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: TaskLifecycleDto,
+) -> Result<TaskDto, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    TaskDbService::archive(
+        &connection,
+        ArchiveTaskInput {
+            id: input.id,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map(TaskDto::from)
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub(crate) fn task_unarchive(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: TaskLifecycleDto,
+) -> Result<TaskDto, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    TaskDbService::unarchive(
+        &connection,
+        UnarchiveTaskInput {
             id: input.id,
             updated_at_ms: input.updated_at_ms,
         },
@@ -1340,6 +1378,7 @@ pub(crate) struct NoteDto {
     created_at_ms: i64,
     updated_at_ms: i64,
     deleted_at_ms: Option<i64>,
+    archived_at_ms: Option<i64>,
 }
 
 impl From<NoteRecord> for NoteDto {
@@ -1351,6 +1390,7 @@ impl From<NoteRecord> for NoteDto {
             created_at_ms: note.created_at_ms,
             updated_at_ms: note.updated_at_ms,
             deleted_at_ms: note.deleted_at_ms,
+            archived_at_ms: note.archived_at_ms,
         }
     }
 }
@@ -1477,6 +1517,40 @@ pub(crate) fn note_restore(
     NoteDbService::restore(
         &connection,
         RestoreNoteInput {
+            id: input.id,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map_err(note_error)
+}
+
+#[tauri::command]
+pub(crate) fn note_archive(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: NoteLifecycleDto,
+) -> Result<(), TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    NoteDbService::archive(
+        &connection,
+        ArchiveNoteInput {
+            id: input.id,
+            updated_at_ms: input.updated_at_ms,
+        },
+    )
+    .map_err(note_error)
+}
+
+#[tauri::command]
+pub(crate) fn note_unarchive(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+    input: NoteLifecycleDto,
+) -> Result<(), TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    NoteDbService::unarchive(
+        &connection,
+        UnarchiveNoteInput {
             id: input.id,
             updated_at_ms: input.updated_at_ms,
         },
@@ -2118,6 +2192,7 @@ mod tests {
             project_id: None,
             tag_ids: vec![],
             deleted_at_ms: None,
+            archived_at_ms: None,
         });
         assert_eq!(
             serde_json::to_value(output).unwrap(),
@@ -2132,7 +2207,8 @@ mod tests {
                 "dueDate": "2026-08-23",
                 "projectId": null,
                 "tagIds": [],
-                "deletedAtMs": null
+                "deletedAtMs": null,
+                "archivedAtMs": null
             })
         );
 

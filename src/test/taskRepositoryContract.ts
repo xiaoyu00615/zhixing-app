@@ -10,6 +10,7 @@ import {
 import {
   TASK_REPOSITORY_ERROR_CODES,
   TaskRepositoryError,
+  type ArchiveTaskInput,
   type ChangeTaskStatusInput,
   type AddTaskTagInput,
   type ClearTaskDeadlineInput,
@@ -24,6 +25,7 @@ import {
   type TaskRepositoryErrorCode,
   type TaskRepositoryOperation,
   type TrashTaskInput,
+  type UnarchiveTaskInput,
 } from '@/task/repository'
 
 export const TASK_CONTRACT_IDS = {
@@ -108,6 +110,7 @@ export class TaskRepositoryContractBackend {
       projectId: input.projectId ?? null,
       tagIds: input.tagIds ?? [],
       deletedAtMs: null,
+      archivedAtMs: null,
     }
     this.#tasks.set(task.id, task)
     return { ...task }
@@ -116,7 +119,7 @@ export class TaskRepositoryContractBackend {
   listTasks(): readonly Task[] {
     this.consumeFailure()
     return [...this.#tasks.values()]
-      .filter((task) => task.deletedAtMs === null)
+      .filter((task) => isActiveTask(task))
       .sort(
         (left, right) =>
           right.updatedAtMs - left.updatedAtMs ||
@@ -139,7 +142,7 @@ export class TaskRepositoryContractBackend {
 
   trashTask(input: TrashTaskInput): Task {
     this.consumeFailure()
-    const current = this.requireActive(input.id)
+    const current = this.requireNotDeleted(input.id)
     const changed = {
       ...current,
       deletedAtMs: input.updatedAtMs,
@@ -164,10 +167,44 @@ export class TaskRepositoryContractBackend {
     return { ...changed }
   }
 
+  archiveTask(input: ArchiveTaskInput): Task {
+    this.consumeFailure()
+    const current = this.#tasks.get(input.id)
+    if (current === undefined || !isActiveTask(current)) {
+      throw new TaskContractBackendError('NOT_FOUND', 'task not active')
+    }
+    const changed = {
+      ...current,
+      archivedAtMs: input.updatedAtMs,
+      updatedAtMs: input.updatedAtMs,
+    }
+    this.#tasks.set(input.id, changed)
+    return { ...changed }
+  }
+
+  unarchiveTask(input: UnarchiveTaskInput): Task {
+    this.consumeFailure()
+    const current = this.#tasks.get(input.id)
+    if (
+      current === undefined ||
+      current.deletedAtMs !== null ||
+      current.archivedAtMs === null
+    ) {
+      throw new TaskContractBackendError('NOT_FOUND', 'task not archived')
+    }
+    const changed = {
+      ...current,
+      archivedAtMs: null,
+      updatedAtMs: input.updatedAtMs,
+    }
+    this.#tasks.set(input.id, changed)
+    return { ...changed }
+  }
+
   renameTask(input: RenameTaskInput): Task {
     this.consumeFailure()
     const current = this.#tasks.get(input.id)
-    if (current === undefined || current.deletedAtMs !== null) {
+    if (current === undefined || !isActiveTask(current)) {
       throw new TaskContractBackendError(
         'NOT_FOUND',
         'C:\\private\\zhixing.db SQL=UPDATE tasks',
@@ -185,7 +222,7 @@ export class TaskRepositoryContractBackend {
   changeTaskStatus(input: ChangeTaskStatusInput): Task {
     this.consumeFailure()
     const current = this.#tasks.get(input.id)
-    if (current === undefined || current.deletedAtMs !== null) {
+    if (current === undefined || !isActiveTask(current)) {
       throw new TaskContractBackendError(
         'NOT_FOUND',
         '/private/opfs/zhixing.db SQL=SELECT status FROM tasks',
@@ -250,7 +287,7 @@ export class TaskRepositoryContractBackend {
     const task = this.#tasks.get(input.id)
     if (
       task === undefined ||
-      task.deletedAtMs !== null ||
+      !isActiveTask(task) ||
       !this.#tags.has(input.tagId)
     ) {
       throw new TaskContractBackendError('NOT_FOUND', 'missing task or tag')
@@ -272,7 +309,7 @@ export class TaskRepositoryContractBackend {
     const task = this.#tasks.get(input.id)
     if (
       task === undefined ||
-      task.deletedAtMs !== null ||
+      !isActiveTask(task) ||
       !task.tagIds.includes(input.tagId)
     ) {
       throw new TaskContractBackendError('NOT_FOUND', 'missing task tag')
@@ -295,7 +332,7 @@ export class TaskRepositoryContractBackend {
   ): Task {
     this.consumeFailure()
     const current = this.#tasks.get(id)
-    if (current === undefined || current.deletedAtMs !== null) {
+    if (current === undefined || !isActiveTask(current)) {
       throw new TaskContractBackendError(
         'NOT_FOUND',
         '/private/task planning SQL=UPDATE tasks',
@@ -306,7 +343,11 @@ export class TaskRepositoryContractBackend {
     return { ...changed }
   }
 
-  private requireActive(id: string): Task {
+  /**
+   * Trash / archive lifecycle target: "not deleted". An ARCHIVED task is still
+   * a legal trash target, which is what keeps Archive -> Trash reachable.
+   */
+  private requireNotDeleted(id: string): Task {
     const task = this.#tasks.get(id)
     if (task === undefined || task.deletedAtMs !== null) {
       throw new TaskContractBackendError('NOT_FOUND', 'task not active')
@@ -327,6 +368,14 @@ export class TaskRepositoryContractBackend {
 export interface TaskRepositoryContractFixture {
   readonly repository: TaskRepository
   readonly backend: TaskRepositoryContractBackend
+}
+
+/**
+ * Archive V1 (P5C-S1) reference predicate. Active = not deleted AND not
+ * archived. Deliberately NOT the same as "not deleted".
+ */
+function isActiveTask(task: Task): boolean {
+  return task.deletedAtMs === null && task.archivedAtMs === null
 }
 
 export type TaskRepositoryContractFixtureFactory =
@@ -397,6 +446,7 @@ export function defineTaskRepositoryContract(
         projectId: null,
         tagIds: [],
         deletedAtMs: null,
+        archivedAtMs: null,
       })
       await expectSafeError(
         repository.createTask({
@@ -686,6 +736,232 @@ export function defineTaskRepositoryContract(
         'NOT_FOUND',
         'restoreTask',
       )
+    })
+
+    test('archives an active task and hides it from the active workspace', async () => {
+      const { repository } = createFixture()
+      const created = await createTask(repository, TASK_CONTRACT_IDS.a)
+      const archived = await repository.archiveTask({
+        id: created.id,
+        updatedAtMs: 200,
+      })
+      expect(archived).toEqual({
+        ...created,
+        archivedAtMs: 200,
+        updatedAtMs: 200,
+      })
+      await expect(repository.listTasks()).resolves.toEqual([])
+      // Archiving is not deleting: the trash read stays empty.
+      await expect(repository.listTrashedTasks()).resolves.toEqual([])
+    })
+
+    test('unarchives back to the active workspace preserving every other field', async () => {
+      const { repository } = createFixture()
+      const tagId = '00000000-0000-4000-8000-000000000101'
+      const projectId = '00000000-0000-4000-8000-000000000102'
+      const created = await repository.createTask({
+        id: TASK_CONTRACT_IDS.a,
+        title: 'Archivable',
+        createdAtMs: 100,
+        isImportant: true,
+        isUrgent: true,
+        dueDate: '2026-08-23',
+        projectId,
+        tagIds: [tagId],
+      })
+      const started = await repository.changeTaskStatus({
+        id: created.id,
+        operation: 'start',
+        updatedAtMs: 150,
+      })
+      const archived = await repository.archiveTask({
+        id: created.id,
+        updatedAtMs: 200,
+      })
+      expect(archived).toMatchObject({
+        title: 'Archivable',
+        status: 'doing',
+        isImportant: true,
+        isUrgent: true,
+        dueDate: '2026-08-23',
+        projectId,
+        tagIds: [tagId],
+        createdAtMs: 100,
+      })
+
+      const unarchived = await repository.unarchiveTask({
+        id: created.id,
+        updatedAtMs: 300,
+      })
+      expect(unarchived).toEqual({ ...started, updatedAtMs: 300 })
+      await expect(repository.listTasks()).resolves.toEqual([unarchived])
+    })
+
+    test('accepts Archive -> Trash -> Restore -> Archive', async () => {
+      const { repository } = createFixture()
+      const created = await createTask(repository, TASK_CONTRACT_IDS.a)
+      const archived = await repository.archiveTask({
+        id: created.id,
+        updatedAtMs: 200,
+      })
+      const trashed = await repository.trashTask({
+        id: created.id,
+        updatedAtMs: 300,
+      })
+      expect(trashed).toEqual({
+        ...archived,
+        updatedAtMs: 300,
+        deletedAtMs: 300,
+      })
+      // Archive state is preserved by the trash operation.
+      expect(trashed.archivedAtMs).toBe(200)
+      await expect(repository.listTasks()).resolves.toEqual([])
+      await expect(repository.listTrashedTasks()).resolves.toEqual([trashed])
+
+      const restored = await repository.restoreTask({
+        id: created.id,
+        updatedAtMs: 400,
+      })
+      expect(restored).toEqual({
+        ...archived,
+        updatedAtMs: 400,
+        deletedAtMs: null,
+      })
+      // Restored from Trash it is ARCHIVED again, not active.
+      expect(restored.archivedAtMs).toBe(200)
+      await expect(repository.listTasks()).resolves.toEqual([])
+      await expect(repository.listTrashedTasks()).resolves.toEqual([])
+
+      const unarchived = await repository.unarchiveTask({
+        id: created.id,
+        updatedAtMs: 500,
+      })
+      expect(unarchived.archivedAtMs).toBeNull()
+      expect(unarchived).toEqual({ ...archived, updatedAtMs: 500, archivedAtMs: null })
+      await expect(repository.listTasks()).resolves.toEqual([unarchived])
+    })
+
+    test('fails closed for archive and unarchive on invalid lifecycle targets', async () => {
+      const { repository } = createFixture()
+      await expectSafeError(
+        repository.archiveTask({
+          id: TASK_CONTRACT_IDS.missing,
+          updatedAtMs: 200,
+        }),
+        'NOT_FOUND',
+        'archiveTask',
+      )
+      await expectSafeError(
+        repository.unarchiveTask({
+          id: TASK_CONTRACT_IDS.missing,
+          updatedAtMs: 200,
+        }),
+        'NOT_FOUND',
+        'unarchiveTask',
+      )
+
+      const created = await createTask(repository, TASK_CONTRACT_IDS.a)
+      // Unarchiving an ACTIVE task fails closed.
+      await expectSafeError(
+        repository.unarchiveTask({ id: created.id, updatedAtMs: 200 }),
+        'NOT_FOUND',
+        'unarchiveTask',
+      )
+      const archived = await repository.archiveTask({
+        id: created.id,
+        updatedAtMs: 200,
+      })
+      expect(archived).toMatchObject({ archivedAtMs: 200, updatedAtMs: 200 })
+      // Re-archiving an ALREADY ARCHIVED task fails closed (no silent idempotence).
+      await expectSafeError(
+        repository.archiveTask({ id: created.id, updatedAtMs: 300 }),
+        'NOT_FOUND',
+        'archiveTask',
+      )
+
+      // A DELETED row fails closed for both operations: no implicit restore.
+      const trashed = await repository.trashTask({
+        id: created.id,
+        updatedAtMs: 300,
+      })
+      expect(trashed).toMatchObject({ deletedAtMs: 300, archivedAtMs: 200 })
+      await expectSafeError(
+        repository.archiveTask({ id: created.id, updatedAtMs: 400 }),
+        'NOT_FOUND',
+        'archiveTask',
+      )
+      await expectSafeError(
+        repository.unarchiveTask({ id: created.id, updatedAtMs: 400 }),
+        'NOT_FOUND',
+        'unarchiveTask',
+      )
+      const stillTrashed = await repository.listTrashedTasks()
+      expect(stillTrashed).toHaveLength(1)
+      expect(stillTrashed[0]).toMatchObject({
+        deletedAtMs: 300,
+        archivedAtMs: 200,
+      })
+    })
+
+    test('excludes archived tasks from active-only mutations but keeps them trashable', async () => {
+      const { repository } = createFixture()
+      const tagId = '00000000-0000-4000-8000-000000000101'
+      const created = await repository.createTask({
+        id: TASK_CONTRACT_IDS.a,
+        title: 'Archived',
+        createdAtMs: 100,
+        tagIds: [tagId],
+      })
+      await repository.archiveTask({ id: created.id, updatedAtMs: 200 })
+
+      await expectSafeError(
+        repository.renameTask({
+          id: created.id,
+          title: 'Hidden mutation',
+          updatedAtMs: 300,
+        }),
+        'NOT_FOUND',
+        'renameTask',
+      )
+      await expectSafeError(
+        repository.changeTaskStatus({
+          id: created.id,
+          operation: 'start',
+          updatedAtMs: 300,
+        }),
+        'NOT_FOUND',
+        'changeTaskStatus',
+      )
+      await expectSafeError(
+        repository.setTaskImportance({
+          id: created.id,
+          isImportant: true,
+          updatedAtMs: 300,
+        }),
+        'NOT_FOUND',
+        'setTaskImportance',
+      )
+      await expectSafeError(
+        repository.clearTaskProject({ id: created.id, updatedAtMs: 300 }),
+        'NOT_FOUND',
+        'clearTaskProject',
+      )
+      await expectSafeError(
+        repository.removeTaskTag({
+          id: created.id,
+          tagId,
+          updatedAtMs: 300,
+        }),
+        'NOT_FOUND',
+        'removeTaskTag',
+      )
+
+      // Archived -> Trash remains reachable.
+      const trashed = await repository.trashTask({
+        id: created.id,
+        updatedAtMs: 400,
+      })
+      expect(trashed).toMatchObject({ deletedAtMs: 400, archivedAtMs: 200 })
     })
 
     test('orders trash by deletedAtMs DESC and id ASC', async () => {

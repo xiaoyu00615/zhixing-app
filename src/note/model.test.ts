@@ -13,6 +13,7 @@ function makeNote(overrides: Partial<Note> = {}): Note {
     createdAtMs: 1716547200000,
     updatedAtMs: 1716547200000,
     deletedAtMs: null,
+    archivedAtMs: null,
     ...overrides,
   }
 }
@@ -87,6 +88,33 @@ describe('isNote', () => {
     expect(isNote(makeNote({ deletedAtMs: -1 as unknown as number | null }))).toBe(false)
     expect(isNote(makeNote({ deletedAtMs: 'nope' as unknown as number | null }))).toBe(false)
     expect(isNote(makeNote({ deletedAtMs: undefined as unknown as number | null }))).toBe(false)
+  })
+
+  it('accepts archivedAtMs = null (ACTIVE) and a non-negative integer (ARCHIVED)', () => {
+    expect(isNote(makeNote({ archivedAtMs: null }))).toBe(true)
+    expect(isNote(makeNote({ archivedAtMs: 1716547200000 }))).toBe(true)
+  })
+
+  it('accepts the orthogonal TRASHED_FROM_ARCHIVE state', () => {
+    expect(
+      isNote(
+        makeNote({ deletedAtMs: 1716547200000, archivedAtMs: 1716547200000 }),
+      ),
+    ).toBe(true)
+  })
+
+  it('rejects invalid archivedAtMs', () => {
+    expect(
+      isNote(makeNote({ archivedAtMs: -1 as unknown as number | null })),
+    ).toBe(false)
+    expect(
+      isNote(makeNote({ archivedAtMs: 'nope' as unknown as number | null })),
+    ).toBe(false)
+    expect(
+      isNote(
+        makeNote({ archivedAtMs: undefined as unknown as number | null }),
+      ),
+    ).toBe(false)
   })
 
   it('accepts createdAtMs = 0', () => {

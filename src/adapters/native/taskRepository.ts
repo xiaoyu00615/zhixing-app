@@ -12,6 +12,7 @@ import {
 import {
   TaskRepositoryError,
   isTaskRepositoryErrorCode,
+  type ArchiveTaskInput,
   type ChangeTaskStatusInput,
   type ClearTaskDeadlineInput,
   type CreateTaskInput,
@@ -23,6 +24,7 @@ import {
   type TaskRepository,
   type TaskRepositoryOperation,
   type TrashTaskInput,
+  type UnarchiveTaskInput,
 } from '@/task/repository'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -49,6 +51,7 @@ function parseTaskDto(
     projectId,
     tagIds,
     deletedAtMs,
+    archivedAtMs,
   } = value
   if (
     !isCanonicalLowercaseUuid(id) ||
@@ -64,7 +67,9 @@ function parseTaskDto(
     !Array.isArray(tagIds) ||
     tagIds.some((tagId) => !isCanonicalLowercaseUuid(tagId)) ||
     new Set(tagIds).size !== tagIds.length ||
-    (deletedAtMs !== null && !isNonNegativeSafeIntegerMilliseconds(deletedAtMs))
+    (deletedAtMs !== null && !isNonNegativeSafeIntegerMilliseconds(deletedAtMs)) ||
+    (archivedAtMs !== null &&
+      !isNonNegativeSafeIntegerMilliseconds(archivedAtMs))
   ) {
     throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
   }
@@ -81,6 +86,7 @@ function parseTaskDto(
     projectId,
     tagIds,
     deletedAtMs,
+    archivedAtMs,
   }
 }
 
@@ -195,6 +201,16 @@ export class NativeTaskRepository implements TaskRepository {
 
   restoreTask(input: RestoreTaskInput): Promise<Task> {
     return this.invokeLifecycle('restoreTask', 'task_restore', input)
+  }
+
+  /** Archive V1 (P5C-S1): Active -> Archived. Native parity with Web. */
+  archiveTask(input: ArchiveTaskInput): Promise<Task> {
+    return this.invokeLifecycle('archiveTask', 'task_archive', input)
+  }
+
+  /** Archive V1 (P5C-S1): Archived -> Active. Native parity with Web. */
+  unarchiveTask(input: UnarchiveTaskInput): Promise<Task> {
+    return this.invokeLifecycle('unarchiveTask', 'task_unarchive', input)
   }
 
   async renameTask(input: RenameTaskInput): Promise<Task> {
@@ -327,8 +343,8 @@ export class NativeTaskRepository implements TaskRepository {
   }
 
   private async invokeLifecycle(
-    operation: 'trashTask' | 'restoreTask',
-    command: 'task_trash' | 'task_restore',
+    operation: 'trashTask' | 'restoreTask' | 'archiveTask' | 'unarchiveTask',
+    command: 'task_trash' | 'task_restore' | 'task_archive' | 'task_unarchive',
     input: { readonly id: string; readonly updatedAtMs: number },
   ): Promise<Task> {
     validateId(input.id, operation)

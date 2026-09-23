@@ -13,6 +13,7 @@ import addCanvasNodeBoxesSql from '../../../src-tauri/migrations/0010_add_canvas
 import addCanvasNodeSoftDeleteSql from '../../../src-tauri/migrations/0011_add_canvas_node_soft_delete.sql?raw'
 import addNotesAndDiarySql from '../../../src-tauri/migrations/0012_add_notes_and_diary.sql?raw'
 import addGlobalSearchSql from '../../../src-tauri/migrations/0013_add_global_search.sql?raw'
+import addArchiveStateSql from '../../../src-tauri/migrations/0014_add_archive_state.sql?raw'
 
 export interface WebMigrationDefinition {
   readonly version: number
@@ -127,6 +128,12 @@ export const WEB_MIGRATIONS: readonly WebMigrationDefinition[] = [
     version: 13,
     id: '0013_add_global_search',
     sql: addGlobalSearchSql,
+    highRisk: false,
+  },
+  {
+    version: 14,
+    id: '0014_add_archive_state',
+    sql: addArchiveStateSql,
     highRisk: false,
   },
 ]

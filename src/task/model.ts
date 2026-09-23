@@ -45,6 +45,24 @@ export interface Task {
   readonly projectId: string | null
   readonly tagIds: readonly string[]
   readonly deletedAtMs: number | null
+  /**
+   * Archive V1 canonical state (P5C-S1).
+   *
+   * `archivedAtMs` is an orthogonal lifecycle dimension, never an alias of
+   * `deletedAtMs`:
+   *
+   * - ACTIVE:               deletedAtMs === null && archivedAtMs === null
+   * - ARCHIVED:             deletedAtMs === null && archivedAtMs !== null
+   * - TRASHED_FROM_ACTIVE:  deletedAtMs !== null && archivedAtMs === null
+   * - TRASHED_FROM_ARCHIVE: deletedAtMs !== null && archivedAtMs !== null
+   *
+   * The last combination is legal: canonical Trash restore clears
+   * `deletedAtMs` while preserving `archivedAtMs`, so no previous_state /
+   * restore_target column is needed.
+   *
+   * Archive is NOT a Task status; `TASK_STATUSES` is unchanged.
+   */
+  readonly archivedAtMs: number | null
 }
 
 export const TASK_QUADRANTS = [
@@ -118,9 +136,22 @@ export function isNonEmptyTaskTitle(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
 }
 
+/**
+ * Archive V1 canonical ACTIVE predicate (P5C-S1).
+ *
+ * ACTIVE means not trashed AND not archived. Every workspace-facing derivation
+ * (overdue, urgency, quadrant, date group, filters, calendar) is an
+ * active-workspace concept and therefore uses this predicate instead of the
+ * narrower `deletedAtMs === null`, so an archived task can never leak back into
+ * the working views.
+ */
+export function isActiveTask(task: Task): boolean {
+  return task.deletedAtMs === null && task.archivedAtMs === null
+}
+
 export function isTaskOverdue(task: Task, today: LocalDate): boolean {
   return (
-    task.deletedAtMs === null &&
+    isActiveTask(task) &&
     isValidLocalDate(today) &&
     task.dueDate !== null &&
     isValidLocalDate(task.dueDate) &&
@@ -130,9 +161,7 @@ export function isTaskOverdue(task: Task, today: LocalDate): boolean {
 }
 
 export function isTaskEffectivelyUrgent(task: Task, today: LocalDate): boolean {
-  return (
-    task.deletedAtMs === null && (task.isUrgent || isTaskOverdue(task, today))
-  )
+  return isActiveTask(task) && (task.isUrgent || isTaskOverdue(task, today))
 }
 
 export function getTaskQuadrant(
@@ -140,7 +169,7 @@ export function getTaskQuadrant(
   today: LocalDate,
 ): TaskQuadrant | null {
   if (
-    task.deletedAtMs !== null ||
+    !isActiveTask(task) ||
     (task.status !== 'todo' && task.status !== 'doing')
   ) {
     return null
@@ -180,7 +209,7 @@ export function getTaskDateGroup(
 ): TaskDateGroup | null {
   if (
     !isValidLocalDate(today) ||
-    task.deletedAtMs !== null ||
+    !isActiveTask(task) ||
     task.dueDate === null ||
     !isValidLocalDate(task.dueDate) ||
     (task.status !== 'todo' && task.status !== 'doing')
@@ -221,7 +250,7 @@ export function matchesTaskFilter(
   filter: TaskFilter,
   today: LocalDate,
 ): boolean {
-  if (task.deletedAtMs !== null) return false
+  if (!isActiveTask(task)) return false
   if (filter.status !== 'all' && task.status !== filter.status) return false
   if (
     filter.importance !== 'all' &&
@@ -362,7 +391,7 @@ export function buildTaskCalendarMonth(
   for (const task of tasks) {
     if (
       task.dueDate === null ||
-      task.deletedAtMs !== null ||
+      !isActiveTask(task) ||
       !isValidLocalDate(task.dueDate) ||
       (task.status !== 'todo' && task.status !== 'doing')
     ) {

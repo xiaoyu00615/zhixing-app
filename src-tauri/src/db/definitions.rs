@@ -28,6 +28,8 @@ const ADD_NOTES_AND_DIARY_SQL: &str =
     include_str!("../../migrations/0012_add_notes_and_diary.sql");
 const ADD_GLOBAL_SEARCH_SQL: &str =
     include_str!("../../migrations/0013_add_global_search.sql");
+const ADD_ARCHIVE_STATE_SQL: &str =
+    include_str!("../../migrations/0014_add_archive_state.sql");
 
 pub const MIGRATIONS: &[MigrationDefinition] = &[
     MigrationDefinition {
@@ -107,5 +109,14 @@ pub const MIGRATIONS: &[MigrationDefinition] = &[
         id: "0013_add_global_search",
         sql_up: ADD_GLOBAL_SEARCH_SQL,
         high_risk: true,
+    },
+    // P5C-S1: additive nullable `archived_at_ms` on tasks / notes. No table
+    // rebuild, no data rewrite, no trigger change, so this stays low risk and
+    // takes no pre-migration safety snapshot.
+    MigrationDefinition {
+        version: 14,
+        id: "0014_add_archive_state",
+        sql_up: ADD_ARCHIVE_STATE_SQL,
+        high_risk: false,
     },
 ];

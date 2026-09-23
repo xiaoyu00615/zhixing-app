@@ -1,4 +1,5 @@
 import type {
+  ArchiveTaskInput,
   ChangeTaskStatusInput,
   ClearTaskDeadlineInput,
   CreateTaskInput,
@@ -9,6 +10,7 @@ import type {
   SetTaskUrgencyInput,
   TaskRepositoryErrorCode,
   TrashTaskInput,
+  UnarchiveTaskInput,
 } from '@/task/repository'
 import { isTaskRepositoryErrorCode } from '@/task/repository'
 import type {
@@ -17,10 +19,12 @@ import type {
 } from '@/project/repository'
 import type { CreateTagInput, RenameTagInput } from '@/tag/repository'
 import type {
+  ArchiveNoteInput,
   CreateNoteInput,
   NoteRepositoryErrorCode,
   RestoreNoteInput,
   SoftDeleteNoteInput,
+  UnarchiveNoteInput,
   UpdateNoteInput,
 } from '@/note/repository'
 import { isNoteRepositoryErrorCode } from '@/note/repository'
@@ -303,6 +307,22 @@ export class TaskWorkerClient {
     return this.send((requestId) => ({
       requestId,
       type: 'task.restore',
+      input,
+    }))
+  }
+
+  archiveTask(input: ArchiveTaskInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'task.archive',
+      input,
+    }))
+  }
+
+  unarchiveTask(input: UnarchiveTaskInput): Promise<unknown> {
+    return this.send((requestId) => ({
+      requestId,
+      type: 'task.unarchive',
       input,
     }))
   }
@@ -679,6 +699,28 @@ export class TaskWorkerClient {
       (requestId) => ({
         requestId,
         type: 'note.restore',
+        input,
+      }),
+      NOTE_REQUEST_OPTIONS,
+    )
+  }
+
+  archiveNote(input: ArchiveNoteInput): Promise<unknown> {
+    return this.send(
+      (requestId) => ({
+        requestId,
+        type: 'note.archive',
+        input,
+      }),
+      NOTE_REQUEST_OPTIONS,
+    )
+  }
+
+  unarchiveNote(input: UnarchiveNoteInput): Promise<unknown> {
+    return this.send(
+      (requestId) => ({
+        requestId,
+        type: 'note.unarchive',
         input,
       }),
       NOTE_REQUEST_OPTIONS,

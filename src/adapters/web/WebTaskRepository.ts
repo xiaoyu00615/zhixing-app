@@ -9,6 +9,7 @@ import {
 } from '@/task/model'
 import {
   TaskRepositoryError,
+  type ArchiveTaskInput,
   type ChangeTaskStatusInput,
   type ClearTaskDeadlineInput,
   type CreateTaskInput,
@@ -20,6 +21,7 @@ import {
   type TaskRepository,
   type TaskRepositoryOperation,
   type TrashTaskInput,
+  type UnarchiveTaskInput,
 } from '@/task/repository'
 import {
   createTaskPersistenceWorker,
@@ -58,6 +60,7 @@ function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
     projectId,
     tagIds,
     deletedAtMs,
+    archivedAtMs,
   } = value
   if (
     !isCanonicalLowercaseUuid(id) ||
@@ -73,7 +76,9 @@ function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
     !Array.isArray(tagIds) ||
     tagIds.some((tagId) => !isCanonicalLowercaseUuid(tagId)) ||
     new Set(tagIds).size !== tagIds.length ||
-    (deletedAtMs !== null && !isNonNegativeSafeIntegerMilliseconds(deletedAtMs))
+    (deletedAtMs !== null && !isNonNegativeSafeIntegerMilliseconds(deletedAtMs)) ||
+    (archivedAtMs !== null &&
+      !isNonNegativeSafeIntegerMilliseconds(archivedAtMs))
   ) {
     throw new TaskRepositoryError('PERSISTENCE_FAILED', operation)
   }
@@ -89,6 +94,7 @@ function parseTask(value: unknown, operation: TaskRepositoryOperation): Task {
     projectId,
     tagIds,
     deletedAtMs,
+    archivedAtMs,
   }
 }
 
@@ -210,6 +216,23 @@ export class WebTaskRepository implements TaskRepository {
   restoreTask(input: RestoreTaskInput): Promise<Task> {
     return this.callLifecycle('restoreTask', input, () =>
       this.#client.restoreTask(input),
+    )
+  }
+
+  /**
+   * Archive V1 (P5C-S1): Active -> Archived. Shares the lifecycle plumbing with
+   * trash / restore because the request shape is identical (id + updatedAtMs).
+   */
+  archiveTask(input: ArchiveTaskInput): Promise<Task> {
+    return this.callLifecycle('archiveTask', input, () =>
+      this.#client.archiveTask(input),
+    )
+  }
+
+  /** Archive V1 (P5C-S1): Archived -> Active. */
+  unarchiveTask(input: UnarchiveTaskInput): Promise<Task> {
+    return this.callLifecycle('unarchiveTask', input, () =>
+      this.#client.unarchiveTask(input),
     )
   }
 
@@ -348,7 +371,11 @@ export class WebTaskRepository implements TaskRepository {
   }
 
   private async callLifecycle(
-    operation: 'trashTask' | 'restoreTask',
+    operation:
+      | 'trashTask'
+      | 'restoreTask'
+      | 'archiveTask'
+      | 'unarchiveTask',
     input: { readonly id: string; readonly updatedAtMs: number },
     call: () => Promise<unknown>,
   ): Promise<Task> {

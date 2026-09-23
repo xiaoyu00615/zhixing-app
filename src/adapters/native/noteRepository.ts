@@ -3,11 +3,13 @@ import { invoke } from '@tauri-apps/api/core'
 import {
   NoteRepositoryError,
   isNoteRepositoryErrorCode,
+  type ArchiveNoteInput,
   type CreateNoteInput,
   type NoteRepository,
   type NoteRepositoryOperation,
   type RestoreNoteInput,
   type SoftDeleteNoteInput,
+  type UnarchiveNoteInput,
   type UpdateNoteInput,
 } from '@/note/repository'
 import { type Note } from '@/note/model'
@@ -33,6 +35,7 @@ function parseNote(
     createdAtMs,
     updatedAtMs,
     deletedAtMs,
+    archivedAtMs,
   } = value
   if (
     !isCanonicalLowercaseUuid(id) ||
@@ -41,7 +44,9 @@ function parseNote(
     !isNonNegativeSafeIntegerMilliseconds(createdAtMs) ||
     !isNonNegativeSafeIntegerMilliseconds(updatedAtMs) ||
     (deletedAtMs !== null &&
-      !isNonNegativeSafeIntegerMilliseconds(deletedAtMs))
+      !isNonNegativeSafeIntegerMilliseconds(deletedAtMs)) ||
+    (archivedAtMs !== null &&
+      !isNonNegativeSafeIntegerMilliseconds(archivedAtMs))
   ) {
     throw new NoteRepositoryError('PERSISTENCE_ERROR', operation)
   }
@@ -52,6 +57,7 @@ function parseNote(
     createdAtMs,
     updatedAtMs,
     deletedAtMs,
+    archivedAtMs,
   }
 }
 
@@ -143,5 +149,19 @@ export class NativeNoteRepository implements NoteRepository {
     validateId(input.id, operation)
     validateTimestamp(input.updatedAtMs, operation)
     await call('note_restore', operation, { input })
+  }
+  /** Archive V1 (P5C-S1): Active -> Archived. Native parity with Web. */
+  async archive(input: ArchiveNoteInput): Promise<void> {
+    const operation = 'archive'
+    validateId(input.id, operation)
+    validateTimestamp(input.updatedAtMs, operation)
+    await call('note_archive', operation, { input })
+  }
+  /** Archive V1 (P5C-S1): Archived -> Active. Native parity with Web. */
+  async unarchive(input: UnarchiveNoteInput): Promise<void> {
+    const operation = 'unarchive'
+    validateId(input.id, operation)
+    validateTimestamp(input.updatedAtMs, operation)
+    await call('note_unarchive', operation, { input })
   }
 }

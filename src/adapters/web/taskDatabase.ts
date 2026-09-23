@@ -11,6 +11,7 @@ import {
   type Task,
 } from '@/task/model'
 import type {
+  ArchiveTaskInput,
   ChangeTaskStatusInput,
   ClearTaskDeadlineInput,
   CreateTaskInput,
@@ -21,6 +22,7 @@ import type {
   RestoreTaskInput,
   TaskRepositoryErrorCode,
   TrashTaskInput,
+  UnarchiveTaskInput,
 } from '@/task/repository'
 import { isNonEmptyProjectName, type Project } from '@/project/model'
 import type {
@@ -31,10 +33,12 @@ import { isNonEmptyTagName, type Tag } from '@/tag/model'
 import type { CreateTagInput, RenameTagInput } from '@/tag/repository'
 import type { Note } from '@/note/model'
 import type {
+  ArchiveNoteInput,
   CreateNoteInput,
   NoteRepositoryErrorCode,
   RestoreNoteInput,
   SoftDeleteNoteInput,
+  UnarchiveNoteInput,
   UpdateNoteInput,
 } from '@/note/repository'
 import type { DiaryEntry } from '@/diary/model'
@@ -113,7 +117,7 @@ export class TaskDatabaseError extends Error {
 
 const TASK_COLUMNS = `id, title, status, created_at_ms, updated_at_ms,
                       is_important, is_urgent, due_date, project_id,
-                      deleted_at_ms`
+                      deleted_at_ms, archived_at_ms`
 const PROJECT_COLUMNS = 'id, name, created_at_ms, updated_at_ms'
 const TAG_COLUMNS = 'id, name, created_at_ms, updated_at_ms'
 const CANVAS_COLUMNS = 'id, title, viewport_json, created_at_ms, updated_at_ms'
@@ -123,7 +127,7 @@ const CANVAS_EDGE_COLUMNS = `id, canvas_id, source_node_id, target_node_id,
                              relation_type, direction, line_style, membership_position,
                              created_at_ms, updated_at_ms, deleted_at_ms`
 const NOTE_COLUMNS =
-  'id, title, content, created_at_ms, updated_at_ms, deleted_at_ms'
+  'id, title, content, created_at_ms, updated_at_ms, deleted_at_ms, archived_at_ms'
 const DIARY_COLUMNS =
   'id, title, content, diary_date, created_at_ms, updated_at_ms, deleted_at_ms'
 
@@ -254,6 +258,7 @@ function parseTaskRow(row: Record<string, unknown> | undefined): Task | null {
     due_date: dueDate,
     project_id: projectId,
     deleted_at_ms: deletedAtMs,
+    archived_at_ms: archivedAtMs,
   } = row
   if (
     !isCanonicalLowercaseUuid(id) ||
@@ -266,7 +271,9 @@ function parseTaskRow(row: Record<string, unknown> | undefined): Task | null {
     (isUrgent !== 0 && isUrgent !== 1) ||
     (dueDate !== null && !isValidLocalDate(dueDate)) ||
     (projectId !== null && !isCanonicalLowercaseUuid(projectId)) ||
-    (deletedAtMs !== null && !isNonNegativeSafeIntegerMilliseconds(deletedAtMs))
+    (deletedAtMs !== null && !isNonNegativeSafeIntegerMilliseconds(deletedAtMs)) ||
+    (archivedAtMs !== null &&
+      !isNonNegativeSafeIntegerMilliseconds(archivedAtMs))
   ) {
     throw new TaskDatabaseError('PERSISTENCE_FAILED')
   }
@@ -282,6 +289,7 @@ function parseTaskRow(row: Record<string, unknown> | undefined): Task | null {
     projectId,
     tagIds: [],
     deletedAtMs,
+    archivedAtMs,
   }
 }
 
@@ -349,6 +357,7 @@ function parseNoteRow(row: Record<string, unknown> | undefined): Note | null {
     created_at_ms: createdAtMs,
     updated_at_ms: updatedAtMs,
     deleted_at_ms: deletedAtMs,
+    archived_at_ms: archivedAtMs,
   } = row
   if (
     !isCanonicalLowercaseUuid(id) ||
@@ -357,7 +366,9 @@ function parseNoteRow(row: Record<string, unknown> | undefined): Note | null {
     !isNonNegativeSafeIntegerMilliseconds(createdAtMs) ||
     !isNonNegativeSafeIntegerMilliseconds(updatedAtMs) ||
     (deletedAtMs !== null &&
-      !isNonNegativeSafeIntegerMilliseconds(deletedAtMs))
+      !isNonNegativeSafeIntegerMilliseconds(deletedAtMs)) ||
+    (archivedAtMs !== null &&
+      !isNonNegativeSafeIntegerMilliseconds(archivedAtMs))
   ) {
     throw new TaskDatabaseError('PERSISTENCE_FAILED')
   }
@@ -368,6 +379,7 @@ function parseNoteRow(row: Record<string, unknown> | undefined): Note | null {
     createdAtMs,
     updatedAtMs,
     deletedAtMs,
+    archivedAtMs,
   }
 }
 
@@ -634,7 +646,7 @@ export class WebTaskDatabase {
         .selectObjects(
           `SELECT ${TASK_COLUMNS}
            FROM tasks
-           WHERE deleted_at_ms IS NULL
+           WHERE deleted_at_ms IS NULL AND archived_at_ms IS NULL
            ORDER BY updated_at_ms DESC, id ASC`,
         )
         .map((row) => {
@@ -684,13 +696,38 @@ export class WebTaskDatabase {
     return this.updateDeletedState(input, false)
   }
 
+  /**
+   * Archive V1 (P5C-S1): Active -> Archived.
+   *
+   * Precondition is the strict active state so a deleted row or an already
+   * archived row fails closed with NOT_FOUND (no implicit restore, no silent
+   * idempotence). `archived_at_ms` and `updated_at_ms` both take
+   * `input.updatedAtMs`; every other business field is preserved verbatim.
+   */
+  archiveTask(input: ArchiveTaskInput): Task {
+    validatePlanningBaseInput(input)
+    return this.updateArchivedState(input, true)
+  }
+
+  /**
+   * Archive V1 (P5C-S1): Archived -> Active.
+   *
+   * Precondition is "not deleted AND archived", so an active row fails closed.
+   * `archived_at_ms` becomes NULL; `deleted_at_ms` is never touched.
+   */
+  unarchiveTask(input: UnarchiveTaskInput): Task {
+    validatePlanningBaseInput(input)
+    return this.updateArchivedState(input, false)
+  }
+
   renameTask(input: RenameTaskInput): Task {
     validateRenameInput(input)
     try {
       return this.#database.transaction(() => {
         this.#database.exec({
           sql: `UPDATE tasks SET title = ?, updated_at_ms = ?
-                WHERE id = ? AND deleted_at_ms IS NULL`,
+                WHERE id = ? AND deleted_at_ms IS NULL
+                  AND archived_at_ms IS NULL`,
           bind: [input.title, input.updatedAtMs, input.id],
         })
         if (this.#database.changes() !== 1) {
@@ -721,7 +758,8 @@ export class WebTaskDatabase {
 
         this.#database.exec({
           sql: `UPDATE tasks SET status = ?, updated_at_ms = ?
-                WHERE id = ? AND status = ? AND deleted_at_ms IS NULL`,
+                WHERE id = ? AND status = ? AND deleted_at_ms IS NULL
+                  AND archived_at_ms IS NULL`,
           bind: [nextStatus, input.updatedAtMs, input.id, current.status],
         })
         if (this.#database.changes() !== 1) {
@@ -826,7 +864,8 @@ export class WebTaskDatabase {
         })
         this.#database.exec({
           sql: `UPDATE tasks SET updated_at_ms = ?
-                WHERE id = ? AND deleted_at_ms IS NULL`,
+                WHERE id = ? AND deleted_at_ms IS NULL
+                  AND archived_at_ms IS NULL`,
           bind: [input.updatedAtMs, input.id],
         })
         return this.requireTask(input.id)
@@ -854,7 +893,8 @@ export class WebTaskDatabase {
         }
         this.#database.exec({
           sql: `UPDATE tasks SET updated_at_ms = ?
-                WHERE id = ? AND deleted_at_ms IS NULL`,
+                WHERE id = ? AND deleted_at_ms IS NULL
+                  AND archived_at_ms IS NULL`,
           bind: [input.updatedAtMs, input.id],
         })
         if (this.#database.changes() !== 1) {
@@ -2263,7 +2303,8 @@ export class WebTaskDatabase {
       return parseNoteRow(
         this.#database.selectObject(
           `SELECT ${NOTE_COLUMNS}
-           FROM notes WHERE id = ? AND deleted_at_ms IS NULL`,
+           FROM notes WHERE id = ? AND deleted_at_ms IS NULL
+             AND archived_at_ms IS NULL`,
           [id],
         ),
       )
@@ -2278,7 +2319,7 @@ export class WebTaskDatabase {
       return this.#database
         .selectObjects(
           `SELECT ${NOTE_COLUMNS}
-           FROM notes WHERE deleted_at_ms IS NULL
+           FROM notes WHERE deleted_at_ms IS NULL AND archived_at_ms IS NULL
            ORDER BY updated_at_ms DESC, id ASC`,
         )
         .map((row) => {
@@ -2300,7 +2341,8 @@ export class WebTaskDatabase {
       return this.#database.transaction(() => {
         this.#database.exec({
           sql: `UPDATE notes SET title = ?, content = ?, updated_at_ms = ?
-                WHERE id = ? AND deleted_at_ms IS NULL`,
+                WHERE id = ? AND deleted_at_ms IS NULL
+                  AND archived_at_ms IS NULL`,
           bind: [input.title, input.content, input.updatedAtMs, input.id],
         })
         if (this.#database.changes() !== 1) {
@@ -2352,6 +2394,28 @@ export class WebTaskDatabase {
       if (error instanceof TaskDatabaseError) throw error
       throw new TaskDatabaseError('PERSISTENCE_FAILED')
     }
+  }
+
+  /**
+   * Archive V1 (P5C-S1): Active -> Archived.
+   *
+   * Precondition is the strict active state, so a deleted note or an already
+   * archived note fails closed with NOT_FOUND. Title and content are preserved
+   * verbatim (no trim, no normalization).
+   */
+  archiveNote(input: ArchiveNoteInput): void {
+    validateNoteMutationInput(input)
+    this.updateNoteArchivedState(input, true)
+  }
+
+  /**
+   * Archive V1 (P5C-S1): Archived -> Active.
+   *
+   * Precondition is "not deleted AND archived", so an active note fails closed.
+   */
+  unarchiveNote(input: UnarchiveNoteInput): void {
+    validateNoteMutationInput(input)
+    this.updateNoteArchivedState(input, false)
   }
 
   createDiaryEntry(input: CreateDiaryEntryInput): DiaryEntry {
@@ -2582,11 +2646,47 @@ export class WebTaskDatabase {
     throw new TaskDatabaseError('PERSISTENCE_ERROR')
   }
 
+  /**
+   * Archive V1 (P5C-S1): the archive dimension is targeted by
+   * `deleted_at_ms IS NULL` plus the opposite archive state, so a deleted note
+   * can never be archived or unarchived. `deleted_at_ms` is never touched.
+   */
+  private updateNoteArchivedState(
+    input: ArchiveNoteInput | UnarchiveNoteInput,
+    archive: boolean,
+  ): void {
+    try {
+      this.#database.transaction(() => {
+        this.#database.exec({
+          sql: archive
+            ? `UPDATE notes
+               SET archived_at_ms = ?, updated_at_ms = ?
+               WHERE id = ? AND deleted_at_ms IS NULL
+                 AND archived_at_ms IS NULL`
+            : `UPDATE notes
+               SET archived_at_ms = NULL, updated_at_ms = ?
+               WHERE id = ? AND deleted_at_ms IS NULL
+                 AND archived_at_ms IS NOT NULL`,
+          bind: archive
+            ? [input.updatedAtMs, input.updatedAtMs, input.id]
+            : [input.updatedAtMs, input.id],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
   private requireNote(id: string): Note {
     const note = parseNoteRow(
       this.#database.selectObject(
         `SELECT ${NOTE_COLUMNS}
-         FROM notes WHERE id = ? AND deleted_at_ms IS NULL`,
+         FROM notes WHERE id = ? AND deleted_at_ms IS NULL
+           AND archived_at_ms IS NULL`,
         [id],
       ),
     )
@@ -2606,7 +2706,8 @@ export class WebTaskDatabase {
       return this.#database.transaction(() => {
         this.#database.exec({
           sql: `UPDATE tasks SET ${column} = ?, updated_at_ms = ?
-                WHERE id = ? AND deleted_at_ms IS NULL`,
+                WHERE id = ? AND deleted_at_ms IS NULL
+                  AND archived_at_ms IS NULL`,
           bind: [value, updatedAtMs, id],
         })
         if (this.#database.changes() !== 1) {
@@ -2651,7 +2752,66 @@ export class WebTaskDatabase {
     }
   }
 
+  /**
+   * Archive V1 (P5C-S1).
+   *
+   * The archive dimension is targeted by `deleted_at_ms IS NULL` plus the
+   * opposite archive state, so a deleted row can never be archived or
+   * unarchived. The result is re-read by "not deleted" only, which is what
+   * makes `TRASHED_FROM_ARCHIVE -> restore -> ARCHIVED` observable.
+   */
+  private updateArchivedState(
+    input: ArchiveTaskInput | UnarchiveTaskInput,
+    archive: boolean,
+  ): Task {
+    try {
+      return this.#database.transaction(() => {
+        this.#database.exec({
+          sql: archive
+            ? `UPDATE tasks
+               SET archived_at_ms = ?, updated_at_ms = ?
+               WHERE id = ? AND deleted_at_ms IS NULL
+                 AND archived_at_ms IS NULL`
+            : `UPDATE tasks
+               SET archived_at_ms = NULL, updated_at_ms = ?
+               WHERE id = ? AND deleted_at_ms IS NULL
+                 AND archived_at_ms IS NOT NULL`,
+          bind: archive
+            ? [input.updatedAtMs, input.updatedAtMs, input.id]
+            : [input.updatedAtMs, input.id],
+        })
+        if (this.#database.changes() !== 1) {
+          throw new TaskDatabaseError('NOT_FOUND')
+        }
+        return this.requireTaskByNotDeleted(input.id)
+      })
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_FAILED')
+    }
+  }
+
   private requireTask(id: string): Task {
+    const task = parseTaskRow(
+      this.#database.selectObject(
+        `SELECT ${TASK_COLUMNS}
+         FROM tasks WHERE id = ? AND deleted_at_ms IS NULL
+           AND archived_at_ms IS NULL`,
+        [id],
+      ),
+    )
+    if (task === null) {
+      throw new TaskDatabaseError('NOT_FOUND')
+    }
+    return this.withTaskTags(task)
+  }
+
+  /**
+   * Reads a task by the "not deleted" lifecycle target only — deliberately NOT
+   * by the active projection, so archived rows remain addressable through
+   * trash / restore / archive / unarchive transitions.
+   */
+  private requireTaskByNotDeleted(id: string): Task {
     const task = parseTaskRow(
       this.#database.selectObject(
         `SELECT ${TASK_COLUMNS}

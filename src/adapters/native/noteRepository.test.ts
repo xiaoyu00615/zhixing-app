@@ -18,6 +18,7 @@ const NOTE = {
   createdAtMs: 100,
   updatedAtMs: 200,
   deletedAtMs: null,
+  archivedAtMs: null,
 } as const
 
 function createRepo(): NativeNoteRepository {
@@ -88,6 +89,43 @@ describe('NativeNoteRepository', () => {
     expect(invokeMock.mock.calls).toEqual([
       ['note_restore', { input: { id: ID, updatedAtMs: 400 } }],
     ])
+  })
+
+  test('archive sends only id and updatedAtMs to note_archive', async () => {
+    const repository = createRepo()
+    invokeMock.mockResolvedValueOnce(undefined)
+
+    await repository.archive({ id: ID, updatedAtMs: 500 })
+
+    expect(invokeMock.mock.calls).toEqual([
+      ['note_archive', { input: { id: ID, updatedAtMs: 500 } }],
+    ])
+  })
+
+  test('unarchive sends only id and updatedAtMs to note_unarchive', async () => {
+    const repository = createRepo()
+    invokeMock.mockResolvedValueOnce(undefined)
+
+    await repository.unarchive({ id: ID, updatedAtMs: 600 })
+
+    expect(invokeMock.mock.calls).toEqual([
+      ['note_unarchive', { input: { id: ID, updatedAtMs: 600 } }],
+    ])
+  })
+
+  test('parses archivedAtMs and rejects a malformed archive timestamp', async () => {
+    const repository = createRepo()
+    invokeMock.mockResolvedValueOnce({ ...NOTE, archivedAtMs: 700 })
+
+    const archived = await repository.getActiveById(ID)
+    expect(archived).toMatchObject({ archivedAtMs: 700 })
+
+    invokeMock.mockReset()
+    invokeMock.mockResolvedValueOnce({ ...NOTE, archivedAtMs: -1 })
+    await expect(repository.getActiveById(ID)).rejects.toMatchObject({
+      code: 'PERSISTENCE_ERROR',
+      operation: 'getActiveById',
+    })
   })
 
   test('accepts empty title and forwards it unchanged', async () => {

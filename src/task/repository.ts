@@ -79,12 +79,57 @@ export interface RestoreTaskInput {
   readonly updatedAtMs: number
 }
 
+/**
+ * Archive V1 (P5C-S1).
+ *
+ * Target precondition: `deleted_at_ms IS NULL AND archived_at_ms IS NULL`.
+ * On success: `archived_at_ms = updatedAtMs` and `updated_at_ms = updatedAtMs`.
+ * Every other business field is preserved verbatim.
+ */
+export interface ArchiveTaskInput {
+  readonly id: string
+  readonly updatedAtMs: number
+}
+
+/**
+ * Archive V1 (P5C-S1).
+ *
+ * Target precondition: `deleted_at_ms IS NULL AND archived_at_ms IS NOT NULL`.
+ * On success: `archived_at_ms = NULL` and `updated_at_ms = updatedAtMs`.
+ * Every other business field is preserved verbatim.
+ */
+export interface UnarchiveTaskInput {
+  readonly id: string
+  readonly updatedAtMs: number
+}
+
 export interface TaskRepository {
   createTask(input: CreateTaskInput): Promise<Task>
+  /**
+   * Active workspace read: `deleted_at_ms IS NULL AND archived_at_ms IS NULL`.
+   * Archived tasks are hidden from the normal workspace without being deleted.
+   */
   listTasks(): Promise<readonly Task[]>
+  /**
+   * Trash read: `deleted_at_ms IS NOT NULL`.
+   * A row trashed from Archive keeps `archived_at_ms` and is still listed here.
+   */
   listTrashedTasks(): Promise<readonly Task[]>
+  /**
+   * Lifecycle target is "not deleted" (`deleted_at_ms IS NULL`), NOT
+   * "active": an archived task must still be trashable
+   * (Archive -> Trash -> Restore -> Archive).
+   */
   trashTask(input: TrashTaskInput): Promise<Task>
+  /**
+   * Clears `deleted_at_ms` and PRESERVES `archived_at_ms`, restoring the row to
+   * its previous logical state (active or archived).
+   */
   restoreTask(input: RestoreTaskInput): Promise<Task>
+  /** Fails closed when the target is deleted or already archived. */
+  archiveTask(input: ArchiveTaskInput): Promise<Task>
+  /** Fails closed when the target is deleted or not archived. */
+  unarchiveTask(input: UnarchiveTaskInput): Promise<Task>
   renameTask(input: RenameTaskInput): Promise<Task>
   changeTaskStatus(input: ChangeTaskStatusInput): Promise<Task>
   setTaskImportance(input: SetTaskImportanceInput): Promise<Task>
@@ -113,6 +158,8 @@ export type TaskRepositoryOperation =
   | 'listTrashedTasks'
   | 'trashTask'
   | 'restoreTask'
+  | 'archiveTask'
+  | 'unarchiveTask'
   | 'renameTask'
   | 'changeTaskStatus'
   | 'setTaskImportance'

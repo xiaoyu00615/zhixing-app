@@ -10,6 +10,18 @@ export interface Note {
   readonly createdAtMs: number
   readonly updatedAtMs: number
   readonly deletedAtMs: number | null
+  /**
+   * Archive V1 canonical state (P5C-S1). Orthogonal to `deletedAtMs`:
+   *
+   * - ACTIVE:               deletedAtMs === null && archivedAtMs === null
+   * - ARCHIVED:             deletedAtMs === null && archivedAtMs !== null
+   * - TRASHED_FROM_ACTIVE:  deletedAtMs !== null && archivedAtMs === null
+   * - TRASHED_FROM_ARCHIVE: deletedAtMs !== null && archivedAtMs !== null
+   *
+   * Canonical Trash restore clears `deletedAtMs` and PRESERVES
+   * `archivedAtMs`, so an archived note returns to the archived state.
+   */
+  readonly archivedAtMs: number | null
 }
 
 export function isNote(value: unknown): value is Note {
@@ -23,6 +35,8 @@ export function isNote(value: unknown): value is Note {
     isNonNegativeSafeIntegerMilliseconds(candidate.createdAtMs) &&
     isNonNegativeSafeIntegerMilliseconds(candidate.updatedAtMs) &&
     (candidate.deletedAtMs === null ||
-      isNonNegativeSafeIntegerMilliseconds(candidate.deletedAtMs))
+      isNonNegativeSafeIntegerMilliseconds(candidate.deletedAtMs)) &&
+    (candidate.archivedAtMs === null ||
+      isNonNegativeSafeIntegerMilliseconds(candidate.archivedAtMs))
   )
 }

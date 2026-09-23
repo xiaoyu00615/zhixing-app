@@ -3,6 +3,7 @@ import { describe, expect, test, vi } from 'vitest'
 import type { Task, TaskStatusOperation } from '@/task/model'
 import {
   TaskRepositoryError,
+  type ArchiveTaskInput,
   type ChangeTaskStatusInput,
   type ClearTaskDeadlineInput,
   type AddTaskTagInput,
@@ -14,6 +15,7 @@ import {
   type SetTaskUrgencyInput,
   type TaskRepository,
   type TaskRepositoryErrorCode,
+  type UnarchiveTaskInput,
 } from '@/task/repository'
 import {
   createTaskService,
@@ -36,6 +38,7 @@ const TASK: Task = {
   projectId: null,
   tagIds: [],
   deletedAtMs: null,
+  archivedAtMs: null,
 }
 
 function createFakeRepository() {
@@ -142,12 +145,28 @@ function createFakeRepository() {
       updatedAtMs: input.updatedAtMs,
     }),
   )
+  const archiveTask = vi.fn((input: ArchiveTaskInput): Promise<Task> =>
+    Promise.resolve({
+      ...TASK,
+      archivedAtMs: input.updatedAtMs,
+      updatedAtMs: input.updatedAtMs,
+    }),
+  )
+  const unarchiveTask = vi.fn((input: UnarchiveTaskInput): Promise<Task> =>
+    Promise.resolve({
+      ...TASK,
+      archivedAtMs: null,
+      updatedAtMs: input.updatedAtMs,
+    }),
+  )
   const repository: TaskRepository = {
     createTask,
     listTasks,
     listTrashedTasks,
     trashTask,
     restoreTask,
+    archiveTask,
+    unarchiveTask,
     renameTask,
     changeTaskStatus,
     setTaskImportance,
@@ -166,6 +185,8 @@ function createFakeRepository() {
     listTrashedTasks,
     trashTask,
     restoreTask,
+    archiveTask,
+    unarchiveTask,
     renameTask,
     changeTaskStatus,
     setTaskImportance,
@@ -202,6 +223,8 @@ test('TaskService exposes only the approved business API and error codes', () =>
     'listTrashedTasks',
     'trashTask',
     'restoreTask',
+    'archiveTask',
+    'unarchiveTask',
     'renameTask',
     'startTask',
     'completeTask',

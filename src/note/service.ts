@@ -175,6 +175,31 @@ export function createNoteService({
       const updatedAtMs = readNowMs(nowMs)
       await callRepository(() => repository.restore({ id, updatedAtMs }))
     },
+
+    /**
+     * Archive V1: move an ACTIVE note into the archived state.
+     *
+     * Only the identity and the timestamp are forwarded; the canonical Note
+     * persistence owns the state transition and preserves title / content
+     * verbatim.
+     */
+    async archive(id: string): Promise<void> {
+      validateNoteId(id)
+      const updatedAtMs = readNowMs(nowMs)
+      await callRepository(() => repository.archive({ id, updatedAtMs }))
+    },
+
+    /**
+     * Archive V1: return an ARCHIVED note to the active workspace.
+     *
+     * Deliberately not named `restore`: Trash restore and Archive unarchive are
+     * different lifecycle operations.
+     */
+    async unarchive(id: string): Promise<void> {
+      validateNoteId(id)
+      const updatedAtMs = readNowMs(nowMs)
+      await callRepository(() => repository.unarchive({ id, updatedAtMs }))
+    },
   }
 }
 

@@ -142,6 +142,80 @@ describe('parseTaskWorkerRequest', () => {
     ).not.toBeNull()
   })
 
+  test('parses the Archive V1 task and note archive lifecycle requests', () => {
+    expect(
+      parseTaskWorkerRequest({
+        requestId: 7,
+        type: 'task.archive',
+        input: { id: NOTE_ID, updatedAtMs: 200 },
+      }),
+    ).toEqual({
+      requestId: 7,
+      type: 'task.archive',
+      input: { id: NOTE_ID, updatedAtMs: 200 },
+    })
+    expect(
+      parseTaskWorkerRequest({
+        requestId: 8,
+        type: 'task.unarchive',
+        input: { id: NOTE_ID, updatedAtMs: 300 },
+      }),
+    ).toEqual({
+      requestId: 8,
+      type: 'task.unarchive',
+      input: { id: NOTE_ID, updatedAtMs: 300 },
+    })
+    expect(
+      parseTaskWorkerRequest({
+        requestId: 9,
+        type: 'note.archive',
+        input: { id: NOTE_ID, updatedAtMs: 200 },
+      }),
+    ).toEqual({
+      requestId: 9,
+      type: 'note.archive',
+      input: { id: NOTE_ID, updatedAtMs: 200 },
+    })
+    expect(
+      parseTaskWorkerRequest({
+        requestId: 10,
+        type: 'note.unarchive',
+        input: { id: NOTE_ID, updatedAtMs: 300 },
+      }),
+    ).toEqual({
+      requestId: 10,
+      type: 'note.unarchive',
+      input: { id: NOTE_ID, updatedAtMs: 300 },
+    })
+  })
+
+  test('rejects malformed archive lifecycle payloads', () => {
+    for (const type of [
+      'task.archive',
+      'task.unarchive',
+      'note.archive',
+      'note.unarchive',
+    ]) {
+      expect(
+        parseTaskWorkerRequest({ requestId: 1, type, input: undefined }),
+      ).toBeNull()
+      expect(
+        parseTaskWorkerRequest({
+          requestId: 1,
+          type,
+          input: { id: 'not-a-uuid', updatedAtMs: 1 },
+        }),
+      ).toBeNull()
+      expect(
+        parseTaskWorkerRequest({
+          requestId: 1,
+          type,
+          input: { id: NOTE_ID, updatedAtMs: -1 },
+        }),
+      ).toBeNull()
+    }
+  })
+
   test('rejects unknown request types without leaking domain errors', () => {
     expect(
       parseTaskWorkerRequest({ requestId: 1, type: 'note.unknown' }),

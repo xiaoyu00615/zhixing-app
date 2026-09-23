@@ -19,6 +19,7 @@ const NOTE_A: Note = {
   createdAtMs: 100,
   updatedAtMs: 200,
   deletedAtMs: null,
+  archivedAtMs: null,
 }
 
 const NOTE_B: Note = {
@@ -28,6 +29,7 @@ const NOTE_B: Note = {
   createdAtMs: 120,
   updatedAtMs: 220,
   deletedAtMs: null,
+  archivedAtMs: null,
 }
 
 function createServiceDouble(initialNotes: readonly Note[] = [NOTE_A]) {
@@ -40,6 +42,7 @@ function createServiceDouble(initialNotes: readonly Note[] = [NOTE_A]) {
       createdAtMs: 300,
       updatedAtMs: 300,
       deletedAtMs: null,
+      archivedAtMs: null,
     }),
   )
   const listActive = vi.fn<NoteService['listActive']>()
@@ -62,6 +65,8 @@ function createServiceDouble(initialNotes: readonly Note[] = [NOTE_A]) {
     updateNote,
     softDelete,
     restore: vi.fn().mockResolvedValue(undefined),
+    archive: vi.fn().mockResolvedValue(undefined),
+    unarchive: vi.fn().mockResolvedValue(undefined),
   }
 
   return { service, createNote, listActive, updateNote, softDelete }
@@ -287,6 +292,7 @@ describe('NotesPage StrictMode create lifecycle', () => {
       createdAtMs: 700,
       updatedAtMs: 700,
       deletedAtMs: null,
+      archivedAtMs: null,
     }
     fake.listActive.mockImplementation(() => Promise.resolve([...storedNotes]))
     fake.createNote.mockImplementation((input) => {

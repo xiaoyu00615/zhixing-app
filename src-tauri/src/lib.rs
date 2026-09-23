@@ -194,6 +194,8 @@ pub fn run() {
             commands::task_list_trashed,
             commands::task_trash,
             commands::task_restore,
+            commands::task_archive,
+            commands::task_unarchive,
             commands::task_rename,
             commands::task_change_status,
             commands::task_set_importance,
@@ -238,6 +240,8 @@ pub fn run() {
             commands::note_update,
             commands::note_soft_delete,
             commands::note_restore,
+            commands::note_archive,
+            commands::note_unarchive,
             commands::diary_create,
             commands::diary_get_active_by_id,
             commands::diary_get_active_by_diary_date,
@@ -772,7 +776,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(rows, 13, "Production Migrations 1-13 必须写入 history");
+        assert_eq!(rows, 14, "Production Migrations 1-14 必须写入 history");
         let task_table: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
@@ -837,12 +841,12 @@ mod tests {
         let manifest_bytes_before =
             fs::read(data_root.join(MANIFEST_FILENAME)).unwrap();
 
-        // (2) Production already applied v1-v13; insert an unknown v14.
+        // (2) Production already applied v1-v14; insert an unknown v15.
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
             conn.execute_batch(
                 "INSERT INTO schema_migrations(version,id,checksum_sha256,applied_at_ms) \
-                 VALUES(14,'m14','sha14',101);",
+                 VALUES(15,'m15','sha15',101);",
             )
             .unwrap();
         }
@@ -875,10 +879,10 @@ mod tests {
         assert_eq!(device_id_1.as_str(), loaded2.device_id.as_str());
         assert!(db_path.exists(), "失败不得删 zhixing.db");
 
-        // (4) Remove only the injected v14 row; approved v1-v13 remain intact.
+        // (4) Remove only the injected v15 row; approved v1-v14 remain intact.
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
-            conn.execute_batch("DELETE FROM schema_migrations WHERE version = 14;")
+            conn.execute_batch("DELETE FROM schema_migrations WHERE version = 15;")
                 .unwrap();
         }
         let status = run_bootstrap_pipeline(&cfg, &local);

@@ -3,11 +3,13 @@ import { describe, expect, test, vi } from 'vitest'
 import type { Note } from '@/note/model'
 import {
   NoteRepositoryError,
+  type ArchiveNoteInput,
   type CreateNoteInput,
   type NoteRepository,
   type NoteRepositoryErrorCode,
   type RestoreNoteInput,
   type SoftDeleteNoteInput,
+  type UnarchiveNoteInput,
   type UpdateNoteInput,
 } from '@/note/repository'
 import {
@@ -27,6 +29,7 @@ const NOTE: Note = {
   createdAtMs: 100,
   updatedAtMs: 100,
   deletedAtMs: null,
+  archivedAtMs: null,
 }
 
 function createFakeRepository() {
@@ -38,6 +41,7 @@ function createFakeRepository() {
       createdAtMs: input.createdAtMs,
       updatedAtMs: input.createdAtMs,
       deletedAtMs: null,
+      archivedAtMs: null,
     }),
   )
   const getActiveById = vi.fn((id: string): Promise<Note | null> =>
@@ -61,6 +65,14 @@ function createFakeRepository() {
     void input
     return Promise.resolve()
   })
+  const archive = vi.fn((input: ArchiveNoteInput): Promise<void> => {
+    void input
+    return Promise.resolve()
+  })
+  const unarchive = vi.fn((input: UnarchiveNoteInput): Promise<void> => {
+    void input
+    return Promise.resolve()
+  })
   const repository: NoteRepository = {
     create,
     getActiveById,
@@ -68,6 +80,8 @@ function createFakeRepository() {
     updateNote,
     softDelete,
     restore,
+    archive,
+    unarchive,
   }
 
   return {
@@ -78,6 +92,8 @@ function createFakeRepository() {
     updateNote,
     softDelete,
     restore,
+    archive,
+    unarchive,
   }
 }
 
@@ -105,6 +121,8 @@ test('NoteService exposes only the approved business API and error codes', () =>
     'updateNote',
     'softDelete',
     'restore',
+    'archive',
+    'unarchive',
   ])
   expect(NOTE_APPLICATION_ERROR_CODES).toEqual([
     'VALIDATION',
@@ -133,6 +151,7 @@ describe('NoteService createNote', () => {
       createdAtMs: 100,
       updatedAtMs: 100,
       deletedAtMs: null,
+      archivedAtMs: null,
     })
     expect(generateNoteId).toHaveBeenCalledOnce()
     expect(nowMs).toHaveBeenCalledOnce()

@@ -17,6 +17,7 @@ const TASK: Task = {
   projectId: null,
   tagIds: [],
   deletedAtMs: null,
+  archivedAtMs: null,
 }
 
 const runtimeMocks = vi.hoisted(() => ({
