@@ -38,7 +38,14 @@ import type {
 } from '@/diary/repository'
 import { isDiaryRepositoryErrorCode } from '@/diary/repository'
 import { isSearchRepositoryErrorCode, type SearchRepositoryErrorCode } from '@/search/model'
-import { isTrashRepositoryErrorCode, type TrashRepositoryErrorCode } from '@/trash/model'
+import {
+  isArchiveRepositoryErrorCode,
+  type ArchiveRepositoryErrorCode,
+} from '@/archive/model'
+import {
+  isTrashRepositoryErrorCode,
+  type TrashRepositoryErrorCode,
+} from '@/trash/model'
 import type {
   CreateCanvasInput,
   CreateCanvasEdgeInput,
@@ -58,6 +65,7 @@ import type {
 } from '@/canvas/repository'
 import {
   extractRequestId,
+  parseArchiveWorkerResponse,
   parseDiaryWorkerResponse,
   parseNoteWorkerResponse,
   parseSearchWorkerResponse,
@@ -126,13 +134,32 @@ export class TrashWorkerClientError extends Error {
   }
 }
 
+export class ArchiveWorkerClientError extends Error {
+  readonly code: ArchiveRepositoryErrorCode
+
+  constructor(code: ArchiveRepositoryErrorCode) {
+    super('Archive persistence worker request failed.')
+    this.name = 'ArchiveWorkerClientError'
+    this.code = code
+  }
+}
+
 type WorkerTransportFailure = 'UNAVAILABLE' | 'FAILED'
 
+/**
+ * The closed union of every domain/client error class this client can produce.
+ * Each domain keeps its own error class (no shared base class, no `Error`
+ * widening): adding a new `*_REQUEST_OPTIONS` block REQUIRES adding its error
+ * class here, otherwise structural assignability silently downgrades it to a
+ * sibling domain and the union stops describing reality.
+ */
 type ClientRequestError =
   | TaskWorkerClientError
   | NoteWorkerClientError
   | DiaryWorkerClientError
   | SearchWorkerClientError
+  | TrashWorkerClientError
+  | ArchiveWorkerClientError
 
 type ParsedClientResponse =
   | { readonly ok: true; readonly result: unknown }
@@ -234,6 +261,24 @@ const TRASH_REQUEST_OPTIONS: RequestOptions = {
     return { ok: false, error: new TrashWorkerClientError(code) }
   },
   mapTransportFailure: () => new TrashWorkerClientError('PERSISTENCE_ERROR'),
+}
+
+const ARCHIVE_REQUEST_OPTIONS: RequestOptions = {
+  parseResponse: (value) => {
+    const response = parseArchiveWorkerResponse(value)
+    if (response === null) {
+      return null
+    }
+    if (response.ok) {
+      return { ok: true, result: response.result }
+    }
+    const code = response.error.code
+    if (!isArchiveRepositoryErrorCode(code)) {
+      return null
+    }
+    return { ok: false, error: new ArchiveWorkerClientError(code) }
+  },
+  mapTransportFailure: () => new ArchiveWorkerClientError('PERSISTENCE_ERROR'),
 }
 
 interface PendingRequest {
@@ -835,6 +880,20 @@ export class TaskWorkerClient {
     )
   }
 
+  /**
+   * Read the unified archive view (task + note) through the SAME shared
+   * persistence worker. Cross-domain READ only.
+   */
+  listArchive(): Promise<unknown> {
+    return this.send(
+      (requestId) => ({
+        requestId,
+        type: 'archive.list',
+      }),
+      ARCHIVE_REQUEST_OPTIONS,
+    )
+  }
+
   async shutdown(): Promise<void> {
     if (this.#terminated) {
       return
@@ -930,6 +989,9 @@ export class TaskWorkerClient {
       return true
     }
     if (parseTrashWorkerResponse(value) !== null) {
+      return true
+    }
+    if (parseArchiveWorkerResponse(value) !== null) {
       return true
     }
     return false

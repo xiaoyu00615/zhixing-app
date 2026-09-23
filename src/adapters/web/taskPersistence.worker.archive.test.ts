@@ -254,3 +254,100 @@ describe('taskPersistence.worker note.archive / note.unarchive routing', () => {
     expect(taskFailure).toEqual([])
   })
 })
+
+const ARCHIVE_ID = {
+  task: '00000000-0000-4000-8000-0000000000a1',
+  taskTrashed: '00000000-0000-4000-8000-0000000000a2',
+  note: '00000000-0000-4000-8000-0000000000b1',
+} as const
+
+describe('taskPersistence.worker archive.list cross-domain read (P5C S2)', () => {
+  test('archive.list is recognized and returns an empty array before archiving', async () => {
+    expect(await expectSuccess(50, { type: 'archive.list' })).toEqual([])
+  })
+
+  test('Task + Note union survives the worker round trip', async () => {
+    await expectSuccess(51, {
+      type: 'task.create',
+      input: { id: ARCHIVE_ID.task, title: 'Archived task', createdAtMs: 100 },
+    })
+    await expectSuccess(52, {
+      type: 'note.create',
+      input: {
+        id: ARCHIVE_ID.note,
+        title: 'Archived note',
+        content: 'c',
+        createdAtMs: 100,
+      },
+    })
+    await expectSuccess(53, {
+      type: 'task.archive',
+      input: { id: ARCHIVE_ID.task, updatedAtMs: 200 },
+    })
+    await expectSuccess(54, {
+      type: 'note.archive',
+      input: { id: ARCHIVE_ID.note, updatedAtMs: 300 },
+    })
+
+    const items = (await expectSuccess(55, {
+      type: 'archive.list',
+    })) as { entityType: string; entityId: string; title: string; archivedAtMs: number }[]
+
+    // archivedAtMs DESC: the note (300) before the task (200).
+    expect(items).toEqual([
+      {
+        entityType: 'note',
+        entityId: ARCHIVE_ID.note,
+        title: 'Archived note',
+        archivedAtMs: 300,
+      },
+      {
+        entityType: 'task',
+        entityId: ARCHIVE_ID.task,
+        title: 'Archived task',
+        archivedAtMs: 200,
+      },
+    ])
+  })
+
+  test('excludes a task that was trashed from the archive', async () => {
+    await expectSuccess(56, {
+      type: 'task.create',
+      input: {
+        id: ARCHIVE_ID.taskTrashed,
+        title: 'Archived then trashed',
+        createdAtMs: 100,
+      },
+    })
+    await expectSuccess(57, {
+      type: 'task.archive',
+      input: { id: ARCHIVE_ID.taskTrashed, updatedAtMs: 200 },
+    })
+    await expectSuccess(58, {
+      type: 'task.trash',
+      input: { id: ARCHIVE_ID.taskTrashed, updatedAtMs: 250 },
+    })
+
+    const items = (await expectSuccess(59, {
+      type: 'archive.list',
+    })) as { entityId: string }[]
+    expect(items.map((item) => item.entityId)).not.toContain(
+      ARCHIVE_ID.taskTrashed,
+    )
+  })
+
+  test('malformed archive.* request maps to the Archive PERSISTENCE_ERROR, never the Task emitter', async () => {
+    send({ requestId: 60, type: 'archive.unknown' })
+    expect(await waitForResponse()).toMatchObject({
+      requestId: 60,
+      ok: false,
+      error: { code: 'PERSISTENCE_ERROR' },
+    })
+    const taskFailure = responses.filter(
+      (value) =>
+        (value as { error?: { code?: string } }).error?.code ===
+        'PERSISTENCE_FAILED',
+    )
+    expect(taskFailure).toEqual([])
+  })
+})

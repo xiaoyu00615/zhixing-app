@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest'
 
 import {
+  parseArchiveWorkerResponse,
   parseNoteWorkerResponse,
   parseTaskWorkerRequest,
   parseTaskWorkerResponse,
@@ -234,5 +235,87 @@ describe('parseTaskWorkerRequest', () => {
         input: { id: 'not-a-uuid', title: '', content: '', createdAtMs: -1 },
       }),
     ).toBeNull()
+  })
+})
+
+describe('archive.list request and response (P5C S2)', () => {
+  test('accepts the cross-domain archive.list read request', () => {
+    expect(
+      parseTaskWorkerRequest({ requestId: 1, type: 'archive.list' }),
+    ).toEqual({ requestId: 1, type: 'archive.list' })
+  })
+
+  test('archive.list is a distinct op from the canonical write ops', () => {
+    // `archive.list` carries no input payload; the canonical writes stay on
+    // `task.archive` / `note.archive` and require one.
+    expect(
+      parseTaskWorkerRequest({ requestId: 1, type: 'archive.list' }),
+    ).not.toBeNull()
+    expect(
+      parseTaskWorkerRequest({ requestId: 1, type: 'task.archive' }),
+    ).toBeNull()
+    expect(
+      parseTaskWorkerRequest({ requestId: 1, type: 'note.archive' }),
+    ).toBeNull()
+  })
+
+  test('rejects malformed archive.list envelopes', () => {
+    expect(
+      parseTaskWorkerRequest({ requestId: 0, type: 'archive.list' }),
+    ).toBeNull()
+    expect(
+      parseTaskWorkerRequest({ requestId: 'x', type: 'archive.list' }),
+    ).toBeNull()
+  })
+
+  test('parses a successful archive.list response', () => {
+    const parsed = parseArchiveWorkerResponse({
+      requestId: 1,
+      ok: true,
+      result: [
+        { entityType: 'task', entityId: NOTE_ID, title: 'T', archivedAtMs: 1 },
+      ],
+    })
+    expect(parsed).not.toBeNull()
+    if (parsed === null || !parsed.ok) return
+    expect(parsed.result).toEqual([
+      { entityType: 'task', entityId: NOTE_ID, title: 'T', archivedAtMs: 1 },
+    ])
+  })
+
+  test('accepts an Archive PERSISTENCE_ERROR response', () => {
+    const parsed = parseArchiveWorkerResponse({
+      requestId: 1,
+      ok: false,
+      error: { code: 'PERSISTENCE_ERROR' },
+    })
+    expect(parsed).not.toBeNull()
+    if (parsed === null || parsed.ok) return
+    expect(parsed.error.code).toBe('PERSISTENCE_ERROR')
+  })
+
+  test('rejects an Archive response carrying a foreign error code', () => {
+    expect(
+      parseArchiveWorkerResponse({
+        requestId: 1,
+        ok: false,
+        error: { code: 'NOT_FOUND' },
+      }),
+    ).toBeNull()
+  })
+
+  test('rejects malformed Archive envelopes', () => {
+    expect(parseArchiveWorkerResponse(null)).toBeNull()
+    expect(parseArchiveWorkerResponse({ requestId: 1, ok: true })).toBeNull()
+    expect(
+      parseArchiveWorkerResponse({ requestId: 0, ok: true, result: [] }),
+    ).toBeNull()
+    expect(
+      parseArchiveWorkerResponse({
+        requestId: 1,
+        ok: false,
+        error: { code: 'PERSISTENCE_ERROR', message: 'leaked' },
+      }),
+    ).not.toBeNull()
   })
 })

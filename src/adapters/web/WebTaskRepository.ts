@@ -40,6 +40,8 @@ import { WebNoteRepository } from '@/adapters/web/WebNoteRepository'
 import { WebDiaryRepository } from '@/adapters/web/WebDiaryRepository'
 import { WebSearchRepository } from '@/adapters/web/WebSearchRepository'
 import { WebTrashRepository } from '@/adapters/web/WebTrashRepository'
+import { WebArchiveRepository } from '@/adapters/web/WebArchiveRepository'
+import type { ArchiveRepository } from '@/archive/repository'
 import type { SearchRepository } from '@/search/repository'
 import type { TrashRepository } from '@/trash/repository'
 
@@ -406,6 +408,7 @@ export type OpenWebTaskRepositoryResult =
       readonly diaryRepository: import('@/diary/repository').DiaryRepository
       readonly searchRepository: SearchRepository
       readonly trashRepository: TrashRepository
+      readonly archiveRepository: ArchiveRepository
       readonly dispose: () => Promise<void>
     }
   | {
@@ -424,6 +427,7 @@ interface SharedWebPersistenceRepositories {
   readonly diaryRepository: import('@/diary/repository').DiaryRepository
   readonly searchRepository: SearchRepository
   readonly trashRepository: TrashRepository
+  readonly archiveRepository: ArchiveRepository
 }
 
 type SharedWebPersistenceOutcome =
@@ -457,6 +461,7 @@ function createSharedRepositories(
     diaryRepository: new WebDiaryRepository(client),
     searchRepository: new WebSearchRepository(client),
     trashRepository: new WebTrashRepository(client),
+    archiveRepository: new WebArchiveRepository(client),
   }
 }
 
@@ -568,6 +573,7 @@ async function openSharedWebTaskRepository(): Promise<OpenWebTaskRepositoryResul
     diaryRepository: outcome.repositories.diaryRepository,
     searchRepository: outcome.repositories.searchRepository,
     trashRepository: outcome.repositories.trashRepository,
+    archiveRepository: outcome.repositories.archiveRepository,
     dispose: createSharedLeaseDispose(generation),
   }
 }
@@ -602,6 +608,7 @@ async function openUnsharedWebTaskRepository(
       diaryRepository: new WebDiaryRepository(client),
       searchRepository: new WebSearchRepository(client),
       trashRepository: new WebTrashRepository(client),
+      archiveRepository: new WebArchiveRepository(client),
       dispose: () => client.shutdown(),
     }
   } catch {

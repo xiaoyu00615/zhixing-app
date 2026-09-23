@@ -19,6 +19,7 @@ import {
   type TrashTaskInput,
   type UnarchiveTaskInput,
 } from '@/task/repository'
+import { isArchiveRepositoryErrorCode } from '@/archive/model'
 import { isTrashRepositoryErrorCode } from '@/trash/model'
 import type {
   CreateProjectInput,
@@ -378,6 +379,10 @@ export type TaskWorkerRequest =
       readonly input: { readonly query: string; readonly limit: number }
     }
   | { readonly requestId: number; readonly type: 'trash.list' }
+  // Cross-domain READ over the shared persistence (P5C S2). Distinct from the
+  // canonical WRITE ops `task.archive` / `note.archive`: `archive.list` reads
+  // the unified archive view across tasks + notes and performs no write.
+  | { readonly requestId: number; readonly type: 'archive.list' }
   | { readonly requestId: number; readonly type: 'shutdown' }
 
 export interface TaskWorkerSuccessResponse {
@@ -1103,6 +1108,9 @@ export function parseTaskWorkerRequest(
     case 'trash.list':
       // Read-only request without an input payload.
       return { requestId: value.requestId, type: value.type }
+    case 'archive.list':
+      // Read-only cross-domain request without an input payload.
+      return { requestId: value.requestId, type: value.type }
     default:
       return null
   }
@@ -1306,6 +1314,42 @@ export function parseTrashWorkerResponse(
   if (
     !isRecord(value.error) ||
     !isTrashRepositoryErrorCode(value.error.code)
+  ) {
+    return null
+  }
+
+  return {
+    requestId: value.requestId,
+    ok: false,
+    error: { code: value.error.code },
+  }
+}
+
+export function parseArchiveWorkerResponse(
+  value: unknown,
+): TaskWorkerResponse | null {
+  if (
+    !isRecord(value) ||
+    !isRequestId(value.requestId) ||
+    typeof value.ok !== 'boolean'
+  ) {
+    return null
+  }
+
+  if (value.ok) {
+    if (!('result' in value)) {
+      return null
+    }
+    return {
+      requestId: value.requestId,
+      ok: true,
+      result: value.result,
+    }
+  }
+
+  if (
+    !isRecord(value.error) ||
+    !isArchiveRepositoryErrorCode(value.error.code)
   ) {
     return null
   }

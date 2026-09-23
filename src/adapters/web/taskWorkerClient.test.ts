@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'vitest'
 
 import {
+  ArchiveWorkerClientError,
   NoteWorkerClientError,
   TaskWorkerClient,
   TaskWorkerClientError,
+  TrashWorkerClientError,
   type TaskWorkerEndpoint,
 } from '@/adapters/web/taskWorkerClient'
 import type { TaskWorkerRequest } from '@/adapters/web/taskWorkerProtocol'
@@ -261,6 +263,146 @@ describe('TaskWorkerClient archive lifecycle envelopes', () => {
 
     await expect(promise).rejects.toSatisfy((error) => {
       expectTaskError(error, 'NOT_FOUND')
+      return true
+    })
+  })
+})
+
+describe('TaskWorkerClient archive.list cross-domain read (P5C S2)', () => {
+  const ARCHIVE_ENTITY_ID = '00000000-0000-4000-8000-000000000001'
+
+  test('sends the exact archive.list envelope', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    void client.listArchive()
+    await flush()
+
+    expect(worker.messages).toHaveLength(1)
+    expect(worker.messages[0]).toMatchObject({ requestId: 1, type: 'archive.list' })
+  })
+
+  test('returns the archive result on success', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+    const items = [
+      {
+        entityType: 'note',
+        entityId: ARCHIVE_ENTITY_ID,
+        title: 'N',
+        archivedAtMs: 200,
+      },
+      {
+        entityType: 'task',
+        entityId: ARCHIVE_ENTITY_ID,
+        title: 'T',
+        archivedAtMs: 100,
+      },
+    ]
+
+    const promise = client.listArchive()
+    await flush()
+    worker.send({
+      requestId: worker.messages[0]?.requestId ?? 1,
+      ok: true,
+      result: items,
+    })
+    await flush()
+
+    await expect(promise).resolves.toEqual(items)
+  })
+
+  test('archive.list failure routes to ArchiveWorkerClientError', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    const promise = client.listArchive()
+    await flush()
+    worker.send({
+      requestId: worker.messages[0]?.requestId ?? 1,
+      ok: false,
+      error: { code: 'PERSISTENCE_ERROR' },
+    })
+    await flush()
+
+    await expect(promise).rejects.toSatisfy((error) => {
+      expect(error).toBeInstanceOf(ArchiveWorkerClientError)
+      expect((error as ArchiveWorkerClientError).code).toBe('PERSISTENCE_ERROR')
+      return true
+    })
+  })
+
+  test('malformed archive.list response still rejects as ArchiveWorkerClientError', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    const promise = client.listArchive()
+    await flush()
+    // A foreign error code is not an Archive code: the pending request is
+    // rejected with the Archive transport failure, not leaked as-is.
+    worker.send({
+      requestId: worker.messages[0]?.requestId ?? 1,
+      ok: false,
+      error: { code: 'NOT_FOUND' },
+    })
+    await flush()
+
+    await expect(promise).rejects.toSatisfy((error) => {
+      expect(error).toBeInstanceOf(ArchiveWorkerClientError)
+      expect((error as ArchiveWorkerClientError).code).toBe('PERSISTENCE_ERROR')
+      return true
+    })
+  })
+})
+
+describe('TaskWorkerClient trash.list cross-domain read', () => {
+  test('sends the exact trash.list envelope', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    void client.listTrash()
+    await flush()
+
+    expect(worker.messages).toHaveLength(1)
+    expect(worker.messages[0]).toMatchObject({ requestId: 1, type: 'trash.list' })
+  })
+
+  test('trash.list failure routes to TrashWorkerClientError', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    const promise = client.listTrash()
+    await flush()
+    worker.send({
+      requestId: worker.messages[0]?.requestId ?? 1,
+      ok: false,
+      error: { code: 'PERSISTENCE_ERROR' },
+    })
+    await flush()
+
+    await expect(promise).rejects.toSatisfy((error) => {
+      expect(error).toBeInstanceOf(TrashWorkerClientError)
+      expect((error as TrashWorkerClientError).code).toBe('PERSISTENCE_ERROR')
+      return true
+    })
+  })
+
+  test('malformed trash.list response still rejects as TrashWorkerClientError', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    const promise = client.listTrash()
+    await flush()
+    worker.send({
+      requestId: worker.messages[0]?.requestId ?? 1,
+      ok: false,
+      error: { code: 'NOT_FOUND' },
+    })
+    await flush()
+
+    await expect(promise).rejects.toSatisfy((error) => {
+      expect(error).toBeInstanceOf(TrashWorkerClientError)
+      expect((error as TrashWorkerClientError).code).toBe('PERSISTENCE_ERROR')
       return true
     })
   })

@@ -50,6 +50,7 @@ import type {
   SoftDeleteDiaryEntryInput,
   UpdateDiaryEntryInput,
 } from '@/diary/repository'
+import type { ArchiveItem } from '@/archive/model'
 import type { TrashItem } from '@/trash/model'
 import {
   isCanonicalCanvasId,
@@ -3222,6 +3223,61 @@ export class WebTaskDatabase {
         entityId,
         title,
         deletedAtMs,
+      }
+    })
+  }
+
+  /**
+   * Unified Archive V1 read-only view (P5C S2). Mirrors the Native
+   * `ArchiveDbService::list`: a single UNION ALL over the two archived domain
+   * tables (`tasks`, `notes`), Diary and Canvas excluded, ordered
+   * most-recently-archived first with a stable deterministic tie-break.
+   *
+   * Rows that are archived AND soft-deleted are TRASHED_FROM_ARCHIVE and are
+   * deliberately excluded: after a soft delete the row belongs to the Trash
+   * workspace, so it must not appear in Archive at the same time.
+   *
+   * No writes, no schema change, no migration.
+   */
+  listArchive(): ArchiveItem[] {
+    const sql =
+      "SELECT 'task' AS entity_type, id AS entity_id, title, archived_at_ms " +
+      'FROM tasks WHERE archived_at_ms IS NOT NULL AND deleted_at_ms IS NULL ' +
+      'UNION ALL ' +
+      "SELECT 'note' AS entity_type, id AS entity_id, title, archived_at_ms " +
+      'FROM notes WHERE archived_at_ms IS NOT NULL AND deleted_at_ms IS NULL ' +
+      'ORDER BY archived_at_ms DESC, entity_type ASC, entity_id ASC'
+
+    try {
+      return this.mapArchiveRows(this.#database.selectObjects(sql, []))
+    } catch (error: unknown) {
+      if (error instanceof TaskDatabaseError) throw error
+      throw new TaskDatabaseError('PERSISTENCE_ERROR')
+    }
+  }
+
+  private mapArchiveRows(rows: Record<string, unknown>[]): ArchiveItem[] {
+    return rows.map((row) => {
+      const entityType = row.entity_type
+      const entityId = row.entity_id
+      const title = row.title
+      const archivedAtMs = row.archived_at_ms
+      if (
+        typeof entityType !== 'string' ||
+        typeof entityId !== 'string' ||
+        typeof title !== 'string' ||
+        typeof archivedAtMs !== 'number' ||
+        !Number.isSafeInteger(archivedAtMs) ||
+        archivedAtMs < 0 ||
+        !(entityType === 'task' || entityType === 'note')
+      ) {
+        throw new TaskDatabaseError('PERSISTENCE_ERROR')
+      }
+      return {
+        entityType,
+        entityId,
+        title,
+        archivedAtMs,
       }
     })
   }

@@ -6,6 +6,7 @@ import {
   type OpenWebTaskRepositoryResult,
 } from '@/adapters/web/WebTaskRepository'
 import { WebTrashRepository } from '@/adapters/web/WebTrashRepository'
+import { WebArchiveRepository } from '@/adapters/web/WebArchiveRepository'
 import {
   TaskWorkerClient,
   TaskWorkerClientError,
@@ -1034,6 +1035,29 @@ describe('shared default persistence exposes Trash', () => {
 
     await firstLease.dispose()
     expect(worker.terminated).toBe(false)
+    await releaseFinalLease(secondLease, worker)
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('default shared lease exposes a working archiveRepository on the same Worker', async () => {
+    stubDefaultOpenEnvironment()
+    const [firstLease, secondLease] = await openSharedPair()
+    const worker = requireCreatedWorker(0)
+
+    // SAME Worker / SAME generation: Archive read adds no second lifecycle.
+    expect(createdWorkers).toHaveLength(1)
+    expect('archiveRepository' in firstLease).toBe(true)
+    expect('archiveRepository' in secondLease).toBe(true)
+    expect(secondLease.archiveRepository).toBeInstanceOf(WebArchiveRepository)
+
+    await firstLease.dispose()
+    expect(worker.terminated).toBe(false)
+
+    const listed = secondLease.archiveRepository.list()
+    expect(worker.messages.at(-1)).toMatchObject({ type: 'archive.list' })
+    worker.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
     await releaseFinalLease(secondLease, worker)
     expect(worker.terminated).toBe(true)
   })

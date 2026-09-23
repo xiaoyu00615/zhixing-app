@@ -31,6 +31,7 @@ use crate::task::{
     TaskDbService, TaskError, TaskRecord, TaskStatusOperation, TrashTaskInput, UnarchiveTaskInput,
 };
 use crate::RuntimeStatus;
+use crate::archive_db::{ArchiveDbService, ArchiveError, ArchiveItemRecord};
 use crate::search_db::{SearchDbService, SearchError, SearchQueryInput, SearchResultRecord};
 use crate::trash_db::{TrashDbService, TrashError, TrashItemRecord};
 
@@ -1850,6 +1851,50 @@ pub(crate) fn trash_list(
     TrashDbService::list(&connection)
         .map(|records| records.into_iter().map(TrashItemDto::from).collect())
         .map_err(trash_error)
+}
+
+/// Unified Archive read DTO (P5C S2). Transport projection of
+/// `ArchiveItemRecord`; the TypeScript adapter re-validates every field at the
+/// Native boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ArchiveItemDto {
+    entity_type: String,
+    entity_id: String,
+    title: String,
+    archived_at_ms: i64,
+}
+
+impl From<ArchiveItemRecord> for ArchiveItemDto {
+    fn from(record: ArchiveItemRecord) -> Self {
+        Self {
+            entity_type: record.entity_type,
+            entity_id: record.entity_id,
+            title: record.title,
+            archived_at_ms: record.archived_at_ms,
+        }
+    }
+}
+
+fn archive_error(error: ArchiveError) -> TaskCommandErrorDto {
+    TaskCommandErrorDto {
+        code: error.code(),
+        message: error.safe_message(),
+    }
+}
+
+/// Read the unified archive view (task + note). Read-only: canonical archive
+/// writes stay on `task_archive` / `task_unarchive` / `note_archive` /
+/// `note_unarchive`.
+#[tauri::command]
+pub(crate) fn archive_list(
+    app: tauri::AppHandle,
+    runtime_status: tauri::State<'_, RuntimeStatus>,
+) -> Result<Vec<ArchiveItemDto>, TaskCommandErrorDto> {
+    let connection = task_connection(&app, &runtime_status)?;
+    ArchiveDbService::list(&connection)
+        .map(|records| records.into_iter().map(ArchiveItemDto::from).collect())
+        .map_err(archive_error)
 }
 
 #[tauri::command]

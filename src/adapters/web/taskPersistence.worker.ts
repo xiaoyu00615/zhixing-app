@@ -20,6 +20,7 @@ import { isNoteRepositoryErrorCode } from '@/note/repository'
 import type { DiaryRepositoryErrorCode } from '@/diary/repository'
 import { isDiaryRepositoryErrorCode } from '@/diary/repository'
 import { isSearchRepositoryErrorCode, type SearchRepositoryErrorCode } from '@/search/model'
+import { isArchiveRepositoryErrorCode, type ArchiveRepositoryErrorCode } from '@/archive/model'
 import { isTrashRepositoryErrorCode, type TrashRepositoryErrorCode } from '@/trash/model'
 
 type DiaryOperationType =
@@ -131,6 +132,27 @@ function isTrashRequestType(value: unknown): boolean {
     value.type.startsWith('trash.')
   )
 }
+
+// Cross-domain READ (P5C S2). `archive.list` reads the unified archive view
+// across tasks + notes. The canonical WRITE ops `task.archive` /
+// `note.archive` keep their existing `task.*` / `note.*` prefixes and are
+// routed by their own operation sets, so the two never collide.
+type ArchiveOperationType = 'archive.list'
+
+const ARCHIVE_OPERATION_TYPES = new Set<ArchiveOperationType>(['archive.list'])
+
+function isArchiveOperation(type: string): boolean {
+  return ARCHIVE_OPERATION_TYPES.has(type as ArchiveOperationType)
+}
+
+function isArchiveRequestType(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.type === 'string' &&
+    value.type.startsWith('archive.')
+  )
+}
+
 const DATABASE_FILENAME = '/zhixing.db'
 const workerScope = self as DedicatedWorkerGlobalScope
 
@@ -249,6 +271,18 @@ function trashFailure(requestId: number, code: TrashRepositoryErrorCode): void {
   workerScope.postMessage(response)
 }
 
+function archiveFailure(
+  requestId: number,
+  code: ArchiveRepositoryErrorCode,
+): void {
+  const response: TaskWorkerResponse = {
+    requestId,
+    ok: false,
+    error: { code },
+  }
+  workerScope.postMessage(response)
+}
+
 async function handleRequest(value: unknown): Promise<void> {
   const request = parseTaskWorkerRequest(value)
   if (request === null) {
@@ -262,6 +296,8 @@ async function handleRequest(value: unknown): Promise<void> {
         searchFailure(requestId, 'PERSISTENCE_ERROR')
       } else if (isTrashRequestType(value)) {
         trashFailure(requestId, 'PERSISTENCE_ERROR')
+      } else if (isArchiveRequestType(value)) {
+        archiveFailure(requestId, 'PERSISTENCE_ERROR')
       } else {
         failure(requestId, 'PERSISTENCE_FAILED')
       }
@@ -292,6 +328,8 @@ async function handleRequest(value: unknown): Promise<void> {
       searchFailure(request.requestId, 'PERSISTENCE_ERROR')
     } else if (isTrashOperation(request.type)) {
       trashFailure(request.requestId, 'PERSISTENCE_ERROR')
+    } else if (isArchiveOperation(request.type)) {
+      archiveFailure(request.requestId, 'PERSISTENCE_ERROR')
     } else {
       failure(request.requestId, 'PERSISTENCE_UNAVAILABLE')
     }
@@ -333,6 +371,24 @@ async function handleRequest(value: unknown): Promise<void> {
           ? error.code
           : 'PERSISTENCE_ERROR'
       trashFailure(request.requestId, code)
+    }
+    return
+  }
+
+  if (isArchiveOperation(request.type)) {
+    try {
+      switch (request.type) {
+        case 'archive.list':
+          success(request.requestId, state.database.listArchive())
+          return
+      }
+    } catch (error: unknown) {
+      const code: ArchiveRepositoryErrorCode =
+        error instanceof TaskDatabaseError &&
+        isArchiveRepositoryErrorCode(error.code)
+          ? error.code
+          : 'PERSISTENCE_ERROR'
+      archiveFailure(request.requestId, code)
     }
     return
   }
