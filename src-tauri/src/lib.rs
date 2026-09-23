@@ -778,7 +778,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(rows, 14, "Production Migrations 1-14 必须写入 history");
+        assert_eq!(rows, 15, "Production Migrations 1-15 必须写入 history");
         let task_table: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
@@ -843,12 +843,12 @@ mod tests {
         let manifest_bytes_before =
             fs::read(data_root.join(MANIFEST_FILENAME)).unwrap();
 
-        // (2) Production already applied v1-v14; insert an unknown v15.
+        // (2) Production already applied v1-v15; insert an unknown v16.
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
             conn.execute_batch(
                 "INSERT INTO schema_migrations(version,id,checksum_sha256,applied_at_ms) \
-                 VALUES(15,'m15','sha15',101);",
+                 VALUES(16,'m16','sha16',101);",
             )
             .unwrap();
         }
@@ -881,10 +881,10 @@ mod tests {
         assert_eq!(device_id_1.as_str(), loaded2.device_id.as_str());
         assert!(db_path.exists(), "失败不得删 zhixing.db");
 
-        // (4) Remove only the injected v15 row; approved v1-v14 remain intact.
+        // (4) Remove only the injected v16 row; approved v1-v15 remain intact.
         {
             let conn = db::policy::open_configured_connection(&db_path).unwrap();
-            conn.execute_batch("DELETE FROM schema_migrations WHERE version = 15;")
+            conn.execute_batch("DELETE FROM schema_migrations WHERE version = 16;")
                 .unwrap();
         }
         let status = run_bootstrap_pipeline(&cfg, &local);

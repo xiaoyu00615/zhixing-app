@@ -14,6 +14,7 @@ import addCanvasNodeSoftDeleteSql from '../../../src-tauri/migrations/0011_add_c
 import addNotesAndDiarySql from '../../../src-tauri/migrations/0012_add_notes_and_diary.sql?raw'
 import addGlobalSearchSql from '../../../src-tauri/migrations/0013_add_global_search.sql?raw'
 import addArchiveStateSql from '../../../src-tauri/migrations/0014_add_archive_state.sql?raw'
+import searchArchiveLifecycleSql from '../../../src-tauri/migrations/0015_search_archive_lifecycle.sql?raw'
 
 export interface WebMigrationDefinition {
   readonly version: number
@@ -134,6 +135,16 @@ export const WEB_MIGRATIONS: readonly WebMigrationDefinition[] = [
     version: 14,
     id: '0014_add_archive_state',
     sql: addArchiveStateSql,
+    highRisk: false,
+  },
+  // P5C-S2.5: same SQL file as Native. The Web migration framework invariant
+  // is `highRisk === false` for every definition, so Web keeps the current
+  // platform policy and relies on the existing single migration transaction,
+  // history checksum and OPFS/test isolation instead of a snapshot.
+  {
+    version: 15,
+    id: '0015_search_archive_lifecycle',
+    sql: searchArchiveLifecycleSql,
     highRisk: false,
   },
 ]

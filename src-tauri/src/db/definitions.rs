@@ -30,6 +30,8 @@ const ADD_GLOBAL_SEARCH_SQL: &str =
     include_str!("../../migrations/0013_add_global_search.sql");
 const ADD_ARCHIVE_STATE_SQL: &str =
     include_str!("../../migrations/0014_add_archive_state.sql");
+const SEARCH_ARCHIVE_LIFECYCLE_SQL: &str =
+    include_str!("../../migrations/0015_search_archive_lifecycle.sql");
 
 pub const MIGRATIONS: &[MigrationDefinition] = &[
     MigrationDefinition {
@@ -118,5 +120,15 @@ pub const MIGRATIONS: &[MigrationDefinition] = &[
         id: "0014_add_archive_state",
         sql_up: ADD_ARCHIVE_STATE_SQL,
         high_risk: false,
+    },
+    // P5C-S2.5: Archive-aware Task / Note Search lifecycle. This DROPs and
+    // CREATEs source-domain Search triggers and repairs the derived
+    // projection; a wrong trigger would corrupt later canonical Task/Note
+    // writes, so this takes the existing pre-migration safety snapshot.
+    MigrationDefinition {
+        version: 15,
+        id: "0015_search_archive_lifecycle",
+        sql_up: SEARCH_ARCHIVE_LIFECYCLE_SQL,
+        high_risk: true,
     },
 ];

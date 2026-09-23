@@ -1042,6 +1042,7 @@ mod tests {
                 (12, "0012_add_notes_and_diary".to_string()),
                 (13, "0013_add_global_search".to_string()),
                 (14, "0014_add_archive_state".to_string()),
+                (15, "0015_search_archive_lifecycle".to_string()),
             ]
         );
 
@@ -1140,7 +1141,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             history,
-            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
         );
 
         let foreign_keys: Vec<(String, String, String)> = connection

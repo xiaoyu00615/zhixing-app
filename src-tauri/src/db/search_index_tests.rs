@@ -20,6 +20,15 @@ use crate::db::definitions::MIGRATIONS;
 use crate::db::migration::MigrationRunner;
 use crate::db::policy::open_configured_connection;
 use crate::db::snapshot::SqliteBackupSnapshot;
+use crate::notes_db::{
+    ArchiveNoteInput, CreateNoteInput, NoteDbService, RestoreNoteInput, SoftDeleteNoteInput,
+    UnarchiveNoteInput,
+};
+use crate::search_db::{SearchDbService, SearchQueryInput};
+use crate::task::{
+    ArchiveTaskInput, CreateTaskInput, RestoreTaskInput, TaskDbService, TrashTaskInput,
+    UnarchiveTaskInput,
+};
 
 // ============================================================
 // 能力实证辅助
@@ -297,8 +306,8 @@ fn migration_0013_creates_derived_objects_on_fresh_database() {
     let result = MigrationRunner::new(MIGRATIONS, SqliteBackupSnapshot)
         .run(&mut connection, &backup)
         .unwrap();
-    // MIGRATIONS 覆盖到最新版本（当前 0014）；0013 的派生对象仍需存在。
-    assert_eq!(result.current_version, 14);
+    // MIGRATIONS 覆盖到最新版本（当前 0015）；0013 的派生对象仍需存在。
+    assert_eq!(result.current_version, 15);
 
     assert!(object_exists(&connection, "search_documents"));
     assert!(object_exists(&connection, "search_fts"));
@@ -362,6 +371,10 @@ fn migration_0013_backfills_only_active_existing_content() {
 /// Archive V1 (P5C-S1): 0014 是 additive nullable column 迁移。
 /// 升级必须保留既有行、把 `archived_at_ms` 置为 NULL、并保持 0013
 /// Search 触发器组不变（Search/Archive 集成属于 P5C-S2.5）。
+///
+/// P5C-S2.5 注意：本测试必须**只应用到 0014**（`&MIGRATIONS[..14]`）。
+/// 若改为应用 `MIGRATIONS` 全量，0015 会同时被应用并改写 Search 触发器，
+/// 本测试将失去「证明 0014 自身不动 Search 触发器」的含义。
 #[test]
 fn migration_0014_adds_archive_state_without_touching_search_triggers() {
     let (_sandbox, backup, mut connection) = open_sandbox();
@@ -376,10 +389,10 @@ fn migration_0014_adds_archive_state_without_touching_search_triggers() {
     insert_note(&connection, "n-legacy", "  Legacy note  ", "raw\n\nbody", None);
     let triggers_before = trigger_sql(&connection);
 
-    let result = MigrationRunner::new(MIGRATIONS, SqliteBackupSnapshot)
+    let result = MigrationRunner::new(&MIGRATIONS[..14], SqliteBackupSnapshot)
         .run(&mut connection, &backup)
         .unwrap();
-    assert_eq!(result.current_version, 14, "0014 必须被应用");
+    assert_eq!(result.current_version, 14, "必须只应用到 0014");
 
     assert!(column_exists(&connection, "tasks", "archived_at_ms"));
     assert!(column_exists(&connection, "notes", "archived_at_ms"));
@@ -424,6 +437,323 @@ fn migration_0014_adds_archive_state_without_touching_search_triggers() {
 
     // 0013 Search 触发器必须逐字节不变
     assert_eq!(trigger_sql(&connection), triggers_before);
+}
+
+// ============================================================
+// migration 0015 Search / Archive lifecycle integration (P5C-S2.5)
+// ============================================================
+
+fn set_archived(connection: &Connection, table: &str, id: &str, archived_at_ms: i64) {
+    connection
+        .execute(
+            &format!("UPDATE {table} SET archived_at_ms = ?1 WHERE id = ?2"),
+            rusqlite::params![archived_at_ms, id],
+        )
+        .unwrap();
+}
+
+fn set_deleted(connection: &Connection, table: &str, id: &str, deleted_at_ms: i64) {
+    connection
+        .execute(
+            &format!("UPDATE {table} SET deleted_at_ms = ?1 WHERE id = ?2"),
+            rusqlite::params![deleted_at_ms, id],
+        )
+        .unwrap();
+}
+
+fn search_hits(connection: &Connection, term: &str) -> usize {
+    SearchDbService::query(
+        connection,
+        SearchQueryInput {
+            raw_query: term.to_string(),
+            limit: 50,
+        },
+    )
+    .unwrap()
+    .len()
+}
+
+/// 0015 的投影修复：0014 之后旧 0013 触发器不认识 `archived_at_ms`，
+/// ARCHIVED 的 Task / Note 会残留在派生 Search 投影里。0015 必须清掉它们，
+/// 且不得触碰 Diary / Canvas 投影。
+#[test]
+fn migration_0015_removes_archived_task_and_note_from_search_projection() {
+    let (_sandbox, backup, mut connection) = open_sandbox();
+    MigrationRunner::new(&MIGRATIONS[..14], SqliteBackupSnapshot)
+        .run(&mut connection, &backup)
+        .unwrap();
+
+    insert_task(&connection, "t-active", "活跃任务标题", None);
+    insert_task(&connection, "t-archived", "归档任务标题", None);
+    insert_task(&connection, "t-trashed", "回收任务标题", Some(200));
+    insert_task(&connection, "t-trashed-archived", "归档回收任务", None);
+    set_archived(&connection, "tasks", "t-archived", 100);
+    set_archived(&connection, "tasks", "t-trashed-archived", 100);
+    set_deleted(&connection, "tasks", "t-trashed-archived", 200);
+
+    insert_note(
+        &connection,
+        "n-active",
+        "活跃笔记",
+        "活跃笔记正文内容",
+        None,
+    );
+    insert_note(
+        &connection,
+        "n-archived",
+        "归档笔记",
+        "归档笔记正文内容",
+        None,
+    );
+    insert_note(
+        &connection,
+        "n-trashed",
+        "回收笔记",
+        "回收笔记正文内容",
+        Some(200),
+    );
+    insert_note(
+        &connection,
+        "n-trashed-archived",
+        "归档回收笔记",
+        "归档回收笔记正文",
+        None,
+    );
+    set_archived(&connection, "notes", "n-archived", 100);
+    set_archived(&connection, "notes", "n-trashed-archived", 100);
+    set_deleted(&connection, "notes", "n-trashed-archived", 200);
+
+    insert_diary(
+        &connection,
+        "d-active",
+        "活跃日记",
+        "日记正文内容",
+        "2026-09-01",
+        None,
+    );
+    insert_canvas(&connection, "c-active", "活跃画布");
+
+    // BEFORE 0015：ARCHIVED 行仍留在派生投影里（旧触发器只认识 deleted_at_ms）。
+    assert!(projection_row_exists(&connection, "task", "t-active"));
+    assert!(
+        projection_row_exists(&connection, "task", "t-archived"),
+        "0014 之后 ARCHIVED Task 仍留在投影中，这正是 0015 要修复的问题"
+    );
+    assert!(projection_row_exists(&connection, "note", "n-archived"));
+    assert_eq!(fts_hits(&connection, "归档任"), 1);
+    assert_eq!(fts_hits(&connection, "档笔记"), 1);
+    let diary_before = projection_title(&connection, "diary", "d-active");
+    let canvas_before = projection_title(&connection, "canvas", "c-active");
+
+    let result = MigrationRunner::new(MIGRATIONS, SqliteBackupSnapshot)
+        .run(&mut connection, &backup)
+        .unwrap();
+    assert_eq!(result.current_version, 15, "0015 必须被应用");
+
+    // Task：只有 ACTIVE 可检索
+    assert!(projection_row_exists(&connection, "task", "t-active"));
+    assert!(!projection_row_exists(&connection, "task", "t-archived"));
+    assert!(!projection_row_exists(&connection, "task", "t-trashed"));
+    assert!(!projection_row_exists(&connection, "task", "t-trashed-archived"));
+
+    // Note：只有 ACTIVE 可检索
+    assert!(projection_row_exists(&connection, "note", "n-active"));
+    assert!(!projection_row_exists(&connection, "note", "n-archived"));
+    assert!(!projection_row_exists(&connection, "note", "n-trashed"));
+    assert!(!projection_row_exists(&connection, "note", "n-trashed-archived"));
+
+    // FTS：归档 token 必须消失，活跃 token 必须仍在
+    assert_eq!(fts_hits(&connection, "活跃任"), 1);
+    assert_eq!(fts_hits(&connection, "归档任"), 0);
+    assert_eq!(fts_hits(&connection, "档笔记"), 0);
+    assert_eq!(fts_hits(&connection, "笔记正"), 1);
+
+    // Diary / Canvas 投影不受影响
+    assert_eq!(projection_count(&connection, "diary"), 1);
+    assert_eq!(projection_count(&connection, "canvas"), 1);
+    assert!(projection_row_exists(&connection, "diary", "d-active"));
+    assert!(projection_row_exists(&connection, "canvas", "c-active"));
+    assert_eq!(projection_title(&connection, "diary", "d-active"), diary_before);
+    assert_eq!(
+        projection_title(&connection, "canvas", "c-active"),
+        canvas_before
+    );
+}
+
+/// Task 生命周期（走 canonical TaskDbService，不直接 UPDATE）：
+/// create → 可检索；archive → 不可检索；unarchive → 可检索；
+/// archive → trash → restore → 仍 ARCHIVED，仍不可检索；unarchive → 可检索。
+#[test]
+fn task_search_lifecycle_follows_archive_state_through_canonical_services() {
+    let (_sandbox, backup, mut connection) = open_sandbox();
+    MigrationRunner::new(MIGRATIONS, SqliteBackupSnapshot)
+        .run(&mut connection, &backup)
+        .unwrap();
+
+    TaskDbService::create(
+        &connection,
+        CreateTaskInput {
+            id: "00000000-0000-4000-8000-000000000101".into(),
+            title: "生命周期任务".into(),
+            created_at_ms: 10,
+            is_important: false,
+            is_urgent: false,
+            due_date: None,
+            project_id: None,
+            tag_ids: Vec::new(),
+        },
+    )
+    .unwrap();
+    assert_eq!(search_hits(&connection, "生命周期"), 1);
+
+    TaskDbService::archive(
+        &connection,
+        ArchiveTaskInput {
+            id: "00000000-0000-4000-8000-000000000101".into(),
+            updated_at_ms: 20,
+        },
+    )
+    .unwrap();
+    assert_eq!(search_hits(&connection, "生命周期"), 0, "archive 须移出 Search");
+
+    TaskDbService::unarchive(
+        &connection,
+        UnarchiveTaskInput {
+            id: "00000000-0000-4000-8000-000000000101".into(),
+            updated_at_ms: 30,
+        },
+    )
+    .unwrap();
+    assert_eq!(search_hits(&connection, "生命周期"), 1, "unarchive 须重新纳入");
+
+    TaskDbService::archive(
+        &connection,
+        ArchiveTaskInput {
+            id: "00000000-0000-4000-8000-000000000101".into(),
+            updated_at_ms: 40,
+        },
+    )
+    .unwrap();
+    assert_eq!(search_hits(&connection, "生命周期"), 0);
+
+    TaskDbService::trash(
+        &connection,
+        TrashTaskInput {
+            id: "00000000-0000-4000-8000-000000000101".into(),
+            updated_at_ms: 50,
+        },
+    )
+    .unwrap();
+    assert_eq!(search_hits(&connection, "生命周期"), 0);
+
+    TaskDbService::restore(
+        &connection,
+        RestoreTaskInput {
+            id: "00000000-0000-4000-8000-000000000101".into(),
+            updated_at_ms: 60,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        search_hits(&connection, "生命周期"),
+        0,
+        "Trash restore 保留 archived_at_ms，回到 ARCHIVED 仍须不可检索"
+    );
+
+    TaskDbService::unarchive(
+        &connection,
+        UnarchiveTaskInput {
+            id: "00000000-0000-4000-8000-000000000101".into(),
+            updated_at_ms: 70,
+        },
+    )
+    .unwrap();
+    assert_eq!(search_hits(&connection, "生命周期"), 1);
+}
+
+/// Note 生命周期与 Task 完全一致，且归档 Note 的正文 token 也不得残留在 FTS。
+#[test]
+fn note_search_lifecycle_follows_archive_state_through_canonical_services() {
+    let (_sandbox, backup, mut connection) = open_sandbox();
+    MigrationRunner::new(MIGRATIONS, SqliteBackupSnapshot)
+        .run(&mut connection, &backup)
+        .unwrap();
+
+    NoteDbService::create(
+        &connection,
+        CreateNoteInput {
+            id: "00000000-0000-4000-8000-000000000102".into(),
+            title: "生命周期笔记".into(),
+            content: "生命周期正文内容".into(),
+            created_at_ms: 10,
+        },
+    )
+    .unwrap();
+    assert_eq!(search_hits(&connection, "生命周期"), 1);
+    assert_eq!(search_hits(&connection, "周期正"), 1, "正文 token 须可检索");
+
+    NoteDbService::archive(
+        &connection,
+        ArchiveNoteInput {
+            id: "00000000-0000-4000-8000-000000000102".into(),
+            updated_at_ms: 20,
+        },
+    )
+    .unwrap();
+    assert_eq!(search_hits(&connection, "生命周期"), 0);
+    assert_eq!(search_hits(&connection, "周期正"), 0, "归档 Note 正文不得残留");
+
+    NoteDbService::unarchive(
+        &connection,
+        UnarchiveNoteInput {
+            id: "00000000-0000-4000-8000-000000000102".into(),
+            updated_at_ms: 30,
+        },
+    )
+    .unwrap();
+    assert_eq!(search_hits(&connection, "周期正"), 1);
+
+    NoteDbService::archive(
+        &connection,
+        ArchiveNoteInput {
+            id: "00000000-0000-4000-8000-000000000102".into(),
+            updated_at_ms: 40,
+        },
+    )
+    .unwrap();
+    NoteDbService::soft_delete(
+        &connection,
+        SoftDeleteNoteInput {
+            id: "00000000-0000-4000-8000-000000000102".into(),
+            updated_at_ms: 50,
+        },
+    )
+    .unwrap();
+    assert_eq!(search_hits(&connection, "周期正"), 0);
+
+    NoteDbService::restore(
+        &connection,
+        RestoreNoteInput {
+            id: "00000000-0000-4000-8000-000000000102".into(),
+            updated_at_ms: 60,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        search_hits(&connection, "周期正"),
+        0,
+        "Trash restore 保留 archived_at_ms，回到 ARCHIVED 仍须不可检索"
+    );
+
+    NoteDbService::unarchive(
+        &connection,
+        UnarchiveNoteInput {
+            id: "00000000-0000-4000-8000-000000000102".into(),
+            updated_at_ms: 70,
+        },
+    )
+    .unwrap();
+    assert_eq!(search_hits(&connection, "周期正"), 1);
 }
 
 #[test]

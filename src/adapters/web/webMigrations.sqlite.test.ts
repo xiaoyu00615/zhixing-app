@@ -31,7 +31,7 @@ function listTables(db: Database): string[] {
 }
 
 describe('Web SQLite migration 12 (real sqlite-wasm)', () => {
-  test('applies all 14 migrations and creates notes + diary_entries', async () => {
+  test('applies all 15 migrations and creates notes + diary_entries', async () => {
     const db = openInMemoryDatabase()
     try {
       await runWebMigrations(new SqliteWebMigrationStore(db), WEB_MIGRATIONS, () => 123)
@@ -46,20 +46,20 @@ describe('Web SQLite migration 12 (real sqlite-wasm)', () => {
          FROM schema_migrations ORDER BY version ASC`,
       )
       expect(history.map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
       ])
       const last = history.at(-1)
       expect(last).toMatchObject({
-        version: 14,
-        id: '0014_add_archive_state',
-        checksum_sha256: await sha256Hex(WEB_MIGRATIONS[13]?.sql ?? ''),
+        version: 15,
+        id: '0015_search_archive_lifecycle',
+        checksum_sha256: await sha256Hex(WEB_MIGRATIONS[14]?.sql ?? ''),
       })
     } finally {
       db.close()
     }
   })
 
-  test('WebTaskDatabase.initialize passes sanity after migration 14', async () => {
+  test('WebTaskDatabase.initialize passes sanity after migration 15', async () => {
     const raw = openInMemoryDatabase()
     await WebTaskDatabase.initialize(raw)
   })
@@ -99,7 +99,7 @@ describe('Web SQLite migration 12 (real sqlite-wasm)', () => {
     }
   })
 
-  test('fresh 1→14 and upgrade 11→14 both reach a contiguous history with correct checksums', async () => {
+  test('fresh 1→15 and upgrade 11→15 both reach a contiguous history with correct checksums', async () => {
     const fresh = openInMemoryDatabase()
     try {
       await runWebMigrations(
@@ -111,9 +111,9 @@ describe('Web SQLite migration 12 (real sqlite-wasm)', () => {
         'SELECT version, id, checksum_sha256 FROM schema_migrations ORDER BY version ASC',
       )
       expect(freshHistory.map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
       ])
-      for (let i = 0; i < 14; i += 1) {
+      for (let i = 0; i < 15; i += 1) {
         const row = freshHistory[i]
         const definition = WEB_MIGRATIONS[i]
         expect(row).toMatchObject({
@@ -139,13 +139,13 @@ describe('Web SQLite migration 12 (real sqlite-wasm)', () => {
         'SELECT version, id, checksum_sha256, applied_at_ms FROM schema_migrations ORDER BY version ASC',
       )
       expect(upgradeHistory.map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
       ])
       const last = upgradeHistory.at(-1)
       expect(last).toMatchObject({
-        version: 14,
-        id: '0014_add_archive_state',
-        checksum_sha256: await sha256Hex(WEB_MIGRATIONS[13]?.sql ?? ''),
+        version: 15,
+        id: '0015_search_archive_lifecycle',
+        checksum_sha256: await sha256Hex(WEB_MIGRATIONS[14]?.sql ?? ''),
         applied_at_ms: 456,
       })
 
@@ -285,6 +285,9 @@ describe('Web SQLite migration 14 archive state (real sqlite-wasm)', () => {
     }
   })
 
+  // P5C-S2.5：本测试必须只应用到 0014。若改用 WEB_MIGRATIONS 全量，
+  // 0015 会一并应用并改写 Search 触发器，本测试将失去
+  //「证明 0014 自身不动 Search 触发器」的含义。
   test('leaves the 0013 Search projection triggers untouched', async () => {
     const db = openInMemoryDatabase()
     try {
@@ -298,7 +301,7 @@ describe('Web SQLite migration 14 archive state (real sqlite-wasm)', () => {
       )
       await runWebMigrations(
         new SqliteWebMigrationStore(db),
-        WEB_MIGRATIONS,
+        WEB_MIGRATIONS.slice(0, 14),
         () => 456,
       )
       const after = db.selectObjects(
