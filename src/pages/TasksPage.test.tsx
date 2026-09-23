@@ -132,6 +132,8 @@ function createServiceDouble(initialTasks: readonly Task[] = [TASK]) {
     clearTaskProject,
     addTaskTag,
     removeTaskTag,
+    archiveTask,
+    unarchiveTask,
   }
 }
 
@@ -2106,5 +2108,76 @@ describe('TasksPage quadrant view', () => {
       screen.queryByLabelText(`任务详情：${TASK.title}`),
     ).not.toBeInTheDocument()
     expect(screen.queryByText(/永久删除/)).not.toBeInTheDocument()
+  })
+})
+
+describe('TasksPage archive action (P5C S3)', () => {
+  test('detail panel exposes Archive and archives through TaskService.archiveTask(id)', async () => {
+    const user = userEvent.setup()
+    const task = taskFixture(401, '归档任务')
+    const fake = createServiceDouble([task])
+    fake.listTasks
+      .mockResolvedValueOnce([task])
+      .mockResolvedValueOnce([])
+    const { openRuntime } = resolvedRuntime(fake.service)
+
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByText(task.title)
+
+    await user.click(
+      screen.getByRole('button', { name: `查看任务详情：${task.title}` }),
+    )
+    const detail = screen.getByRole('dialog', {
+      name: `任务详情：${task.title}`,
+    })
+    const archiveButton = within(detail).getByRole('button', { name: '归档' })
+    expect(archiveButton).toBeEnabled()
+
+    await user.click(archiveButton)
+    await waitFor(() =>
+      expect(fake.archiveTask).toHaveBeenCalledWith(task.id),
+    )
+    // The list reloads after archive; the archived task is gone and the detail
+    // dialog does not linger on a stale record.
+    expect(fake.listTasks).toHaveBeenCalledTimes(2)
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('dialog', { name: `任务详情：${task.title}` }),
+      ).not.toBeInTheDocument(),
+    )
+    expect(screen.queryByText(task.title)).not.toBeInTheDocument()
+  })
+
+  test('archive failure: task remains active with safe feedback and the detail stays open', async () => {
+    const user = userEvent.setup()
+    const task = taskFixture(402, '归档失败任务')
+    const fake = createServiceDouble([task])
+    fake.archiveTask.mockRejectedValueOnce(
+      new TaskApplicationError('UNAVAILABLE'),
+    )
+    fake.listTasks.mockResolvedValue([task])
+    const { openRuntime } = resolvedRuntime(fake.service)
+
+    render(<TasksPage openRuntime={openRuntime} today="2026-08-23" />)
+    await screen.findByText(task.title)
+
+    await user.click(
+      screen.getByRole('button', { name: `查看任务详情：${task.title}` }),
+    )
+    const detail = screen.getByRole('dialog', {
+      name: `任务详情：${task.title}`,
+    })
+
+    await user.click(within(detail).getByRole('button', { name: '归档' }))
+
+    await waitFor(() =>
+      expect(
+        screen.getByText('操作暂时无法完成，请重试。'),
+      ).toBeInTheDocument(),
+    )
+    // The detail stays open for a retry, still showing the archived task
+    // (the list row is aria-hidden behind the open Radix dialog, so we scope
+    // the presence check to the dialog's own title text).
+    expect(within(detail).getByText(task.title)).toBeInTheDocument()
   })
 })

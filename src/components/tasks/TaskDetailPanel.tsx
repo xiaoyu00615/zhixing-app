@@ -1,4 +1,5 @@
 import {
+  Archive,
   CalendarDays,
   CalendarX,
   Check,
@@ -53,6 +54,7 @@ interface TaskDetailPanelProps {
   readonly onAddTag: (task: Task, tagId: string) => void
   readonly onRemoveTag: (task: Task, tagId: string) => void
   readonly onTrash: (task: Task) => void
+  readonly onArchive: (task: Task) => void
 }
 
 const STATUS_PRESENTATION: Record<
@@ -126,6 +128,7 @@ export function TaskDetailPanel({
   onAddTag,
   onRemoveTag,
   onTrash,
+  onArchive,
 }: TaskDetailPanelProps) {
   const [confirmingTrash, setConfirmingTrash] = useState(false)
 
@@ -256,9 +259,20 @@ export function TaskDetailPanel({
                 )}
               </div>
               <div className="mt-4 border-t border-border/70 pt-4">
+                <Button
+                  className="text-foreground-secondary hover:bg-surface-secondary hover:text-foreground"
+                  disabled={pending}
+                  onClick={() => onArchive(task)}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  <Archive data-icon="inline-start" />
+                  归档
+                </Button>
                 {!confirmingTrash ? (
                   <Button
-                    className="text-danger hover:bg-danger-soft hover:text-danger"
+                    className="mt-3 text-danger hover:bg-danger-soft hover:text-danger"
                     disabled={pending}
                     onClick={() => setConfirmingTrash(true)}
                     size="sm"

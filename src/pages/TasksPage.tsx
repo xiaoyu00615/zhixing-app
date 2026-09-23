@@ -1071,6 +1071,11 @@ export function TasksPage({
             currentService.trashTask(task.id),
           )
         }
+        onArchive={(task) =>
+          void runPlanningAction(task, (currentService) =>
+            currentService.archiveTask(task.id),
+          )
+        }
         onStatusAction={(task, action) => void runStatusAction(task, action)}
         pending={detailTask !== null && pendingTaskIds.has(detailTask.id)}
         task={detailTask}

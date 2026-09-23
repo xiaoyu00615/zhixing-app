@@ -1,4 +1,4 @@
-import { NotebookPen, Plus, RotateCcw, Trash2 } from 'lucide-react'
+import { Archive, NotebookPen, Plus, RotateCcw, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -88,6 +88,8 @@ export function NotesPage({
   const [isCreating, setIsCreating] = useState(false)
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved')
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [archiving, setArchiving] = useState(false)
+  const archiveIntentRef = useRef<string | null>(null)
 
   // Autosave state
   const localDraftRef = useRef<SelectionState>(emptySelection())
@@ -554,6 +556,111 @@ export function NotesPage({
     deleteIntentRef.current = null
   }
 
+  /**
+   * Archive V1 (UI): move the ACTIVE note into the archived state.
+   *
+   * Safety contract (P5C S3):
+   *   1. enter `archiving` pending state and lock editor + conflicting actions
+   *   2. clear the debounce timer so no late autosave can race the archive
+   *   3. await any in-flight save loop, then flush the latest draft if dirty
+   *   4. ONLY after the draft is persisted do we call `service.archive(id)`
+   *   5. if the save fails, we do NOT archive and surface safe feedback
+   *
+   * We never touch the repository, the Worker, Tauri or SQL directly: the
+   * canonical NoteService owns the state transition.
+   */
+  async function handleArchive(): Promise<void> {
+    if (service === null || archiving) return
+    const currentId = localDraftRef.current.id
+    if (currentId === null) return
+
+    setArchiving(true)
+    archiveIntentRef.current = currentId
+    clearDebounceTimer()
+
+    try {
+      // Wait for any in-flight save loop to settle before touching the note.
+      if (saveLoopPromiseRef.current !== null) {
+        try {
+          await saveLoopPromiseRef.current
+        } catch {
+          // The in-flight failure already reported feedback; fall through and
+          // let the flush below re-attempt the latest draft.
+        }
+      }
+
+      // Persist the latest draft (if any) BEFORE archiving. A throw here means
+      // the save failed: we must not archive a note we could not save.
+      try {
+        await flushCurrentDraft()
+      } catch {
+        if (mountedRef.current) {
+          setFeedback('保存暂时失败，未归档')
+        }
+        return
+      }
+
+      await service.archive(currentId)
+
+      const loadedNotes = await reloadNotes(service)
+      // Safe selection move (mirrors the delete flow): same index, else
+      // previous, else empty. The archived note is excluded from listActive.
+      const originalIndex = notes.findIndex((note) => note.id === currentId)
+      let nextSelection: SelectionState
+      if (loadedNotes[originalIndex] !== undefined) {
+        nextSelection = selectionFromNote(loadedNotes[originalIndex])
+      } else if (loadedNotes[originalIndex - 1] !== undefined) {
+        nextSelection = selectionFromNote(loadedNotes[originalIndex - 1]!)
+      } else {
+        nextSelection = emptySelection()
+      }
+      if (mountedRef.current) {
+        setSelection(nextSelection)
+        localDraftRef.current = nextSelection
+        draftRevisionRef.current = 0
+        savedRevisionRef.current = 0
+        setSaveStatus('saved')
+        setFeedback(null)
+      }
+    } catch (error: unknown) {
+      if (mountedRef.current) {
+        if (
+          error instanceof NoteApplicationError &&
+          error.code === 'NOT_FOUND'
+        ) {
+          const loadedNotes = await reloadNotes(service)
+          const nextNote =
+            loadedNotes.find((note) => note.id !== currentId) ??
+            loadedNotes[0] ??
+            null
+          if (mountedRef.current) {
+            setSelection(
+              nextNote === null ? emptySelection() : selectionFromNote(nextNote),
+            )
+            localDraftRef.current =
+              nextNote === null ? emptySelection() : selectionFromNote(nextNote)
+            draftRevisionRef.current = 0
+            savedRevisionRef.current = 0
+            setSaveStatus('saved')
+          }
+          setFeedback('这条笔记已不存在。')
+        } else if (
+          error instanceof NoteApplicationError &&
+          error.code === 'UNAVAILABLE'
+        ) {
+          setFeedback('归档暂时失败，请重试。')
+        } else {
+          setFeedback('笔记归档失败，请稍后重试。')
+        }
+      }
+    } finally {
+      if (mountedRef.current) {
+        setArchiving(false)
+      }
+      archiveIntentRef.current = null
+    }
+  }
+
   function retryLoad() {
     setPhase('loading')
     setService(null)
@@ -591,14 +698,14 @@ export function NotesPage({
           </p>
         </div>
         {phase === 'ready' && (
-          <Button
-            disabled={isCreating}
-            onClick={() => void startCreateNote()}
-            type="button"
-          >
-            <Plus data-icon="inline-start" />
-            {isCreating ? '创建中…' : '新建笔记'}
-          </Button>
+            <Button
+              disabled={isCreating || archiving}
+              onClick={() => void startCreateNote()}
+              type="button"
+            >
+              <Plus data-icon="inline-start" />
+              {isCreating ? '创建中…' : '新建笔记'}
+            </Button>
         )}
       </header>
 
@@ -652,15 +759,15 @@ export function NotesPage({
                 <p className="mt-2 text-body text-foreground-secondary">
                   创建第一篇笔记，开始沉淀知识。
                 </p>
-                <Button
-                  className="mt-4"
-                  disabled={isCreating}
-                  onClick={() => void startCreateNote()}
-                  type="button"
-                >
-                  <Plus data-icon="inline-start" />
-                  新建笔记
-                </Button>
+                  <Button
+                    className="mt-4"
+                    disabled={isCreating || archiving}
+                    onClick={() => void startCreateNote()}
+                    type="button"
+                  >
+                    <Plus data-icon="inline-start" />
+                    新建笔记
+                  </Button>
               </div>
             ) : (
               <ul aria-label="笔记列表" className="max-h-120 overflow-y-auto p-2">
@@ -674,6 +781,7 @@ export function NotesPage({
                         'w-full rounded-md px-3 py-3 text-left transition-colors hover:bg-hover',
                         selection.id === note.id && 'bg-hover text-foreground',
                       )}
+                      disabled={archiving}
                       onClick={() => void handleSwitchToNote(note)}
                       type="button"
                     >
@@ -712,6 +820,7 @@ export function NotesPage({
                   <Input
                     aria-label="笔记标题"
                     className="border-0 bg-transparent px-1 py-1 text-hero font-semibold shadow-none focus-visible:border-transparent"
+                    disabled={archiving}
                     onChange={(event) => handleTitleChange(event.target.value)}
                     onBlur={handleTitleBlur}
                     placeholder="无标题"
@@ -721,6 +830,7 @@ export function NotesPage({
                 <textarea
                   aria-label="笔记正文"
                   className="min-h-72 w-full flex-1 resize-none bg-transparent p-4 text-body leading-relaxed text-foreground outline-none placeholder:text-foreground-tertiary"
+                  disabled={archiving}
                   onChange={(event) => handleContentChange(event.target.value)}
                   onBlur={handleContentBlur}
                   placeholder="开始写笔记…"
@@ -740,7 +850,16 @@ export function NotesPage({
                   </div>
                   <div className="flex items-center gap-2">
                     <Button
-                      disabled={isCreating}
+                      disabled={archiving || isCreating}
+                      onClick={() => void handleArchive()}
+                      type="button"
+                      variant="outline"
+                    >
+                      <Archive data-icon="inline-start" />
+                      {archiving ? '归档中…' : '归档'}
+                    </Button>
+                    <Button
+                      disabled={archiving || isCreating}
                       onClick={handleRequestDelete}
                       type="button"
                       variant="destructive"

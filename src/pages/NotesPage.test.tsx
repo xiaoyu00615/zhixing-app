@@ -58,6 +58,10 @@ function createServiceDouble(initialNotes: readonly Note[] = [NOTE_A]) {
   )
   const softDelete = vi.fn<NoteService['softDelete']>()
   softDelete.mockResolvedValue(undefined)
+  const archive = vi.fn<NoteService['archive']>()
+  archive.mockResolvedValue(undefined)
+  const unarchive = vi.fn<NoteService['unarchive']>()
+  unarchive.mockResolvedValue(undefined)
   const service: NoteService = {
     createNote,
     getActiveById: vi.fn().mockResolvedValue(NOTE_A),
@@ -65,11 +69,11 @@ function createServiceDouble(initialNotes: readonly Note[] = [NOTE_A]) {
     updateNote,
     softDelete,
     restore: vi.fn().mockResolvedValue(undefined),
-    archive: vi.fn().mockResolvedValue(undefined),
-    unarchive: vi.fn().mockResolvedValue(undefined),
+    archive,
+    unarchive,
   }
 
-  return { service, createNote, listActive, updateNote, softDelete }
+  return { service, createNote, listActive, updateNote, softDelete, archive, unarchive }
 }
 
 function createRuntime(service: NoteService) {
@@ -1000,5 +1004,160 @@ describe('NotesPage save resolves after unmount (matrix R)', () => {
     await act(async () => {})
 
     await waitFor(() => expect(dispose).toHaveBeenCalledOnce())
+  })
+})
+
+describe('NotesPage archive with autosave safety (P5C S3)', () => {
+  test('clean note: Archive button visible and calls NoteService.archive(id) without a save', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([NOTE_A])
+    const { openRuntime } = resolvedRuntime(fake.service)
+
+    render(<NotesPage openRuntime={openRuntime} />)
+
+    const archiveButton = await screen.findByRole('button', { name: '归档' })
+    expect(archiveButton).toBeEnabled()
+    await user.click(archiveButton)
+    await waitFor(() => expect(fake.archive).toHaveBeenCalledWith(NOTE_A.id))
+    expect(fake.updateNote).not.toHaveBeenCalled()
+    expect(fake.listActive).toHaveBeenCalledTimes(2)
+  })
+
+  test('dirty note: latest draft is saved via updateNote BEFORE archive with exact values', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([NOTE_A])
+    const order: string[] = []
+    fake.updateNote.mockImplementation((input) => {
+      order.push('update')
+      return Promise.resolve({ ...NOTE_A, ...input, updatedAtMs: 400 })
+    })
+    fake.archive.mockImplementation(() => {
+      order.push('archive')
+      return Promise.resolve(undefined)
+    })
+    const { openRuntime } = resolvedRuntime(fake.service)
+
+    render(<NotesPage openRuntime={openRuntime} />)
+    const titleInput = await screen.findByLabelText('笔记标题')
+    await user.clear(titleInput)
+    await user.type(titleInput, '归档前最新标题')
+
+    await user.click(screen.getByRole('button', { name: '归档' }))
+    await waitFor(() => expect(fake.archive).toHaveBeenCalledWith(NOTE_A.id))
+
+    expect(fake.updateNote).toHaveBeenCalledWith({
+      id: NOTE_A.id,
+      title: '归档前最新标题',
+      content: NOTE_A.content,
+    })
+    expect(order[0]).toBe('update')
+    expect(order[order.length - 1]).toBe('archive')
+  })
+
+  test('in-flight save: archive waits for the pending save loop before archiving', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([NOTE_A])
+    const timer = captureDebounceTimer()
+    const firstUpdateDeferred = deferred<void>()
+    let updateCalls = 0
+    fake.updateNote.mockImplementation(async () => {
+      updateCalls += 1
+      if (updateCalls === 1) {
+        await firstUpdateDeferred.promise
+      }
+      return { ...NOTE_A, updatedAtMs: 500 }
+    })
+    const { openRuntime } = resolvedRuntime(fake.service)
+
+    render(<NotesPage openRuntime={openRuntime} />)
+    const titleInput = await screen.findByLabelText('笔记标题')
+    await user.clear(titleInput)
+    await user.type(titleInput, 'A')
+    await act(async () => {
+      await timer.flush()
+    })
+    await user.click(screen.getByRole('button', { name: '归档' }))
+
+    // While the save loop is still in flight, archive must not have been called.
+    expect(fake.archive).not.toHaveBeenCalled()
+    act(() => {
+      firstUpdateDeferred.resolve()
+    })
+    await waitFor(() => expect(fake.archive).toHaveBeenCalledWith(NOTE_A.id))
+  })
+
+  test('save failure: archive is NOT called and the note stays active', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([NOTE_A])
+    fake.updateNote.mockRejectedValue(new NoteApplicationError('UNAVAILABLE'))
+    const { openRuntime } = resolvedRuntime(fake.service)
+
+    render(<NotesPage openRuntime={openRuntime} />)
+    const titleInput = await screen.findByLabelText('笔记标题')
+    await user.clear(titleInput)
+    await user.type(titleInput, 'dirty')
+
+    await user.click(screen.getByRole('button', { name: '归档' }))
+    await waitFor(() =>
+      expect(screen.getByText('保存暂时失败，未归档')).toBeInTheDocument(),
+    )
+    expect(fake.archive).not.toHaveBeenCalled()
+    expect(screen.getByLabelText('笔记标题')).toHaveValue('dirty')
+  })
+
+  test('archive failure: note remains active with safe feedback', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([NOTE_A])
+    fake.archive.mockRejectedValue(new NoteApplicationError('UNAVAILABLE'))
+    const { openRuntime } = resolvedRuntime(fake.service)
+
+    render(<NotesPage openRuntime={openRuntime} />)
+    await screen.findByLabelText('笔记标题')
+    await user.click(screen.getByRole('button', { name: '归档' }))
+    await waitFor(() =>
+      expect(screen.getByText('归档暂时失败，请重试。')).toBeInTheDocument(),
+    )
+    expect(screen.getByLabelText('笔记标题')).toHaveValue(NOTE_A.title)
+  })
+
+  test('success: active list reloads and selection safely moves to another note', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([NOTE_A, NOTE_B])
+    fake.listActive
+      .mockResolvedValueOnce([NOTE_A, NOTE_B])
+      .mockResolvedValueOnce([NOTE_B])
+    const { openRuntime } = resolvedRuntime(fake.service)
+
+    render(<NotesPage openRuntime={openRuntime} />)
+    await screen.findByLabelText('笔记标题')
+
+    await user.click(screen.getByRole('button', { name: '归档' }))
+    await waitFor(() => expect(fake.archive).toHaveBeenCalledWith(NOTE_A.id))
+    expect(fake.listActive).toHaveBeenCalledTimes(2)
+    expect(screen.getByLabelText('笔记标题')).toHaveValue(NOTE_B.title)
+  })
+
+  test('pending: editor, archive, delete, create and note switching are all locked', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([NOTE_A])
+    const archiveDeferred = deferred<void>()
+    fake.archive.mockReturnValue(archiveDeferred.promise)
+    const { openRuntime } = resolvedRuntime(fake.service)
+
+    render(<NotesPage openRuntime={openRuntime} />)
+    await screen.findByLabelText('笔记标题')
+
+    await user.click(screen.getByRole('button', { name: '归档' }))
+    const pendingButton = screen.getByRole('button', { name: '归档中…' })
+    expect(pendingButton).toBeDisabled()
+    expect(screen.getByRole('button', { name: '删除' })).toBeDisabled()
+    expect(screen.getByLabelText('笔记标题')).toBeDisabled()
+    expect(screen.getByRole('button', { name: '新建笔记' })).toBeDisabled()
+    const list = screen.getByRole('list', { name: '笔记列表' })
+    expect(within(list).getByRole('button')).toBeDisabled()
+    act(() => {
+      archiveDeferred.resolve()
+    })
+    await waitFor(() => expect(fake.archive).toHaveBeenCalled())
   })
 })
