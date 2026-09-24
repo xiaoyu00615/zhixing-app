@@ -15,6 +15,8 @@ import { openNoteRuntime } from '@/note/runtime'
 import type { OpenNoteRuntime } from '@/note/runtime.types'
 import { NoteApplicationError, type NoteService } from '@/note/service'
 import { cn } from '@/lib/utils'
+import { useOptionalMaintenanceCoordinator } from '@/maintenance/context'
+import type { EditorRegistration } from '@/maintenance/model'
 
 interface NotesPageProps {
   readonly openRuntime?: OpenNoteRuntime
@@ -56,6 +58,9 @@ function previewFromNote(note: Note): string {
   const preview = note.content.trim().replace(/\s+/g, ' ')
   return preview.length > 0 ? preview : '暂无正文'
 }
+
+/** Stable editor participant id for the Note page-local dirty draft. */
+const NOTE_EDITOR_PARTICIPANT_ID = 'note-editor'
 
 function LoadingState() {
   return (
@@ -99,6 +104,12 @@ export function NotesPage({
   const saveLoopPromiseRef = useRef<Promise<void> | null>(null)
   const deleteIntentRef = useRef<string | null>(null)
 
+  // P6-S2 maintenance coordination (editor quiesce). The coordinator lives at the
+  // App level; this page only registers its dirty-draft flush as a participant.
+  const maintenance = useOptionalMaintenanceCoordinator()
+  const flushCurrentDraftRef = useRef<() => Promise<void>>(async () => {})
+  const registrationRef = useRef<EditorRegistration | null>(null)
+
   // Runtime lifecycle
   const mountedRef = useRef(false)
   const runtimeRef = useRef<Awaited<ReturnType<OpenNoteRuntime>> | null>(null)
@@ -109,6 +120,12 @@ export function NotesPage({
       mountedRef.current = false
     }
   }, [])
+
+  // Keep the registered participant's flush pointing at the latest
+  // flushCurrentDraft implementation (it closes over the current `service`).
+  useEffect(() => {
+    flushCurrentDraftRef.current = flushCurrentDraft
+  })
 
   // P5 S4: apply the ?id= deep-link value through the existing selection
   // mechanism (no second editor, no autosave bypass). Absent, malformed or
@@ -181,22 +198,58 @@ export function NotesPage({
     return () => {
       active = false
       clearDebounceTimer()
-      // Best-effort flush before dispose
+      // Hand the unmount flush + dispose completion to the coordinator as
+      // RETIRING so a concurrent maintenance preparation can await it. Falls back
+      // to fire-and-forget only when no coordinator is available (e.g. unit
+      // tests that render the page directly).
       const isDirty =
         localDraftRef.current.id !== null &&
         draftRevisionRef.current > savedRevisionRef.current
-      void (async () => {
-        if (isDirty) {
-          try {
-            await flushCurrentDraft()
-          } catch {
-            // Ignore flush errors on unmount
+      const completion = (async () => {
+        try {
+          if (isDirty) {
+            // A flush failure MUST reject the retirement completion: the
+            // coordinator caches that failure and the next maintenance
+            // preparation fails. Swallowing it here would let a later
+            // preparation treat an unpersisted draft as safe.
+            await flushCurrentDraftRef.current()
           }
+        } finally {
+          await disposeRuntime()
         }
-        await disposeRuntime()
       })()
+      const registration = registrationRef.current
+      if (registration !== null) {
+        registration.retire(completion)
+      } else {
+        // No coordinator available (e.g. unit tests rendering the page directly):
+        // still perform the flush + dispose so behavior is unchanged. Nothing can
+        // observe a failure here, so attach a no-op catch to avoid unhandled
+        // promise rejections.
+        void completion.catch(() => {})
+      }
     }
-  }, [loadAttempt, openRuntime]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [loadAttempt, openRuntime])
+
+  // P6-S2R: register this editor as an ACTIVE participant once a runtime/service
+  // is available. `register()` returns a handle scoped to THIS mount instance: on
+  // unmount the runtime-effect cleanup hands the flush+dispose completion promise
+  // to that handle (RETIRING). StrictMode-safe: a remount gets a NEW registration
+  // token, so it never cancels or clears a still-pending retirement of the same
+  // logical editor — both are awaited by maintenance preparation.
+  useEffect(() => {
+    if (maintenance === null || service === null) {
+      return
+    }
+    const registration = maintenance.register({
+      id: NOTE_EDITOR_PARTICIPANT_ID,
+      flush: () => flushCurrentDraftRef.current(),
+    })
+    registrationRef.current = registration
+    return () => {
+      registrationRef.current = null
+    }
+  }, [maintenance, service])
 
   function clearDebounceTimer(): void {
     if (debounceTimerRef.current !== null) {
@@ -244,9 +297,16 @@ export function NotesPage({
       return
     }
 
+    // If a save loop is already running, wait for it to settle BEFORE deciding
+    // whether the latest draft still needs persistence. We must NOT return after
+    // an in-flight save: a newer revision may have been created while it ran, and
+    // that newer revision must also be persisted before this flush resolves.
     if (saveLoopPromiseRef.current !== null) {
       await saveLoopPromiseRef.current
-      return
+      if (draftRevisionRef.current <= savedRevisionRef.current) {
+        return
+      }
+      // Fall through: a newer revision exists and must be persisted now.
     }
 
     async function runSaveLoop(): Promise<void> {
@@ -272,60 +332,71 @@ export function NotesPage({
           title: snapshot.title,
           content: snapshot.content,
         })
+        // Persistence bookkeeping MUST happen regardless of mount state: the
+        // draft is persisted even while the editor is unmounting / retiring, so
+        // `await flushCurrentDraft()` can only resolve once the NEWEST known
+        // revision has been written.
+        savedRevisionRef.current = snapshot.revision
         if (mountedRef.current) {
-          savedRevisionRef.current = snapshot.revision
           setSaveStatus('saved')
           setFeedback(null)
           await refreshCanonicalList()
         }
       } catch (error: unknown) {
-        if (mountedRef.current) {
-          if (
-            error instanceof NoteApplicationError &&
-            error.code === 'NOT_FOUND'
-          ) {
-            savedRevisionRef.current = snapshot.revision
-            setSaveStatus('saved')
-            setFeedback(null)
-            const refreshed = await refreshCanonicalList()
-            const nextNote = refreshed[0] ?? null
-            if (mountedRef.current) {
-              setSelection(
-                nextNote === null
-                  ? emptySelection()
-                  : selectionFromNote(nextNote),
-              )
-              localDraftRef.current =
-                nextNote === null ? emptySelection() : selectionFromNote(nextNote)
-            }
-            setFeedback('这条笔记已不存在。')
+        const isNotFound =
+          error instanceof NoteApplicationError && error.code === 'NOT_FOUND'
+        if (isNotFound) {
+          // Persistence bookkeeping is NEVER gated on mount state: the entity no
+          // longer exists, so this revision is settled even while the editor is
+          // unmounting / retiring.
+          savedRevisionRef.current = snapshot.revision
+          if (!mountedRef.current) {
             return
           }
-          if (
-            error instanceof NoteApplicationError &&
-            error.code === 'VALIDATION'
-          ) {
+          setSaveStatus('saved')
+          setFeedback(null)
+          const refreshed = await refreshCanonicalList()
+          const nextNote = refreshed[0] ?? null
+          setSelection(
+            nextNote === null ? emptySelection() : selectionFromNote(nextNote),
+          )
+          localDraftRef.current =
+            nextNote === null ? emptySelection() : selectionFromNote(nextNote)
+          setFeedback('这条笔记已不存在。')
+          return
+        }
+        if (
+          error instanceof NoteApplicationError &&
+          error.code === 'VALIDATION'
+        ) {
+          if (mountedRef.current) {
             setSaveStatus('error')
             setFeedback('输入有误，请检查内容。')
             return
           }
-          // UNAVAILABLE or unknown safe error
+          throw error
+        }
+        // UNAVAILABLE or unknown safe error
+        if (mountedRef.current) {
           setSaveStatus('error')
           setFeedback('保存暂时失败，请重试。')
-          throw error
         }
         throw error
       }
 
-      // Check if there's a newer revision to save
-      if (mountedRef.current && draftRevisionRef.current > savedRevisionRef.current) {
+      // Check if there's a newer revision to save. This must NOT be gated on
+      // mount: an unmounting / retiring editor must still flush the newest known
+      // draft before maintenance preparation is allowed to succeed.
+      if (draftRevisionRef.current > savedRevisionRef.current) {
         await runSaveLoop()
       }
     }
 
     const savePromise = runSaveLoop()
     saveLoopPromiseRef.current = savePromise
-    setSaveStatus('saving')
+    if (mountedRef.current) {
+      setSaveStatus('saving')
+    }
     try {
       await saveLoopPromiseRef.current
     } finally {

@@ -7,6 +7,8 @@ import { NotesPage } from '@/pages/NotesPage'
 import type { Note } from '@/note/model'
 import type { NoteRuntime } from '@/note/runtime.types'
 import { NoteApplicationError, type NoteService } from '@/note/service'
+import { MaintenanceCoordinator } from '@/maintenance/coordinator'
+import { MaintenanceCoordinatorProvider } from '@/maintenance/context'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -96,6 +98,27 @@ function deferred<T>() {
     reject = rejectPromise
   })
   return { promise, resolve, reject }
+}
+
+type PrepareOutcome =
+  | { ok: true; lease: unknown }
+  | { ok: false; error: unknown }
+
+/**
+ * Drain pending promise continuations inside `act()`. Deliberately NOT a timer:
+ * nothing in the maintenance proofs waits on wall-clock time.
+ */
+async function settle(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+  })
 }
 
 /** Captures the setTimeout callback for the debounce timer and returns a helper to fire it. */
@@ -1159,5 +1182,315 @@ describe('NotesPage archive with autosave safety (P5C S3)', () => {
       archiveDeferred.resolve()
     })
     await waitFor(() => expect(fake.archive).toHaveBeenCalled())
+  })
+})
+
+describe('NotesPage maintenance coordination (P6-S2)', () => {
+  test('edit without 800ms debounce wait; prepare explicitly flushes latest draft and resolves after', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([NOTE_A])
+    // Capture the 800ms debounce timer but never fire it: the draft must be
+    // persisted through explicit maintenance preparation, not through a timer.
+    captureDebounceTimer()
+    fake.updateNote.mockResolvedValue({
+      ...NOTE_A,
+      title: '最新标题',
+      content: NOTE_A.content,
+      updatedAtMs: 500,
+    })
+    const { openRuntime } = resolvedRuntime(fake.service)
+    const coordinator = new MaintenanceCoordinator()
+
+    render(
+      <MaintenanceCoordinatorProvider instance={coordinator}>
+        <NotesPage openRuntime={openRuntime} />
+      </MaintenanceCoordinatorProvider>,
+    )
+
+    const titleInput = await screen.findByLabelText('笔记标题')
+    await user.clear(titleInput)
+    await user.type(titleInput, '最新标题')
+
+    // Do NOT advance the debounce timer.
+    await act(async () => {
+      await coordinator.prepareForMaintenance()
+    })
+
+    expect(fake.updateNote).toHaveBeenCalledWith({
+      id: NOTE_A.id,
+      title: '最新标题',
+      content: NOTE_A.content,
+    })
+    expect(coordinator.getState()).toBe('PREPARED')
+  })
+
+  test('route unmount does not lose quiesce visibility: retiring flush is awaited by prepare', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([NOTE_A])
+    captureDebounceTimer()
+    const resolveQueue: Array<() => void> = []
+    fake.updateNote.mockImplementation(async () => {
+      await new Promise<void>((resolve) => resolveQueue.push(resolve))
+      return { ...NOTE_A, title: 'unmount draft', content: NOTE_A.content, updatedAtMs: 500 }
+    })
+    const { openRuntime } = resolvedRuntime(fake.service)
+    const coordinator = new MaintenanceCoordinator()
+
+    const view = render(
+      <MaintenanceCoordinatorProvider instance={coordinator}>
+        <NotesPage openRuntime={openRuntime} />
+      </MaintenanceCoordinatorProvider>,
+    )
+    const titleInput = await screen.findByLabelText('笔记标题')
+    await user.clear(titleInput)
+    await user.type(titleInput, 'unmount draft')
+
+    // Simulate a route change: NotesPage unmounts, its flush+dispose retirement
+    // is still pending.
+    act(() => {
+      view.unmount()
+    })
+
+    const outcomes: Array<Promise<PrepareOutcome>> = []
+    let resolved = false
+    outcomes.push(
+      coordinator.prepareForMaintenance().then<PrepareOutcome, PrepareOutcome>(
+        (lease) => {
+          resolved = true
+          return { ok: true, lease }
+        },
+        (error: unknown) => ({ ok: false, error }),
+      ),
+    )
+    await act(async () => {
+      await Promise.resolve()
+    })
+    // Preparation must still be pending while the retiring flush is in flight.
+    expect(resolved).toBe(false)
+    expect(coordinator.getRetiringCount()).toBeGreaterThan(0)
+
+    act(() => {
+      resolveQueue[0]?.()
+    })
+    await act(async () => {
+      await outcomes[0]
+    })
+
+    expect(resolved).toBe(true)
+    expect(fake.updateNote).toHaveBeenCalledWith({
+      id: NOTE_A.id,
+      title: 'unmount draft',
+      content: NOTE_A.content,
+    })
+    expect(coordinator.getRetiringCount()).toBe(0)
+    expect(coordinator.getState()).toBe('PREPARED')
+  })
+
+  test('StrictMode: registration is idempotent and leaves exactly one active participant', async () => {
+    const fake = createServiceDouble([NOTE_A])
+    const coordinator = new MaintenanceCoordinator()
+
+    render(
+      <StrictMode>
+        <MaintenanceCoordinatorProvider instance={coordinator}>
+          <NotesPage openRuntime={resolvedRuntime(fake.service).openRuntime} />
+        </MaintenanceCoordinatorProvider>
+      </StrictMode>,
+    )
+
+    await screen.findByLabelText('笔记标题')
+    await act(async () => {})
+    expect(coordinator.getActiveCount()).toBe(1)
+    expect(coordinator.getRetiringCount()).toBe(0)
+  })
+
+  test('in-flight A + newer B + unmount: latest revision B is persisted before prepare succeeds', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([NOTE_A])
+    // The 800ms debounce is captured and never fired: writes are driven only by
+    // explicit maintenance preparation / retirement.
+    captureDebounceTimer()
+    const writes: Array<{ title: string; content: string }> = []
+    const resolvers: Array<() => void> = []
+    const rejecters: Array<(reason: unknown) => void> = []
+    fake.updateNote.mockImplementation(async (input) => {
+      writes.push({ title: input.title, content: input.content })
+      await new Promise<void>((resolve, reject) => {
+        resolvers.push(resolve)
+        rejecters.push(reject)
+      })
+      return { ...NOTE_A, ...input, updatedAtMs: 500 }
+    })
+    const { openRuntime } = resolvedRuntime(fake.service)
+    const coordinator = new MaintenanceCoordinator()
+
+    const view = render(
+      <MaintenanceCoordinatorProvider instance={coordinator}>
+        <NotesPage openRuntime={openRuntime} />
+      </MaintenanceCoordinatorProvider>,
+    )
+
+    const titleInput = await screen.findByLabelText('笔记标题')
+    await user.clear(titleInput)
+    await user.type(titleInput, 'A 标题')
+
+    // Revision A: the write starts through explicit preparation, not a timer.
+    let resolved = false
+    const outcomes: Array<Promise<PrepareOutcome>> = []
+    await act(async () => {
+      outcomes.push(
+        coordinator.prepareForMaintenance().then<PrepareOutcome, PrepareOutcome>(
+          (lease) => {
+            resolved = true
+            return { ok: true, lease }
+          },
+          (error: unknown) => ({ ok: false, error }),
+        ),
+      )
+      await settle()
+    })
+    expect(writes).toHaveLength(1)
+    expect(writes[0]?.title).toBe('A 标题')
+    expect(resolved).toBe(false)
+
+    // While A is still in flight the user keeps typing -> revision B.
+    await user.clear(titleInput)
+    await user.type(titleInput, 'B 标题')
+    await settle()
+    expect(writes).toHaveLength(1)
+
+    // Route away while A is still pending: the retirement must stay visible.
+    act(() => {
+      view.unmount()
+    })
+    await settle()
+    expect(resolved).toBe(false)
+    expect(coordinator.getRetiringCount()).toBe(1)
+
+    // A succeeds. The NEWEST revision (B) must now be written too.
+    await act(async () => {
+      resolvers[0]?.()
+      await settle()
+    })
+    expect(writes).toHaveLength(2)
+    expect(writes[1]?.title).toBe('B 标题')
+    // Still pending: B is not persisted yet, so quiesce is NOT reached.
+    expect(resolved).toBe(false)
+
+    // Only after B succeeds does the retirement settle and preparation succeed.
+    await act(async () => {
+      resolvers[1]?.()
+      await settle()
+    })
+    expect(resolved).toBe(true)
+    expect(coordinator.getRetiringCount()).toBe(0)
+    expect(coordinator.getState()).toBe('PREPARED')
+    expect(outcomes[0]).toBeDefined()
+    expect((await outcomes[0])?.ok).toBe(true)
+    expect(writes[1]).toEqual({
+      title: 'B 标题',
+      content: NOTE_A.content,
+    })
+  })
+
+  test('newer revision B fails after A succeeded: preparation must NOT succeed', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([NOTE_A])
+    captureDebounceTimer()
+    const writes: Array<{ title: string; content: string }> = []
+    const resolvers: Array<() => void> = []
+    const rejecters: Array<(reason: unknown) => void> = []
+    fake.updateNote.mockImplementation(async (input) => {
+      writes.push({ title: input.title, content: input.content })
+      await new Promise<void>((resolve, reject) => {
+        resolvers.push(resolve)
+        rejecters.push(reject)
+      })
+      return { ...NOTE_A, ...input, updatedAtMs: 500 }
+    })
+    const { openRuntime } = resolvedRuntime(fake.service)
+    const coordinator = new MaintenanceCoordinator()
+
+    const view = render(
+      <MaintenanceCoordinatorProvider instance={coordinator}>
+        <NotesPage openRuntime={openRuntime} />
+      </MaintenanceCoordinatorProvider>,
+    )
+
+    const titleInput = await screen.findByLabelText('笔记标题')
+    await user.clear(titleInput)
+    await user.type(titleInput, 'A 标题')
+
+    // Handlers are attached eagerly so the rejection is never unhandled.
+    const outcomes: Array<Promise<PrepareOutcome>> = []
+    await act(async () => {
+      outcomes.push(
+        coordinator.prepareForMaintenance().then<PrepareOutcome, PrepareOutcome>(
+          (lease) => ({ ok: true, lease }),
+          (error: unknown) => ({ ok: false, error }),
+        ),
+      )
+      await settle()
+    })
+    await user.clear(titleInput)
+    await user.type(titleInput, 'B 标题')
+    act(() => {
+      view.unmount()
+    })
+    await settle()
+
+    // A succeeds, then B fails: the old revision's success must NOT be treated
+    // as a safe quiesce.
+    await act(async () => {
+      resolvers[0]?.()
+      await settle()
+    })
+    expect(writes).toHaveLength(2)
+
+    await act(async () => {
+      rejecters[1]?.(new NoteApplicationError('UNAVAILABLE'))
+      await settle()
+    })
+
+    const outcome = (await outcomes[0]) ?? { ok: false, error: undefined }
+    expect(outcome.ok).toBe(false)
+    expect(coordinator.getState()).toBe('IDLE')
+    // The failure evidence outlives the retirement: a later preparation must
+    // still discover it.
+    expect(coordinator.getRetiredFailureCount()).toBeGreaterThan(0)
+    const second = await coordinator.prepareForMaintenance().then(
+      () => 'resolved',
+      () => 'rejected',
+    )
+    expect(second).toBe('rejected')
+    expect(coordinator.getState()).toBe('IDLE')
+  })
+
+  test('retiring flush failure is not swallowed: prepare fails instead of silently succeeding', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([NOTE_A])
+    captureDebounceTimer()
+    fake.updateNote.mockRejectedValue(new NoteApplicationError('UNAVAILABLE'))
+    const { openRuntime } = resolvedRuntime(fake.service)
+    const coordinator = new MaintenanceCoordinator()
+
+    const view = render(
+      <MaintenanceCoordinatorProvider instance={coordinator}>
+        <NotesPage openRuntime={openRuntime} />
+      </MaintenanceCoordinatorProvider>,
+    )
+
+    const titleInput = await screen.findByLabelText('笔记标题')
+    await user.clear(titleInput)
+    await user.type(titleInput, 'unmount fails')
+
+    act(() => {
+      view.unmount()
+    })
+    await settle()
+
+    expect(fake.updateNote).toHaveBeenCalled()
+    await expect(coordinator.prepareForMaintenance()).rejects.toBeInstanceOf(Error)
+    expect(coordinator.getState()).toBe('IDLE')
   })
 })

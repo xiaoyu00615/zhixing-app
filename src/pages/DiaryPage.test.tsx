@@ -8,6 +8,8 @@ import type { DiaryDate, DiaryEntry } from '@/diary/model'
 import type { DiaryRuntime } from '@/diary/runtime.types'
 import { DiaryApplicationError, type DiaryService } from '@/diary/service'
 import { localDateFromDate } from '@/shared/validation'
+import { MaintenanceCoordinator } from '@/maintenance/coordinator'
+import { MaintenanceCoordinatorProvider } from '@/maintenance/context'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -153,6 +155,27 @@ function deferred<T>() {
     reject = rejectPromise
   })
   return { promise, resolve, reject }
+}
+
+type PrepareOutcome =
+  | { ok: true; lease: unknown }
+  | { ok: false; error: unknown }
+
+/**
+ * Drain pending promise continuations inside `act()`. Deliberately NOT a timer:
+ * nothing in the maintenance proofs waits on wall-clock time.
+ */
+async function settle(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+  })
 }
 
 /** Captures the setTimeout callback for the 800ms debounce timer and returns a helper to fire it. */
@@ -979,5 +1002,297 @@ describe('DiaryPage StrictMode create lifecycle', () => {
   const list = screen.getByRole('list', { name: '日记列表' })
   expect(within(list).getAllByRole('listitem')).toHaveLength(2)
   expect(screen.getByRole('button', { name: '新建日记' })).toBeEnabled()
+  })
+})
+
+describe('DiaryPage maintenance coordination (P6-S2)', () => {
+  test('edit without 800ms debounce wait; prepare explicitly flushes latest draft and resolves after', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([DIARY_TODAY])
+    // Capture the 800ms debounce timer but never fire it: the draft must be
+    // persisted through explicit maintenance preparation, not through a timer.
+    captureDebounceTimer()
+    fake.updateDiaryEntry.mockResolvedValue({
+      ...DIARY_TODAY,
+      title: '最新日记标题',
+      content: DIARY_TODAY.content,
+      updatedAtMs: 500,
+    })
+    const { openRuntime } = resolvedRuntime(fake.service)
+    const coordinator = new MaintenanceCoordinator()
+
+    render(
+      <MaintenanceCoordinatorProvider instance={coordinator}>
+        <DiaryPage openRuntime={openRuntime} />
+      </MaintenanceCoordinatorProvider>,
+    )
+
+    const titleInput = await screen.findByLabelText('日记标题')
+    await user.clear(titleInput)
+    await user.type(titleInput, '最新日记标题')
+
+    // Do NOT advance the debounce timer.
+    await act(async () => {
+      await coordinator.prepareForMaintenance()
+    })
+
+    expect(fake.updateDiaryEntry).toHaveBeenCalledWith({
+      id: DIARY_TODAY.id,
+      title: '最新日记标题',
+      content: DIARY_TODAY.content,
+    })
+    expect(coordinator.getState()).toBe('PREPARED')
+  })
+
+  test('route unmount does not lose quiesce visibility: retiring flush is awaited by prepare', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([DIARY_TODAY])
+    captureDebounceTimer()
+    const resolveQueue: Array<() => void> = []
+    fake.updateDiaryEntry.mockImplementation(async () => {
+      await new Promise<void>((resolve) => resolveQueue.push(resolve))
+      return {
+        ...DIARY_TODAY,
+        title: 'unmount draft',
+        content: DIARY_TODAY.content,
+        updatedAtMs: 500,
+      }
+    })
+    const { openRuntime } = resolvedRuntime(fake.service)
+    const coordinator = new MaintenanceCoordinator()
+
+    const view = render(
+      <MaintenanceCoordinatorProvider instance={coordinator}>
+        <DiaryPage openRuntime={openRuntime} />
+      </MaintenanceCoordinatorProvider>,
+    )
+    const titleInput = await screen.findByLabelText('日记标题')
+    await user.clear(titleInput)
+    await user.type(titleInput, 'unmount draft')
+
+    // Simulate a route change: DiaryPage unmounts, its flush+dispose retirement
+    // is still pending.
+    act(() => {
+      view.unmount()
+    })
+
+    const outcomes: Array<Promise<PrepareOutcome>> = []
+    let resolved = false
+    outcomes.push(
+      coordinator.prepareForMaintenance().then<PrepareOutcome, PrepareOutcome>(
+        (lease) => {
+          resolved = true
+          return { ok: true, lease }
+        },
+        (error: unknown) => ({ ok: false, error }),
+      ),
+    )
+    await act(async () => {
+      await Promise.resolve()
+    })
+    // Preparation must still be pending while the retiring flush is in flight.
+    expect(resolved).toBe(false)
+    expect(coordinator.getRetiringCount()).toBeGreaterThan(0)
+
+    act(() => {
+      resolveQueue[0]?.()
+    })
+    await act(async () => {
+      await outcomes[0]
+    })
+
+    expect(resolved).toBe(true)
+    expect(fake.updateDiaryEntry).toHaveBeenCalledWith({
+      id: DIARY_TODAY.id,
+      title: 'unmount draft',
+      content: DIARY_TODAY.content,
+    })
+    expect(coordinator.getRetiringCount()).toBe(0)
+    expect(coordinator.getState()).toBe('PREPARED')
+  })
+
+  test('in-flight A + newer B + unmount: latest revision B is persisted before prepare succeeds', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([DIARY_TODAY])
+    // The 800ms debounce is captured and never fired.
+    captureDebounceTimer()
+    const writes: Array<{ title: string; content: string }> = []
+    const resolvers: Array<() => void> = []
+    const rejecters: Array<(reason: unknown) => void> = []
+    fake.updateDiaryEntry.mockImplementation(async (input) => {
+      writes.push({ title: input.title, content: input.content })
+      await new Promise<void>((resolve, reject) => {
+        resolvers.push(resolve)
+        rejecters.push(reject)
+      })
+      return { ...DIARY_TODAY, ...input, updatedAtMs: 500 }
+    })
+    const { openRuntime } = resolvedRuntime(fake.service)
+    const coordinator = new MaintenanceCoordinator()
+
+    const view = render(
+      <MaintenanceCoordinatorProvider instance={coordinator}>
+        <DiaryPage openRuntime={openRuntime} />
+      </MaintenanceCoordinatorProvider>,
+    )
+
+    const titleInput = await screen.findByLabelText('日记标题')
+    await user.clear(titleInput)
+    await user.type(titleInput, 'A 日记')
+
+    // Revision A: the write starts through explicit preparation, not a timer.
+    let resolved = false
+    const outcomes: Array<Promise<PrepareOutcome>> = []
+    await act(async () => {
+      outcomes.push(
+        coordinator.prepareForMaintenance().then<PrepareOutcome, PrepareOutcome>(
+          (lease) => {
+            resolved = true
+            return { ok: true, lease }
+          },
+          (error: unknown) => ({ ok: false, error }),
+        ),
+      )
+      await settle()
+    })
+    expect(writes).toHaveLength(1)
+    expect(writes[0]?.title).toBe('A 日记')
+    expect(resolved).toBe(false)
+
+    // While A is still in flight the user keeps typing -> revision B.
+    await user.clear(titleInput)
+    await user.type(titleInput, 'B 日记')
+    await settle()
+    expect(writes).toHaveLength(1)
+
+    // Route away while A is still pending: the retirement must stay visible.
+    act(() => {
+      view.unmount()
+    })
+    await settle()
+    expect(resolved).toBe(false)
+    expect(coordinator.getRetiringCount()).toBe(1)
+
+    // A succeeds. The NEWEST revision (B) must now be written too.
+    await act(async () => {
+      resolvers[0]?.()
+      await settle()
+    })
+    expect(writes).toHaveLength(2)
+    expect(writes[1]?.title).toBe('B 日记')
+    // Still pending: B is not persisted yet, so quiesce is NOT reached.
+    expect(resolved).toBe(false)
+
+    await act(async () => {
+      resolvers[1]?.()
+      await settle()
+    })
+    expect(resolved).toBe(true)
+    expect(coordinator.getRetiringCount()).toBe(0)
+    expect(coordinator.getState()).toBe('PREPARED')
+    expect((await outcomes[0])?.ok).toBe(true)
+    expect(writes[1]).toEqual({
+      title: 'B 日记',
+      content: DIARY_TODAY.content,
+    })
+  })
+
+  test('newer revision B fails after A succeeded: preparation must NOT succeed', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([DIARY_TODAY])
+    captureDebounceTimer()
+    const writes: Array<{ title: string; content: string }> = []
+    const resolvers: Array<() => void> = []
+    const rejecters: Array<(reason: unknown) => void> = []
+    fake.updateDiaryEntry.mockImplementation(async (input) => {
+      writes.push({ title: input.title, content: input.content })
+      await new Promise<void>((resolve, reject) => {
+        resolvers.push(resolve)
+        rejecters.push(reject)
+      })
+      return { ...DIARY_TODAY, ...input, updatedAtMs: 500 }
+    })
+    const { openRuntime } = resolvedRuntime(fake.service)
+    const coordinator = new MaintenanceCoordinator()
+
+    const view = render(
+      <MaintenanceCoordinatorProvider instance={coordinator}>
+        <DiaryPage openRuntime={openRuntime} />
+      </MaintenanceCoordinatorProvider>,
+    )
+
+    const titleInput = await screen.findByLabelText('日记标题')
+    await user.clear(titleInput)
+    await user.type(titleInput, 'A 日记')
+
+    // Handlers are attached eagerly so the rejection is never unhandled.
+    const outcomes: Array<Promise<PrepareOutcome>> = []
+    await act(async () => {
+      outcomes.push(
+        coordinator.prepareForMaintenance().then<PrepareOutcome, PrepareOutcome>(
+          (lease) => ({ ok: true, lease }),
+          (error: unknown) => ({ ok: false, error }),
+        ),
+      )
+      await settle()
+    })
+    await user.clear(titleInput)
+    await user.type(titleInput, 'B 日记')
+    act(() => {
+      view.unmount()
+    })
+    await settle()
+
+    await act(async () => {
+      resolvers[0]?.()
+      await settle()
+    })
+    expect(writes).toHaveLength(2)
+
+    await act(async () => {
+      rejecters[1]?.(new DiaryApplicationError('UNAVAILABLE'))
+      await settle()
+    })
+
+    const outcome = (await outcomes[0]) ?? { ok: false, error: undefined }
+    expect(outcome.ok).toBe(false)
+    expect(coordinator.getState()).toBe('IDLE')
+    expect(coordinator.getRetiredFailureCount()).toBeGreaterThan(0)
+    const second = await coordinator.prepareForMaintenance().then(
+      () => 'resolved',
+      () => 'rejected',
+    )
+    expect(second).toBe('rejected')
+    expect(coordinator.getState()).toBe('IDLE')
+  })
+
+  test('retiring flush failure is not swallowed: prepare fails instead of silently succeeding', async () => {
+    const user = userEvent.setup()
+    const fake = createServiceDouble([DIARY_TODAY])
+    captureDebounceTimer()
+    fake.updateDiaryEntry.mockRejectedValue(
+      new DiaryApplicationError('UNAVAILABLE'),
+    )
+    const { openRuntime } = resolvedRuntime(fake.service)
+    const coordinator = new MaintenanceCoordinator()
+
+    const view = render(
+      <MaintenanceCoordinatorProvider instance={coordinator}>
+        <DiaryPage openRuntime={openRuntime} />
+      </MaintenanceCoordinatorProvider>,
+    )
+
+    const titleInput = await screen.findByLabelText('日记标题')
+    await user.clear(titleInput)
+    await user.type(titleInput, 'unmount fails')
+
+    act(() => {
+      view.unmount()
+    })
+    await settle()
+
+    expect(fake.updateDiaryEntry).toHaveBeenCalled()
+    await expect(coordinator.prepareForMaintenance()).rejects.toBeInstanceOf(Error)
+    expect(coordinator.getState()).toBe('IDLE')
   })
 })

@@ -8,13 +8,18 @@ import { BrowserRouter } from "react-router"
 
 import { AppShell } from "@/components/layout/AppShell"
 import { AppRoutes } from "@/routes/router"
+import { MaintenanceCoordinatorProvider } from "@/maintenance/context"
 
 export default function App() {
   return (
     <BrowserRouter>
-      <AppShell>
-        <AppRoutes />
-      </AppShell>
+      {/* App-level coordinator: lives outside the route tree so it survives
+          route changes and keeps unmounting-but-still-flushing editors tracked. */}
+      <MaintenanceCoordinatorProvider>
+        <AppShell>
+          <AppRoutes />
+        </AppShell>
+      </MaintenanceCoordinatorProvider>
     </BrowserRouter>
   )
 }
