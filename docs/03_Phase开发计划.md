@@ -247,12 +247,14 @@ Phase 3 下一正式阶段：
 
 ---
 
-## Phase 4｜Diary + Notes + Document System
+## Phase 4｜Diary + Notes（独立 domain；原设计含 Generic Document 已废弃）
 
-### Document 基础
+> ⚠️ 设计变更：本 Phase 原计划含 Generic Document（`DocumentRepository`，`type = diary / note`）。实际实现已改为 **Note 与 Diary 独立 domain**：独立 repository、独立 service、独立 persistence contract（各自 `src/note/*` 与 `src/diary/*`），不建立 canonical Document 实体。以下「Document 基础」仅作历史设计追溯，不代表当前实现。
 
-- Document Repository；
-- type = diary / note；
+### Document 基础（历史设计，未实现）
+
+- Document Repository（未实现；当前为独立 NoteRepository / DiaryRepository）；
+- type = diary / note（未采用）；
 - content_json + plain_text；
 - Tag / Attachment / Entity Relation；
 - Local Auto Save。
@@ -284,9 +286,9 @@ Phase 3 下一正式阶段：
 - 新建关联 Diary；
 - 更多转换语义。
 
-### Phase 4 Status: IN PROGRESS
+### Phase 4 Status: CLOSED
 
-Phase 4 已实际启动，官方状态由 `NOT STARTED` 更新为 `IN PROGRESS`。Note V1 已 CLOSED；当前治理 baseline 为 Note V1 closeout commit `d655340e8f3f7e960e93a8ca1cdd93dbd3df7f1f`（HEAD == origin/main，working tree CLEAN at closeout）。Phase 4 整体仍为 IN PROGRESS：Diary 尚未开始。
+Phase 4 已由 formal closeout commit `417dc90 docs: close diary v1 phase` 正式关闭。Note V1：CLOSED；Diary V1：CLOSED / COMPLETE（Diary V1 closeout commit `a89b63797d8c79ae590ceee76ba8715d6393df33`）。Phase 4 启动时官方状态曾由 `NOT STARTED` 更新为 `IN PROGRESS`，且本节下方「Diary Persistence / Diary Service / Diary UI：NOT STARTED」为彼时 slice 的历史记录，不反映当前已 CLOSED 状态（见下方历史标记）。
 
 已完成（DONE，使用真实历史 Step ID；不重新编号）：
 
@@ -459,19 +461,24 @@ Closeout commit：`79beff55d16136ecc189975ad43572bedaa0ccd0`（`fix: coordinate 
 
 ## Phase 5｜Global Search + Tags + Archive + Trash
 
-### Global Search
+### Phase 5 Status: NOT CLOSED
 
-- SQLite FTS5；
-- Task；
-- Canvas；
-- CanvasNode；
-- Note；
-- Diary；
-- CaptureItem；
-- 结构化 Filter；
+- Global Search V1：CLOSED（S0–S5 全部 CLOSED；closeout commit `a571955 fix: complete global search v1`）；
+- Unified Trash V1：CLOSED（P5B S4 已验证，closeout 在当前 P5C-S4 slice 完成；working tree DIRTY，尚未 commit）；
+- Archive V1：CLOSED after S4 verification（implementation baseline `7bb3093a9718531617c5c8354eb4f98f64891dcd`）；
+- Tags：PARTIAL（仅跨 Task 的部分能力，Note / Diary / Canvas 的 Tag 关联尚未完整）；
+- Phase 5 整体：NOT CLOSED（因 Tags PARTIAL）。
+
+### Global Search（V1 已实现并通过真实 Web E2E）
+
+- SQLite FTS5（trigram，中文友好）；
+- 当前 V1 真实实体范围（已实现）：Task（title）、Note（title + content）、Diary（title + content）、Canvas（title）；
+- 当前 V1 不包含（future / planned）：CanvasNode、CaptureItem、Tag、Archive、Trash；
+- 跨域统一结果流；
+- 结构化 Filter（future / planned）；
 - Result Preview → Open Entity。
 
-Global Search 默认排除 Trash。Archive 是否默认包含，在 Phase 5 UI 实现时最终确认。
+Global Search 默认排除 Trash 与 archived Task / Note（active-only 谓词 `deleted_at_ms IS NULL AND archived_at_ms IS NULL`）；该 Archive 排除策略已在 P5C-S4 冻结，不再待 Phase 5 UI 确认。
 
 ### Tag
 
@@ -482,21 +489,27 @@ Global Search 默认排除 Trash。Archive 是否默认包含，在 Phase 5 UI �
 - 删除；
 - 跨模块关联与筛选。
 
-### Archive
+### Archive（P5C Archive V1，CLOSED）
 
-- `archived_at` 方向评审；
-- 归档；
-- 恢复；
-- Delete → Trash。
+- `archived_at_ms` 方向已冻结：nullable，与 `status` 正交，不是 Task / Note status；
+- 归档（Task + Note）；
+- 恢复（Unarchive，Task + Note）；
+- Delete → Trash（不允许从 Archive 直接物理永久删除）；
+- Archive → Trash → Restore 保留 archived 状态；
+- 普通 Search 排除 archived 实体，Unarchive 后恢复。
 
-### Trash
+V1 未实现（future / planned）：Diary Archive、Canvas Archive、Permanent Delete from Archive、Clear Archive、Bulk Archive/Unarchive、Archive Search。
 
-- Soft Delete 管理；
-- Restore；
-- Permanent Delete；
-- Clear Trash；
-- 强确认；
+### Trash（P5B Unified Trash V1，CLOSED）
+
+当前 V1 已实现：
+
+- Task / Note / Diary 跨域统一列表；
+- 单项 Restore（只走 canonical 源域服务）；
+- 软删除期间排除 Search，Restore 后重新纳入；
 - 默认不自动物理清理核心数据。
+
+未来产品方向（V1 未实现）：Permanent Delete、Clear Trash、Bulk Restore / 多选、Trash 内筛选 / 检索、Canvas Trash。
 
 ---
 
