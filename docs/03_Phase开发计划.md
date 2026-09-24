@@ -461,13 +461,13 @@ Closeout commit：`79beff55d16136ecc189975ad43572bedaa0ccd0`（`fix: coordinate 
 
 ## Phase 5｜Global Search + Tags + Archive + Trash
 
-### Phase 5 Status: NOT CLOSED
+### Phase 5 Status: CLOSED
 
 - Global Search V1：CLOSED（S0–S5 全部 CLOSED；closeout commit `a571955 fix: complete global search v1`）；
-- Unified Trash V1：CLOSED（P5B S4 已验证，closeout 在当前 P5C-S4 slice 完成；working tree DIRTY，尚未 commit）；
+- Unified Trash V1：CLOSED（P5B S4 已验证，closeout 在 P5C-S4 slice 完成）；
 - Archive V1：CLOSED after S4 verification（implementation baseline `7bb3093a9718531617c5c8354eb4f98f64891dcd`）；
-- Tags：PARTIAL（仅跨 Task 的部分能力，Note / Diary / Canvas 的 Tag 关联尚未完整）；
-- Phase 5 整体：NOT CLOSED（因 Tags PARTIAL）。
+- Tags V1（Task-only）：CLOSED（create / list / rename + Task assign / remove / filter + Native / Web 持久化；closeout 在 P5D-S2 slice 完成）；
+- Phase 5 整体：CLOSED（四项 V1 均完成）。
 
 ### Global Search（V1 已实现并通过真实 Web E2E）
 
@@ -480,14 +480,26 @@ Closeout commit：`79beff55d16136ecc189975ad43572bedaa0ccd0`（`fix: coordinate 
 
 Global Search 默认排除 Trash 与 archived Task / Note（active-only 谓词 `deleted_at_ms IS NULL AND archived_at_ms IS NULL`）；该 Archive 排除策略已在 P5C-S4 冻结，不再待 Phase 5 UI 确认。
 
-### Tag
+### Tag（V1 CLOSED — Task-only）
 
-- 创建；
-- 重命名；
-- 颜色；
-- 合并；
-- 删除；
-- 跨模块关联与筛选。
+当前 V1 已实现（CLOSED）：
+
+- 创建（create）；
+- 列出（list）；
+- 重命名（rename）；
+- Task 添加标签（assign）；
+- Task 移除标签（remove）；
+- 按标签过滤 Task（filter）；
+- Native / Web 持久化 + reload 存活。
+
+以下为 future / planned，不阻塞 Phase 5 / Tags V1 关闭：
+
+- 标签颜色（color）；
+- 标签合并（merge）；
+- 标签删除（delete，NEEDS DESIGN）；
+- 跨模块关联与筛选（Note / Diary / Canvas / CaptureItem）；
+- Tag Search 索引；
+- 独立 TagsPage。
 
 ### Archive（P5C Archive V1，CLOSED）
 
