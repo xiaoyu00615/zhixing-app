@@ -373,7 +373,9 @@ fn run_bootstrap_pipeline_with_migrations<S: db::snapshot::SnapshotProvider>(
             match DataRootService::get_and_ensure(&loaded.data_root, InitMode::Existing) {
                 Ok((data_root, manifest)) => {
                     let db_path = DataRootService::resolve_database_path(&data_root, &manifest);
-                    match db::policy::open_configured_connection(&db_path) {
+                    // 🔒 P6-F0：Existing 路径必须用 existing-only 打开，严禁 CREATE。
+                    // 缺失 zhixing.db 必须 FAIL CLOSED（Degraded），绝不可自动创建替代库。
+                    match db::policy::open_existing_configured_connection(&db_path) {
                         Ok(mut conn) => {
                             let snapshot_dir = data_root.join("backup");
                             let runner = db::migration::MigrationRunner::new(migrations, snapshot);
@@ -533,6 +535,58 @@ mod tests {
         // 🔒 device_id 保持不变（bootstrap 文件未变）
         let loaded = load_bootstrap(&cfg);
         assert_eq!(loaded.device_id.as_str(), did);
+    }
+
+    // --- 4b. existing_bootstrap_missing_database_does_not_create (关键安全；P6-F0) ---
+    // 场景：valid bootstrap + valid Data Root + database/ 存在 + zhixing.db 缺失。
+    // 修复前：open_configured_connection(RW|CREATE) 会静默创建空库并重跑 migrations。
+    // 修复后：open_existing_configured_connection 失败关闭 → Degraded(Database)，绝不创建替代库。
+    #[test]
+    fn existing_bootstrap_missing_database_does_not_create() {
+        let (_t, cfg, local) = sandbox();
+        let did = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
+        let data_root = local.join("data");
+
+        // 完整 Existing Data Root：子目录齐全 + manifest + bootstrap，但 database/zhixing.db 缺失。
+        fs::create_dir_all(data_root.join("database")).unwrap();
+        fs::create_dir_all(data_root.join("attachments")).unwrap();
+        fs::create_dir_all(data_root.join("thumbnails")).unwrap();
+        fs::create_dir_all(data_root.join("backup")).unwrap();
+        fs::create_dir_all(data_root.join("metadata")).unwrap();
+        let manifest = storage::manifest::DataRootManifest::simple();
+        fs::write(
+            data_root.join(MANIFEST_FILENAME),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        write_bootstrap(&cfg, &data_root, did);
+
+        let bootstrap_before = fs::read(cfg.join(BOOTSTRAP_FILENAME)).unwrap();
+        let manifest_before = fs::read(data_root.join(MANIFEST_FILENAME)).unwrap();
+        let db_path = data_root.join("database").join("zhixing.db");
+        assert!(data_root.join("database").is_dir(), "database/ 必须存在");
+        assert!(!db_path.exists(), "前置：zhixing.db 必须缺失");
+
+        let status = run_bootstrap_pipeline(&cfg, &local);
+        // 🔒 FAIL CLOSED：缺失 zhixing.db → Degraded(Database)，绝不创建替代库。
+        assert!(
+            matches!(status, RuntimeStatus::Degraded(DegradedCause::Database(_))),
+            "Expected Degraded(Database), got {:?}",
+            status
+        );
+
+        // 🔒 核心安全不变式：zhixing.db 始终 ABSENT（无 WAL/SHM 残留）。
+        assert!(!db_path.exists(), "Existing 缺失 zhixing.db 时绝不可创建替代 DB");
+        assert!(!db_path.with_extension("db-wal").exists());
+        assert!(!db_path.with_extension("db-shm").exists());
+
+        // 🔒 bootstrap.json / manifest.json 字节不变（未被覆盖、重建或删除）。
+        let bootstrap_after = fs::read(cfg.join(BOOTSTRAP_FILENAME)).unwrap();
+        assert_eq!(bootstrap_before, bootstrap_after, "bootstrap.json 被改动");
+        let manifest_after = fs::read(data_root.join(MANIFEST_FILENAME)).unwrap();
+        assert_eq!(manifest_before, manifest_after, "manifest.json 被改动");
+        // device_id 保持不变。
+        assert_eq!(load_bootstrap(&cfg).device_id.as_str(), did);
     }
 
     // --- 5. non_empty_root_without_manifest_does_not_initialize (关键安全) ---
