@@ -443,9 +443,49 @@ type SharedWebPersistenceOutcome =
 interface SharedWebPersistenceGeneration {
   readonly client: TaskWorkerClient
   readonly opening: Promise<SharedWebPersistenceOutcome>
+  /**
+   * Mirrors `opening` once it settles (`null` while still OPENING). Retirement
+   * needs to tell OPENING from ACTIVE, because `initialize` is an ORDINARY
+   * request: a barrier taken before it settles would race the very request the
+   * strict close is supposed to drain.
+   */
+  openingOutcome: SharedWebPersistenceOutcome | null
   refCount: number
-  closing: Promise<void> | null
+  closing: Promise<GenerationCloseOutcome> | null
+  /**
+   * P6-S4A2B2: this generation was retired (normal close or strict retirement).
+   * A retired generation is always unpublished, its client is terminated or
+   * terminating, and a stale consumer `dispose()` must leave it alone.
+   */
+  retired: boolean
 }
+
+/**
+ * P6-S4A2B2: outcome of the NORMAL close of a shared generation.
+ *
+ * `closing` used to be a `Promise<void>` whose rejection was swallowed by
+ * `.catch(() => undefined)`, which made "the runtime was shut down" and "the
+ * database was cleanly closed" indistinguishable. It is still a promise that
+ * NEVER rejects — parked opens await it, and a rejection would tear down the
+ * whole open chain — but it now RESOLVES to an outcome, so a failed close is
+ * observable instead of being silently absorbed.
+ */
+type GenerationCloseOutcome = { readonly ok: true } | { readonly ok: false }
+
+/**
+ * P6-S4A2B2: result of retiring the shared generation. A narrow Web-specific
+ * union — deliberately not a generic maintenance framework.
+ */
+export type SharedWebPersistenceRetirementOutcome =
+  | { readonly ok: true; readonly status: 'NO_RUNTIME' | 'RETIRED' }
+  | {
+      readonly ok: false
+      readonly reason:
+        | 'NOT_OWNER'
+        | 'NORMAL_CLOSE_FAILED'
+        | 'BARRIER_UNAVAILABLE'
+        | 'CLOSE_INDETERMINATE'
+    }
 
 let sharedWebPersistenceGeneration: SharedWebPersistenceGeneration | null = null
 
@@ -485,6 +525,22 @@ export interface SharedWebPersistenceReservation {
    * stays best-effort, exactly like a consumer `dispose()`.
    */
   release(): Promise<void>
+  /**
+   * P6-S4A2B2: owner-scoped STRICT retirement of the shared runtime.
+   *
+   * `release()` deliberately stays a pure admission release — it never proves
+   * anything about the database. Retirement is the primitive that does:
+   * resolve the current lifecycle position (NULL / OPENING / ACTIVE / CLOSING),
+   * take the worker's strong barrier, acknowledge a real `database.close()`,
+   * terminate the transport and unpublish the generation.
+   *
+   * Only the CURRENT reservation owner may retire; a stale handle fails and
+   * never touches the live generation. The reservation itself is NOT released
+   * here — not on success and definitely not on failure — so the slot owner
+   * keeps admission closed across the whole handoff (Restore / Data Root
+   * Migration run against a retired runtime behind a still-held slot).
+   */
+  retireGeneration(): Promise<SharedWebPersistenceRetirementOutcome>
 }
 
 export type SharedPersistenceReservationOutcome =
@@ -535,26 +591,61 @@ async function initializeSharedGeneration(
 function createSharedGeneration(
   client: TaskWorkerClient,
 ): SharedWebPersistenceGeneration {
-  return {
+  const generation: SharedWebPersistenceGeneration = {
     client,
     opening: initializeSharedGeneration(client),
+    openingOutcome: null,
     refCount: 0,
     closing: null,
+    retired: false,
   }
+  // Recorded on a separate reaction so the shared `opening` promise keeps its
+  // contract (created once, awaited by every consumer). Registered BEFORE any
+  // consumer awaits it, so `openingOutcome` is already set by the time an
+  // `await generation.opening` continuation resumes.
+  void generation.opening.then((outcome) => {
+    generation.openingOutcome = outcome
+  })
+  return generation
 }
 
 function closeSharedGeneration(
   generation: SharedWebPersistenceGeneration,
-): Promise<void> {
-  generation.closing ??= generation.client
-    .shutdown()
-    .catch(() => undefined)
-    .then(() => {
+): Promise<GenerationCloseOutcome> {
+  generation.closing ??= generation.client.shutdown().then(
+    (): GenerationCloseOutcome => {
       if (sharedWebPersistenceGeneration === generation) {
         sharedWebPersistenceGeneration = null
       }
-    })
+      return { ok: true }
+    },
+    (): GenerationCloseOutcome => {
+      // P6-S4A2B2 §4: FAIL CLOSED. `shutdown()` terminates the transport whatever
+      // happens, so a rejection means "client gone, database close NOT proven".
+      // The generation therefore stays PUBLISHED and latches this failed
+      // outcome: unpublishing here would let a later open build a second Worker
+      // on top of a database that may still be open. The admission gate in
+      // `openSharedWebTaskRepository()` turns the latch into a
+      // `RUNTIME_CLOSE_FAILED` capability instead.
+      return { ok: false }
+    },
+  )
   return generation.closing
+}
+
+/**
+ * P6-S4A2B2: identity-safe retirement. Marks the generation retired (so stale
+ * consumer handles leave it alone) and unpublishes it only if it is still the
+ * current shared generation — a newer generation must never be cleared by an
+ * older handoff.
+ */
+function markGenerationRetired(
+  generation: SharedWebPersistenceGeneration,
+): void {
+  generation.retired = true
+  if (sharedWebPersistenceGeneration === generation) {
+    sharedWebPersistenceGeneration = null
+  }
 }
 
 function releaseSharedWebPersistenceReservation(
@@ -578,6 +669,85 @@ function releaseSharedWebPersistenceReservation(
   }
   sharedWebPersistenceReservation = null
   state.markReleased()
+}
+
+/**
+ * P6-S4A2B2: the strict retirement handoff.
+ *
+ * Resolves the generation's lifecycle position and, only for an ACTIVE runtime,
+ * performs the owner-validated strict close. Every path is fail closed: the
+ * reservation is never released here, a failed close never unpublishes, and a
+ * terminated-but-not-provably-closed runtime never gets a successor.
+ */
+async function retireSharedGeneration(
+  state: SharedSlotReservation,
+): Promise<SharedWebPersistenceRetirementOutcome> {
+  // Owner-scoped: a stale handle must never retire the live generation.
+  if (sharedWebPersistenceReservation !== state) {
+    return { ok: false, reason: 'NOT_OWNER' }
+  }
+
+  const generation = sharedWebPersistenceGeneration
+  if (generation === null) {
+    // NULL: nothing to retire — and strictly NOTHING to create. Retirement is
+    // never an implicit open.
+    return { ok: true, status: 'NO_RUNTIME' }
+  }
+
+  // CLOSING: a normal close is already in flight, or already failed.
+  if (generation.closing !== null) {
+    const outcome = await generation.closing
+    if (!outcome.ok) {
+      // FAIL CLOSED: the transport was terminated but the database close was
+      // never proven. Never enter maintenance, never build a new Worker, never
+      // unpublish the failed generation.
+      return { ok: false, reason: 'NORMAL_CLOSE_FAILED' }
+    }
+    // The normal close already retired and unpublished the generation.
+    return { ok: true, status: 'NO_RUNTIME' }
+  }
+
+  // OPENING: `initialize` travels as an ORDINARY request, so the barrier must
+  // be taken only AFTER it settles — otherwise the strict close would race the
+  // very request it is meant to drain.
+  if (generation.openingOutcome === null) {
+    const opening = await generation.opening
+    if (!opening.ok) {
+      // Initialization already terminated the client (existing semantics).
+      // Identity-safe cleanup only — the reservation stays with its owner.
+      if (sharedWebPersistenceGeneration === generation) {
+        sharedWebPersistenceGeneration = null
+      }
+      return { ok: true, status: 'NO_RUNTIME' }
+    }
+  }
+
+  // ACTIVE. Barrier acquisition is not a strict close: if it fails, nothing was
+  // attempted and the generation is left exactly as it was.
+  let leaseId: string
+  try {
+    leaseId = (await generation.client.enterMaintenance()).leaseId
+  } catch {
+    return { ok: false, reason: 'BARRIER_UNAVAILABLE' }
+  }
+
+  try {
+    await generation.client.closeMaintenance(leaseId)
+  } catch {
+    // CONSERVATIVE INDETERMINATE: a worker-declared failure and a lost
+    // acknowledgement are indistinguishable here, and guessing the database
+    // state is exactly what must NOT happen. The barrier stays up, the client
+    // stays alive, the generation stays published. No `maintenance.exit`, no
+    // retry — a future recovery strategy owns this.
+    return { ok: false, reason: 'CLOSE_INDETERMINATE' }
+  }
+
+  // Proven: prior ordinary work drained, the worker's owner check passed and
+  // `database.close()` was acknowledged. Only now is the transport torn down.
+  // No `maintenance.exit` is needed — the runtime is closed and about to die.
+  generation.client.terminate()
+  markGenerationRetired(generation)
+  return { ok: true, status: 'RETIRED' }
 }
 
 export function reserveSharedWebPersistenceSlot(): SharedPersistenceReservationOutcome {
@@ -605,6 +775,7 @@ export function reserveSharedWebPersistenceSlot(): SharedPersistenceReservationO
         releaseSharedWebPersistenceReservation(state)
         return state.released
       },
+      retireGeneration: () => retireSharedGeneration(state),
     },
   }
 }
@@ -620,6 +791,14 @@ function createSharedLeaseDispose(
     released = true
     generation.refCount -= 1
     if (generation.refCount > 0) {
+      return
+    }
+    if (generation.retired) {
+      // P6-S4A2B2: this runtime was already retired by a handoff. Its client is
+      // terminated or terminating and it is no longer the shared generation.
+      // The decrement above is REAL (consumer ownership stays truthful), but a
+      // stale handle must not shut anything down and must never clear a NEWER
+      // generation.
       return
     }
     if (sharedWebPersistenceReservation !== null) {
@@ -649,7 +828,17 @@ async function openSharedWebTaskRepository(): Promise<OpenWebTaskRepositoryResul
     if (current === null || current.closing === null) {
       break
     }
-    await current.closing
+    const outcome = await current.closing
+    if (!outcome.ok) {
+      // P6-S4A2B2 §5: FAIL CLOSED. The previous runtime was terminated but its
+      // database was never provably closed, and its generation is deliberately
+      // still published. Reporting a normal unavailability reason here would be
+      // a lie (`RUNTIME_CLOSE_FAILED` says exactly what happened), and looping
+      // would spin forever on an already-settled promise.
+      return {
+        capability: { status: 'UNAVAILABLE', reason: 'RUNTIME_CLOSE_FAILED' },
+      }
+    }
   }
 
   let generation = sharedWebPersistenceGeneration

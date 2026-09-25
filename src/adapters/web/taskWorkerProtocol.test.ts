@@ -6,6 +6,7 @@ import {
   parseNoteWorkerResponse,
   parseTaskWorkerRequest,
   parseTaskWorkerResponse,
+  parseWebPersistenceCapability,
 } from '@/adapters/web/taskWorkerProtocol'
 
 const NOTE_ID = '12345678-1234-4321-8000-0123456789ab'
@@ -418,5 +419,41 @@ describe('archive.list request and response (P5C S2)', () => {
         error: { code: 'PERSISTENCE_ERROR', message: 'leaked' },
       }),
     ).not.toBeNull()
+  })
+})
+
+describe('parseWebPersistenceCapability', () => {
+  test('accepts every declared UNAVAILABLE reason, including RUNTIME_CLOSE_FAILED', () => {
+    // P6-S4A2B2 added RUNTIME_CLOSE_FAILED to the shared persistence capability.
+    // The parser must stay in sync with the union, otherwise a capability the
+    // type system considers legal would be rejected at the transport boundary.
+    for (const reason of [
+      'WORKER_UNSUPPORTED',
+      'OPFS_UNSUPPORTED',
+      'INITIALIZATION_FAILED',
+      'RUNTIME_CLOSE_FAILED',
+    ]) {
+      expect(parseWebPersistenceCapability({ status: 'UNAVAILABLE', reason })).toEqual(
+        { status: 'UNAVAILABLE', reason },
+      )
+    }
+
+    expect(parseWebPersistenceCapability({ status: 'AVAILABLE' })).toEqual({
+      status: 'AVAILABLE',
+    })
+    expect(
+      parseWebPersistenceCapability({
+        status: 'RESTRICTED',
+        reason: 'SECURITY_POLICY',
+      }),
+    ).toEqual({ status: 'RESTRICTED', reason: 'SECURITY_POLICY' })
+
+    // Unknown reasons stay rejected instead of being widened silently.
+    expect(
+      parseWebPersistenceCapability({
+        status: 'UNAVAILABLE',
+        reason: 'SOMETHING_ELSE',
+      }),
+    ).toBeNull()
   })
 })

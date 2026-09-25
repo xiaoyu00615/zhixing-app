@@ -474,7 +474,18 @@ async function handleRequest(value: unknown): Promise<void> {
     // (no barrier required, always allowed, best-effort, no owner validation).
     if (maintenanceCloseState === 'OPEN') {
       const state = initialization === null ? null : await initialization
-      state?.database?.close()
+      // P6-S4A2B2 §3: a normal close failure must be OBSERVABLE. The client's
+      // `shutdown()` contract (reject, then always terminate) is unchanged, so
+      // the caller can now tell a proven close from a failed one. The exception
+      // is contained here — `requestQueue` has no `.catch()` — and it does NOT
+      // move the strict-close state machine: that state belongs to
+      // `maintenance.close` alone.
+      try {
+        state?.database?.close()
+      } catch {
+        failure(request.requestId, 'PERSISTENCE_FAILED')
+        return
+      }
       success(request.requestId, null)
       return
     }

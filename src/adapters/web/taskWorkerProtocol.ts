@@ -85,7 +85,15 @@ export type WebPersistenceCapability =
   | {
       readonly status: 'UNAVAILABLE'
       readonly reason:
-        'WORKER_UNSUPPORTED' | 'OPFS_UNSUPPORTED' | 'INITIALIZATION_FAILED'
+        | 'WORKER_UNSUPPORTED'
+        | 'OPFS_UNSUPPORTED'
+        | 'INITIALIZATION_FAILED'
+        // P6-S4A2B2: a previous generation was terminated but its database
+        // close was never proven (see `GenerationCloseOutcome`). This is its
+        // own reason and deliberately NOT dressed up as INITIALIZATION_FAILED:
+        // nothing failed to initialize — opening a new runtime on top of a
+        // possibly-not-closed database is what must be refused.
+        | 'RUNTIME_CLOSE_FAILED'
     }
   | {
       readonly status: 'RESTRICTED'
@@ -1449,7 +1457,8 @@ export function parseWebPersistenceCapability(
     value.status === 'UNAVAILABLE' &&
     (value.reason === 'WORKER_UNSUPPORTED' ||
       value.reason === 'OPFS_UNSUPPORTED' ||
-      value.reason === 'INITIALIZATION_FAILED')
+      value.reason === 'INITIALIZATION_FAILED' ||
+      value.reason === 'RUNTIME_CLOSE_FAILED')
   ) {
     return { status: value.status, reason: value.reason }
   }

@@ -7,7 +7,9 @@ import {
   type OpenWebTaskRepositoryResult,
   type SharedPersistenceReservationOutcome,
   type SharedWebPersistenceReservation,
+  type SharedWebPersistenceRetirementOutcome,
 } from '@/adapters/web/WebTaskRepository'
+import type { TaskRepositoryErrorCode } from '@/task/repository'
 import { WebTrashRepository } from '@/adapters/web/WebTrashRepository'
 import { WebArchiveRepository } from '@/adapters/web/WebArchiveRepository'
 import {
@@ -80,6 +82,15 @@ class FakeWorker implements TaskWorkerEndpoint {
   }
 
   rejectLast(code: 'NOT_FOUND' | 'STATUS_CONFLICT'): void {
+    this.rejectLastWith(code)
+  }
+
+  /**
+   * P6-S4A2B2: the maintenance close and the normal shutdown report their
+   * failures with the ordinary persistence codes, so the fake Worker needs the
+   * full code surface to drive those paths.
+   */
+  rejectLastWith(code: TaskRepositoryErrorCode): void {
     const request = this.messages.at(-1)
     if (request === undefined) {
       throw new Error('No worker request to reject.')
@@ -577,6 +588,30 @@ async function awaitCreatedWorker(
     await Promise.resolve()
   }
   return requireCreatedWorker(index)
+}
+
+/** P6-S4A2B2: the lease id the fake Worker hands back for a barrier request. */
+const MAINTENANCE_LEASE_ID = 'web-maint-1'
+
+/**
+ * P6-S4A2B2: deterministic drain for the manual fake Worker. The shared core
+ * posts control requests from microtask continuations, so draining microtasks
+ * (no timers, no sleeps) is exact and proves the request really was sent. The
+ * drain is BOUNDED so a missing request fails the assertion instead of starving
+ * the event loop.
+ */
+async function awaitControlRequest(
+  worker: FakeWorker,
+  type: TaskWorkerRequest['type'],
+): Promise<void> {
+  for (
+    let drain = 0;
+    drain < 64 && worker.messages.at(-1)?.type !== type;
+    drain += 1
+  ) {
+    await Promise.resolve()
+  }
+  expect(worker.messages.at(-1)).toMatchObject({ type })
 }
 
 describe('shared default persistence core', () => {
@@ -1821,4 +1856,460 @@ test('planning Worker messages are capability-specific and strictly parsed', () 
   ]) {
     expect(parseTaskWorkerRequest(request)).toBeNull()
   }
+})
+
+/**
+ * P6-S4A2B2 — generation retirement handoff.
+ *
+ * MUST REMAIN THE LAST DESCRIBE IN THIS FILE. A failed NORMAL close is
+ * deliberately FAIL CLOSED: its generation stays published and latched, so
+ * every later default open in the same module instance answers
+ * `RUNTIME_CLOSE_FAILED` for good. H9 establishes exactly that state and H11
+ * observes it, so both are ordered last, after every other shared-core test.
+ */
+describe('shared persistence generation retirement', () => {
+  let outstanding: SharedWebPersistenceReservation | null = null
+
+  function reserve(): SharedWebPersistenceReservation {
+    const reservation = requireReservation(reserveSharedWebPersistenceSlot())
+    outstanding = reservation
+    return reservation
+  }
+
+  async function release(
+    reservation: SharedWebPersistenceReservation,
+  ): Promise<void> {
+    await reservation.release()
+    if (outstanding === reservation) {
+      outstanding = null
+    }
+  }
+
+  afterEach(async () => {
+    if (outstanding !== null) {
+      await outstanding.release()
+      outstanding = null
+    }
+    vi.unstubAllGlobals()
+    createdWorkers.length = 0
+  })
+
+  async function openActive(): Promise<{
+    readonly lease: SharedLease
+    readonly worker: SharedPersistenceFakeWorker
+  }> {
+    const opened = openWebTaskRepository()
+    const worker = requireCreatedWorker(0)
+    worker.respondToLast({ status: 'AVAILABLE' })
+    return { lease: requireLease(await opened), worker }
+  }
+
+  /**
+   * Drives the ACTIVE strict-close handshake on the manual fake Worker:
+   * barrier request -> lease id -> strict close request -> acknowledged close.
+   */
+  async function retireActive(
+    reservation: SharedWebPersistenceReservation,
+    worker: FakeWorker,
+  ): Promise<SharedWebPersistenceRetirementOutcome> {
+    const retirement = reservation.retireGeneration()
+    await awaitControlRequest(worker, 'maintenance.enter')
+    worker.respondToLast({ leaseId: MAINTENANCE_LEASE_ID })
+    await awaitControlRequest(worker, 'maintenance.close')
+    worker.respondToLast(null)
+    return retirement
+  }
+
+  test('H5: retiring with no runtime reports NO_RUNTIME and creates nothing', async () => {
+    stubDefaultOpenEnvironment()
+
+    const reservation = reserve()
+    await expect(reservation.retireGeneration()).resolves.toEqual({
+      ok: true,
+      status: 'NO_RUNTIME',
+    })
+
+    // Retirement is never an implicit open.
+    expect(createdWorkers).toHaveLength(0)
+
+    const blocked = openWebTaskRepository()
+    expect(createdWorkers).toHaveLength(0)
+
+    await release(reservation)
+    const worker = await awaitCreatedWorker(0)
+    worker.respondToLast({ status: 'AVAILABLE' })
+    const lease = requireLease(await blocked)
+
+    await releaseFinalLease(lease, worker)
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('H1: an ACTIVE generation is retired through the worker barrier exactly once', async () => {
+    stubDefaultOpenEnvironment()
+    const { lease, worker } = await openActive()
+
+    const reservation = reserve()
+    await expect(retireActive(reservation, worker)).resolves.toEqual({
+      ok: true,
+      status: 'RETIRED',
+    })
+
+    // Strict close ran, and nothing else did: no barrier release, no normal
+    // shutdown, no duplicate close.
+    expect(worker.messages.map((message) => message.type)).toEqual([
+      'initialize',
+      'maintenance.enter',
+      'maintenance.close',
+    ])
+    // The transport is torn down only AFTER the close acknowledgement.
+    expect(worker.terminated).toBe(true)
+
+    // Retirement does NOT resume admission: the slot owner still holds it.
+    const blocked = openWebTaskRepository()
+    expect(createdWorkers).toHaveLength(1)
+
+    // A stale consumer handle must not shut the retired runtime down again.
+    await lease.dispose()
+    expect(worker.messages.map((message) => message.type)).not.toContain(
+      'shutdown',
+    )
+
+    await release(reservation)
+    const workerB = await awaitCreatedWorker(1)
+    workerB.respondToLast({ status: 'AVAILABLE' })
+    const leaseB = requireLease(await blocked)
+    expect(leaseB.repository).not.toBe(lease.repository)
+
+    await releaseFinalLease(leaseB, workerB)
+    expect(workerB.terminated).toBe(true)
+  })
+
+  test('H2: the slot still gates admission after a successful retirement', async () => {
+    stubDefaultOpenEnvironment()
+    const { lease, worker } = await openActive()
+
+    const reservation = reserve()
+    await retireActive(reservation, worker)
+
+    const blocked = openWebTaskRepository()
+    expect(createdWorkers).toHaveLength(1)
+
+    await release(reservation)
+    const workerB = await awaitCreatedWorker(1)
+    // A FRESH generation: the retired one is never rejoined.
+    expect(workerB.messages).toEqual([{ requestId: 1, type: 'initialize' }])
+    workerB.respondToLast({ status: 'AVAILABLE' })
+    const leaseB = requireLease(await blocked)
+    expect(leaseB.repository).not.toBe(lease.repository)
+
+    const listed = leaseB.repository.listTasks()
+    workerB.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
+    await lease.dispose()
+    await releaseFinalLease(leaseB, workerB)
+    expect(workerB.terminated).toBe(true)
+    expect(worker.messages.map((message) => message.type)).not.toContain(
+      'shutdown',
+    )
+  })
+
+  test('H3: a stale repository on a retired generation fails closed instead of reopening', async () => {
+    stubDefaultOpenEnvironment()
+    const { lease, worker } = await openActive()
+
+    const reservation = reserve()
+    await retireActive(reservation, worker)
+
+    // The old consumer keeps its repository object, but its transport is gone.
+    const read = lease.repository.listTasks()
+    await expect(read).rejects.toMatchObject({
+      code: 'PERSISTENCE_UNAVAILABLE',
+    })
+    const write = lease.repository.createTask({
+      id: ID,
+      title: 'Task',
+      createdAtMs: 100,
+    })
+    await expect(write).rejects.toMatchObject({
+      code: 'PERSISTENCE_UNAVAILABLE',
+    })
+
+    // Nothing reopened behind the caller's back.
+    expect(worker.messages.map((message) => message.type)).toEqual([
+      'initialize',
+      'maintenance.enter',
+      'maintenance.close',
+    ])
+    expect(createdWorkers).toHaveLength(1)
+
+    await release(reservation)
+    const reopened = openWebTaskRepository()
+    const workerB = await awaitCreatedWorker(1)
+    workerB.respondToLast({ status: 'AVAILABLE' })
+    const leaseB = requireLease(await reopened)
+    await lease.dispose()
+    await releaseFinalLease(leaseB, workerB)
+  })
+
+  test('H4: a stale dispose of a retired generation cannot touch its successor', async () => {
+    stubDefaultOpenEnvironment()
+    const { lease, worker } = await openActive()
+
+    const reservation = reserve()
+    await retireActive(reservation, worker)
+    expect(worker.terminated).toBe(true)
+
+    await release(reservation)
+
+    const reopened = openWebTaskRepository()
+    const workerB = await awaitCreatedWorker(1)
+    workerB.respondToLast({ status: 'AVAILABLE' })
+    const leaseB = requireLease(await reopened)
+
+    // The old consumer really releases ownership (refCount is truthful), but a
+    // retired generation is never shut down again and never clears a newer one.
+    await lease.dispose()
+    await lease.dispose()
+    expect(worker.messages.map((message) => message.type)).not.toContain(
+      'shutdown',
+    )
+    expect(workerB.terminated).toBe(false)
+
+    const listed = leaseB.repository.listTasks()
+    workerB.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
+    await releaseFinalLease(leaseB, workerB)
+    expect(workerB.terminated).toBe(true)
+  })
+
+  test('H13: a stale reservation cannot retire the live generation', async () => {
+    stubDefaultOpenEnvironment()
+    const { lease, worker } = await openActive()
+
+    const stale = reserve()
+    await release(stale)
+    const current = reserve()
+    expect(current.reservationId).not.toBe(stale.reservationId)
+
+    await expect(stale.retireGeneration()).resolves.toEqual({
+      ok: false,
+      reason: 'NOT_OWNER',
+    })
+    // Owner validation is the FIRST thing that happens: no barrier was taken.
+    expect(worker.messages.map((message) => message.type)).toEqual(['initialize'])
+
+    await release(current)
+    const closing = lease.dispose()
+    expect(worker.messages.at(-1)).toMatchObject({ type: 'shutdown' })
+    worker.respondToLast(null)
+    await closing
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('H6: retirement waits for an OPENING generation before taking the barrier', async () => {
+    stubDefaultOpenEnvironment()
+
+    const opened = openWebTaskRepository()
+    const worker = requireCreatedWorker(0)
+    expect(worker.messages).toEqual([{ requestId: 1, type: 'initialize' }])
+
+    const reservation = reserve()
+    const retirement = reservation.retireGeneration()
+
+    // `initialize` is an ORDINARY request, so no barrier may be taken before it
+    // settles — the strict close must never race the request it has to drain.
+    expect(worker.messages.map((message) => message.type)).toEqual(['initialize'])
+
+    worker.respondToLast({ status: 'AVAILABLE' })
+    await awaitControlRequest(worker, 'maintenance.enter')
+    worker.respondToLast({ leaseId: MAINTENANCE_LEASE_ID })
+    await awaitControlRequest(worker, 'maintenance.close')
+    worker.respondToLast(null)
+
+    await expect(retirement).resolves.toEqual({ ok: true, status: 'RETIRED' })
+    const lease = requireLease(await opened)
+    expect(worker.terminated).toBe(true)
+
+    await release(reservation)
+    const reopened = openWebTaskRepository()
+    const workerB = await awaitCreatedWorker(1)
+    workerB.respondToLast({ status: 'AVAILABLE' })
+    const leaseB = requireLease(await reopened)
+    await lease.dispose()
+    await releaseFinalLease(leaseB, workerB)
+    expect(workerB.terminated).toBe(true)
+  })
+
+  test('H7: a generation that failed to open is retired as NO_RUNTIME without a strict close', async () => {
+    stubDefaultOpenEnvironment()
+
+    const opened = openWebTaskRepository()
+    const worker = requireCreatedWorker(0)
+
+    const reservation = reserve()
+    const retirement = reservation.retireGeneration()
+
+    worker.respondToLast({ status: 'UNAVAILABLE', reason: 'OPFS_UNSUPPORTED' })
+
+    await expect(retirement).resolves.toEqual({ ok: true, status: 'NO_RUNTIME' })
+    await expect(opened).resolves.toEqual({
+      capability: { status: 'UNAVAILABLE', reason: 'OPFS_UNSUPPORTED' },
+    })
+    // No barrier and no close: this runtime never became usable, and the
+    // existing initialization-failure semantics already terminated the client.
+    expect(worker.messages.map((message) => message.type)).toEqual(['initialize'])
+    expect(worker.terminated).toBe(true)
+
+    const blocked = openWebTaskRepository()
+    expect(createdWorkers).toHaveLength(1)
+
+    await release(reservation)
+    const workerB = await awaitCreatedWorker(1)
+    workerB.respondToLast({ status: 'AVAILABLE' })
+    const leaseB = requireLease(await blocked)
+    await releaseFinalLease(leaseB, workerB)
+    expect(workerB.terminated).toBe(true)
+  })
+
+  test('H8: retirement observes an in-flight normal close instead of taking a barrier', async () => {
+    stubDefaultOpenEnvironment()
+    const { lease, worker } = await openActive()
+
+    const closing = lease.dispose()
+    expect(worker.messages.at(-1)).toMatchObject({ type: 'shutdown' })
+
+    const reservation = reserve()
+    const retirement = reservation.retireGeneration()
+
+    worker.respondToLast(null)
+    await closing
+
+    await expect(retirement).resolves.toEqual({ ok: true, status: 'NO_RUNTIME' })
+    expect(worker.messages.map((message) => message.type)).not.toContain(
+      'maintenance.enter',
+    )
+    expect(worker.terminated).toBe(true)
+
+    await release(reservation)
+    const reopened = openWebTaskRepository()
+    const workerB = await awaitCreatedWorker(1)
+    workerB.respondToLast({ status: 'AVAILABLE' })
+    const leaseB = requireLease(await reopened)
+    await releaseFinalLease(leaseB, workerB)
+    expect(workerB.terminated).toBe(true)
+  })
+
+  test('H10: a failed strict close leaves generation, client and reservation intact', async () => {
+    stubDefaultOpenEnvironment()
+    const { lease, worker } = await openActive()
+
+    const reservation = reserve()
+    const retirement = reservation.retireGeneration()
+
+    await awaitControlRequest(worker, 'maintenance.enter')
+    worker.respondToLast({ leaseId: MAINTENANCE_LEASE_ID })
+    await awaitControlRequest(worker, 'maintenance.close')
+    worker.rejectLastWith('PERSISTENCE_FAILED')
+
+    await expect(retirement).resolves.toEqual({
+      ok: false,
+      reason: 'CLOSE_INDETERMINATE',
+    })
+
+    // Fail closed: no unpublish, no terminate, no exit and no close retry.
+    expect(worker.terminated).toBe(false)
+    expect(worker.messages.map((message) => message.type)).toEqual([
+      'initialize',
+      'maintenance.enter',
+      'maintenance.close',
+    ])
+
+    const blocked = openWebTaskRepository()
+    expect(createdWorkers).toHaveLength(1)
+
+    await release(reservation)
+    // The generation is still published and not closing, so the parked open
+    // joins it rather than building a successor.
+    const secondLease = requireLease(await blocked)
+    expect(createdWorkers).toHaveLength(1)
+    expect(secondLease.repository).toBe(lease.repository)
+
+    // Leave a clean module state: the last consumer closes normally.
+    const closingFirst = lease.dispose()
+    const closingSecond = secondLease.dispose()
+    expect(worker.messages.at(-1)).toMatchObject({ type: 'shutdown' })
+    worker.respondToLast(null)
+    await closingFirst
+    await closingSecond
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('H9: a failed NORMAL close latches fail-closed and refuses retirement', async () => {
+    stubDefaultOpenEnvironment()
+
+    const opened = openWebTaskRepository()
+    const worker = requireCreatedWorker(0)
+    worker.respondToLast({ status: 'AVAILABLE' })
+    const lease = requireLease(await opened)
+
+    // A normal close starts (no reservation yet) and FAILS.
+    const closing = lease.dispose()
+    expect(worker.messages.at(-1)).toMatchObject({ type: 'shutdown' })
+    worker.rejectLastWith('PERSISTENCE_FAILED')
+    await closing
+    expect(worker.terminated).toBe(true)
+
+    const reservation = reserve()
+    await expect(reservation.retireGeneration()).resolves.toEqual({
+      ok: false,
+      reason: 'NORMAL_CLOSE_FAILED',
+    })
+
+    // The generation was NOT unpublished, so no successor may be built — and
+    // the reservation still owns admission.
+    const blocked = openWebTaskRepository()
+    expect(createdWorkers).toHaveLength(1)
+    expect(worker.messages.map((message) => message.type)).toEqual([
+      'initialize',
+      'shutdown',
+    ])
+
+    await release(reservation)
+    await expect(blocked).resolves.toEqual({
+      capability: { status: 'UNAVAILABLE', reason: 'RUNTIME_CLOSE_FAILED' },
+    })
+    expect(createdWorkers).toHaveLength(1)
+    expect(worker.messages.map((message) => message.type)).not.toContain(
+      'maintenance.enter',
+    )
+  })
+
+  test('H11: every later open of a failed-close generation answers RUNTIME_CLOSE_FAILED', async () => {
+    stubDefaultOpenEnvironment()
+
+    // H9 left the shared slot latched. Nothing here may spin, retry or build a
+    // second Worker on top of a database whose close was never proven.
+    await expect(openWebTaskRepository()).resolves.toEqual({
+      capability: { status: 'UNAVAILABLE', reason: 'RUNTIME_CLOSE_FAILED' },
+    })
+    await expect(openWebTaskRepository()).resolves.toEqual({
+      capability: { status: 'UNAVAILABLE', reason: 'RUNTIME_CLOSE_FAILED' },
+    })
+    expect(createdWorkers).toHaveLength(0)
+
+    // A fresh reservation cannot resurrect the slot either: there is nothing to
+    // retire, and admission still refuses.
+    const reservation = reserve()
+    await expect(reservation.retireGeneration()).resolves.toEqual({
+      ok: false,
+      reason: 'NORMAL_CLOSE_FAILED',
+    })
+    await release(reservation)
+    await expect(openWebTaskRepository()).resolves.toEqual({
+      capability: { status: 'UNAVAILABLE', reason: 'RUNTIME_CLOSE_FAILED' },
+    })
+    expect(createdWorkers).toHaveLength(0)
+  })
 })
