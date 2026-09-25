@@ -156,6 +156,29 @@ function isArchiveRequestType(value: unknown): boolean {
 const DATABASE_FILENAME = '/zhixing.db'
 const workerScope = self as DedicatedWorkerGlobalScope
 
+/**
+ * P6-S4A1 + P6-S4A1R: STRONG quiescence state WITH owner identity.
+ *
+ * Deliberately not a state machine — this slice only needs NORMAL vs QUIESCENT
+ * — but it is also deliberately NOT a bare boolean. A boolean made
+ * `maintenance.exit` unconditionally clear the barrier, so a stale exit from a
+ * previous owner could silently release a newer owner's barrier.
+ *
+ * `null` = NORMAL. Non-null = QUIESCENT *and* the id of the barrier's owner:
+ * only the caller holding that lease id may release it.
+ *
+ * Non-null also means: the write-admission cutoff has already happened, every
+ * ordinary request admitted before `maintenance.enter` has completed (guaranteed
+ * by the serial `requestQueue`), and no ordinary request admitted after it may
+ * execute DB work.
+ *
+ * The counter is worker-local, monotonic and never reused for the lifetime of
+ * this worker. Lease ids are NOT persisted and are NOT shared across workers: a
+ * fresh worker starts again at 1.
+ */
+let activeMaintenanceLeaseId: string | null = null
+let nextMaintenanceLeaseId = 1
+
 interface InitializedDatabase {
   readonly capability: WebPersistenceCapability
   readonly database?: WebTaskDatabase
@@ -305,16 +328,85 @@ async function handleRequest(value: unknown): Promise<void> {
     return
   }
 
-  if (request.type === 'initialize') {
-    const state = await getInitialization()
-    success(request.requestId, state.capability)
+  // ---- P6-S4A1 CONTROL: maintenance.enter / maintenance.exit ---------------
+  // Both are handled here, inside the SAME serial `requestQueue` as ordinary
+  // requests, and with NO await before the state transition. That is what makes
+  // `maintenance.enter`'s success response a single atomic event:
+  //   * every ordinary request admitted before it has already completed;
+  //   * every ordinary request admitted after it is rejected below.
+  if (request.type === 'maintenance.enter') {
+    if (activeMaintenanceLeaseId !== null) {
+      // Deterministic failure, and the existing owner is left untouched: a
+      // second caller must never be able to believe it won the quiescence
+      // ownership that the first caller still holds.
+      failure(request.requestId, 'PERSISTENCE_FAILED')
+      return
+    }
+    const leaseId = `web-maint-${nextMaintenanceLeaseId}`
+    nextMaintenanceLeaseId += 1
+    activeMaintenanceLeaseId = leaseId
+    // The lease id is the response payload, not a null success: the caller has
+    // to learn WHICH barrier it now owns in order to be able to release it.
+    success(request.requestId, { leaseId })
     return
   }
 
+  if (request.type === 'maintenance.exit') {
+    // NO-OP when inactive: safely aborting a barrier that was never (or no
+    // longer) established must not fail.
+    if (activeMaintenanceLeaseId === null) {
+      success(request.requestId, null)
+      return
+    }
+    // Owner validation happens HERE, in the authoritative worker state — not in
+    // the client, coordinator or UI. A stale exit carrying a previous owner's
+    // lease id therefore fails instead of unlocking the current barrier.
+    if (request.leaseId !== activeMaintenanceLeaseId) {
+      failure(request.requestId, 'PERSISTENCE_FAILED')
+      return
+    }
+    activeMaintenanceLeaseId = null
+    success(request.requestId, null)
+    return
+  }
+
+  // CONTROL: `shutdown` stays allowed while quiescent, because strong
+  // maintenance (Restore / Data Root Migration) needs to close the runtime
+  // AFTER the barrier is established. `shutdown` alone is still NOT a barrier.
   if (request.type === 'shutdown') {
     const state = initialization === null ? null : await initialization
     state?.database?.close()
     success(request.requestId, null)
+    return
+  }
+
+  // ---- P6-S4A1 barrier: ordinary requests are rejected while quiescent ----
+  // STRONG quiescence: both reads and mutations are blocked, so the database is
+  // not touched by ordinary traffic during maintenance. Each domain keeps its
+  // own failure emitter so existing domain error contracts are preserved:
+  //   Task -> PERSISTENCE_UNAVAILABLE, Note/Diary/Search/Trash/Archive ->
+  //   PERSISTENCE_ERROR, Canvas/Project/Tag -> the same Task mapping they
+  //   already use when persistence is not AVAILABLE.
+  if (activeMaintenanceLeaseId !== null) {
+    if (isNoteOperation(request.type)) {
+      noteFailure(request.requestId, 'PERSISTENCE_ERROR')
+    } else if (isDiaryOperation(request.type)) {
+      diaryFailure(request.requestId, 'PERSISTENCE_ERROR')
+    } else if (isSearchOperation(request.type)) {
+      searchFailure(request.requestId, 'PERSISTENCE_ERROR')
+    } else if (isTrashOperation(request.type)) {
+      trashFailure(request.requestId, 'PERSISTENCE_ERROR')
+    } else if (isArchiveOperation(request.type)) {
+      archiveFailure(request.requestId, 'PERSISTENCE_ERROR')
+    } else {
+      failure(request.requestId, 'PERSISTENCE_UNAVAILABLE')
+    }
+    return
+  }
+
+  if (request.type === 'initialize') {
+    const state = await getInitialization()
+    success(request.requestId, state.capability)
     return
   }
 

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 
 import {
   parseArchiveWorkerResponse,
+  parseMaintenanceLeaseId,
   parseNoteWorkerResponse,
   parseTaskWorkerRequest,
   parseTaskWorkerResponse,
@@ -98,6 +99,58 @@ describe('parseNoteWorkerResponse', () => {
 
   test('rejects malformed success envelope', () => {
     expect(parseNoteWorkerResponse({ requestId: 1, ok: true })).toBeNull()
+  })
+})
+
+describe('maintenance control requests (P6-S4A1)', () => {
+  test('parses maintenance.enter and maintenance.exit control requests', () => {
+    expect(
+      parseTaskWorkerRequest({ requestId: 1, type: 'maintenance.enter' }),
+    ).toEqual({ requestId: 1, type: 'maintenance.enter' })
+    expect(
+      parseTaskWorkerRequest({
+        requestId: 2,
+        type: 'maintenance.exit',
+        leaseId: 'web-maint-1',
+      }),
+    ).toEqual({ requestId: 2, type: 'maintenance.exit', leaseId: 'web-maint-1' })
+  })
+
+  test('rejects maintenance control requests with a malformed requestId', () => {
+    expect(parseTaskWorkerRequest({ requestId: 0, type: 'maintenance.enter' })).toBeNull()
+    expect(
+      parseTaskWorkerRequest({
+        requestId: 0,
+        type: 'maintenance.exit',
+        leaseId: 'web-maint-1',
+      }),
+    ).toBeNull()
+    expect(parseTaskWorkerRequest({ type: 'maintenance.exit', leaseId: 'x' })).toBeNull()
+  })
+})
+
+describe('maintenance ownership (P6-S4A1R)', () => {
+  test('maintenance.exit requires a lease id', () => {
+    // Ownership is meaningless without an identity: a lease-less exit must never
+    // be able to reach the worker's owner check.
+    expect(
+      parseTaskWorkerRequest({ requestId: 1, type: 'maintenance.exit' }),
+    ).toBeNull()
+    expect(
+      parseTaskWorkerRequest({
+        requestId: 1,
+        type: 'maintenance.exit',
+        leaseId: 42,
+      }),
+    ).toBeNull()
+  })
+
+  test('parseMaintenanceLeaseId accepts only a real lease id', () => {
+    expect(parseMaintenanceLeaseId({ leaseId: 'web-maint-1' })).toBe('web-maint-1')
+    expect(parseMaintenanceLeaseId(null)).toBeNull()
+    expect(parseMaintenanceLeaseId({})).toBeNull()
+    expect(parseMaintenanceLeaseId({ leaseId: '' })).toBeNull()
+    expect(parseMaintenanceLeaseId({ leaseId: 7 })).toBeNull()
   })
 })
 

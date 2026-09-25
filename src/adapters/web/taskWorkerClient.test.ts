@@ -407,3 +407,158 @@ describe('TaskWorkerClient trash.list cross-domain read', () => {
     })
   })
 })
+
+describe('TaskWorkerClient maintenance control (P6-S4A1)', () => {
+  test('enterMaintenance sends the exact maintenance.enter envelope', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    void client.enterMaintenance()
+    await flush()
+
+    expect(worker.messages).toHaveLength(1)
+    expect(worker.messages[0]).toEqual({
+      requestId: 1,
+      type: 'maintenance.enter',
+    })
+  })
+
+  test('exitMaintenance sends the exact maintenance.exit envelope with the lease id', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    void client.exitMaintenance('web-maint-1')
+    await flush()
+
+    expect(worker.messages).toHaveLength(1)
+    expect(worker.messages[0]).toEqual({
+      requestId: 1,
+      type: 'maintenance.exit',
+      leaseId: 'web-maint-1',
+    })
+  })
+
+  test('enterMaintenance resolves with the worker-allocated lease handle', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    const promise = client.enterMaintenance()
+    await flush()
+    worker.send({ requestId: 1, ok: true, result: { leaseId: 'web-maint-1' } })
+    await flush()
+
+    const lease = await promise
+    expect(lease.leaseId).toBe('web-maint-1')
+  })
+
+  test('enterMaintenance rejects when the success envelope carries no usable lease id', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    const promise = client.enterMaintenance()
+    await flush()
+    // A null success is NOT acceptable for enter: the caller would end up
+    // holding a barrier it cannot identify, and therefore cannot release.
+    worker.send({ requestId: 1, ok: true, result: null })
+    await flush()
+
+    await expect(promise).rejects.toSatisfy((error) => {
+      expectTaskError(error, 'PERSISTENCE_FAILED')
+      return true
+    })
+  })
+
+  test('enterMaintenance rejects deterministically when quiescence is already active', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    const promise = client.enterMaintenance()
+    await flush()
+    // The worker answers with the Task-domain safe failure; no new cross-domain
+    // error code is introduced.
+    worker.send({
+      requestId: 1,
+      ok: false,
+      error: { code: 'PERSISTENCE_FAILED' },
+    })
+    await flush()
+
+    await expect(promise).rejects.toSatisfy((error) => {
+      expectTaskError(error, 'PERSISTENCE_FAILED')
+      return true
+    })
+  })
+
+  test('lease.release() sends the owner lease id and is idempotent on the client', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    const promise = client.enterMaintenance()
+    await flush()
+    worker.send({ requestId: 1, ok: true, result: { leaseId: 'web-maint-3' } })
+    await flush()
+    const lease = await promise
+
+    const releasePromise = lease.release()
+    await flush()
+    worker.send({ requestId: 2, ok: true, result: null })
+    await flush()
+    await releasePromise
+
+    // Second release is a client-side NO-OP: no further request is emitted.
+    await lease.release()
+
+    // Client-side idempotence is convenience only: it prevents a duplicate
+    // send, it is NOT the ownership check (which lives in the worker).
+    expect(worker.messages).toHaveLength(2)
+    expect(worker.messages[1]).toEqual({
+      requestId: 2,
+      type: 'maintenance.exit',
+      leaseId: 'web-maint-3',
+    })
+  })
+
+  test('lease.release() rejects when the worker refuses the owner', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    const promise = client.enterMaintenance()
+    await flush()
+    worker.send({ requestId: 1, ok: true, result: { leaseId: 'web-maint-4' } })
+    await flush()
+    const lease = await promise
+
+    const releasePromise = lease.release()
+    await flush()
+    worker.send({
+      requestId: 2,
+      ok: false,
+      error: { code: 'PERSISTENCE_FAILED' },
+    })
+    await flush()
+
+    // The caller must learn that it did NOT release persistence.
+    await expect(releasePromise).rejects.toSatisfy((error) => {
+      expectTaskError(error, 'PERSISTENCE_FAILED')
+      return true
+    })
+  })
+
+  test('control requests are sent through the ordinary send path (no side channel)', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    void client.enterMaintenance()
+    await flush()
+    void client.exitMaintenance('web-maint-1')
+    await flush()
+
+    // Sequential requestIds prove both went through `send()` like any other
+    // request: same protocol union, same postMessage, same worker queue.
+    expect(worker.messages.map((message) => message.type)).toEqual([
+      'maintenance.enter',
+      'maintenance.exit',
+    ])
+    expect(worker.messages.map((message) => message.requestId)).toEqual([1, 2])
+  })
+})

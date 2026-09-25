@@ -384,6 +384,24 @@ export type TaskWorkerRequest =
   // the unified archive view across tasks + notes and performs no write.
   | { readonly requestId: number; readonly type: 'archive.list' }
   | { readonly requestId: number; readonly type: 'shutdown' }
+  // P6-S4A1: STRONG quiescence CONTROL ops. They travel through the SAME
+  // protocol union, the SAME postMessage path and the SAME worker requestQueue
+  // as ordinary requests — there is no side channel. `maintenance.enter` is
+  // therefore both the write-admission cutoff AND the drain point: because the
+  // worker handles it in serial order, its success response proves every
+  // ordinary request admitted before it has completed and that no ordinary
+  // request admitted after it will execute DB work.
+  //
+  // P6-S4A1R (ownership): `maintenance.enter` succeeds with a worker-allocated
+  // lease id, and `maintenance.exit` must carry that id. The WORKER (not the
+  // client, coordinator or UI) is what validates ownership, so a stale or
+  // foreign caller cannot release a barrier it does not own.
+  | { readonly requestId: number; readonly type: 'maintenance.enter' }
+  | {
+      readonly requestId: number
+      readonly type: 'maintenance.exit'
+      readonly leaseId: string
+    }
 
 export interface TaskWorkerSuccessResponse {
   readonly requestId: number
@@ -711,7 +729,19 @@ export function parseTaskWorkerRequest(
     case 'note.listActive':
     case 'diary.listActive':
     case 'shutdown':
+    case 'maintenance.enter':
       return { requestId: value.requestId, type: value.type }
+    // P6-S4A1R: `maintenance.exit` carries the worker-allocated lease id. A
+    // missing / non-string leaseId is a malformed request and is rejected here,
+    // so the worker never has to guess at ownership.
+    case 'maintenance.exit':
+      return typeof value.leaseId === 'string'
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            leaseId: value.leaseId,
+          }
+        : null
     case 'task.create':
       return isCreateInput(value.input)
         ? { requestId: value.requestId, type: value.type, input: value.input }
@@ -1359,6 +1389,22 @@ export function parseArchiveWorkerResponse(
     ok: false,
     error: { code: value.error.code },
   }
+}
+
+/**
+ * P6-S4A1R: strict parser for the `maintenance.enter` success result.
+ *
+ * The worker answers with the lease id it allocated. It is deliberately NOT a
+ * bare `null` success: the caller must learn WHICH barrier it now owns, and a
+ * response that cannot be read as a lease is treated as a failure rather than
+ * silently yielding an unowned barrier.
+ */
+export function parseMaintenanceLeaseId(value: unknown): string | null {
+  if (!isRecord(value)) {
+    return null
+  }
+  const leaseId = value.leaseId
+  return typeof leaseId === 'string' && leaseId.length > 0 ? leaseId : null
 }
 
 export function parseWebPersistenceCapability(

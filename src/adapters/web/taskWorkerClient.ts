@@ -67,6 +67,7 @@ import {
   extractRequestId,
   parseArchiveWorkerResponse,
   parseDiaryWorkerResponse,
+  parseMaintenanceLeaseId,
   parseNoteWorkerResponse,
   parseSearchWorkerResponse,
   parseTaskWorkerResponse,
@@ -75,6 +76,21 @@ import {
   type TaskWorkerRequest,
   type WebPersistenceCapability,
 } from '@/adapters/web/taskWorkerProtocol'
+
+/**
+ * P6-S4A1R: ownership handle for the worker's STRONG quiescence barrier.
+ *
+ * Deliberately minimal and deliberately NOT a generic
+ * `PersistenceMaintenancePort` — that abstraction belongs to a later slice once
+ * a second platform (Native) actually exists. `leaseId` is allocated by the
+ * WORKER and validated by the WORKER; this handle only carries it.
+ */
+export interface WebMaintenanceLease {
+  /** Worker-allocated identity of the barrier this caller owns. */
+  readonly leaseId: string
+  /** Release the barrier. Idempotent on the client; ownership is worker-side. */
+  release(): Promise<void>
+}
 
 export interface TaskWorkerEndpoint {
   onmessage: ((event: MessageEvent<unknown>) => void) | null
@@ -892,6 +908,66 @@ export class TaskWorkerClient {
       }),
       ARCHIVE_REQUEST_OPTIONS,
     )
+  }
+
+  /**
+   * P6-S4A1 + P6-S4A1R: enter STRONG quiescence and take ownership of it.
+   *
+   * This client is NOT the authoritative barrier — it only emits the protocol
+   * CONTROL request. The worker handles `maintenance.enter` inside the same
+   * serial request queue as ordinary requests, so the resolved promise means:
+   *   * every ordinary request admitted before this call has completed;
+   *   * no ordinary request admitted after it will execute DB work;
+   *   * the caller now owns the barrier identified by `lease.leaseId`.
+   *
+   * Rejects (TaskWorkerClientError, PERSISTENCE_FAILED) when quiescence is
+   * already active, so two callers can never both believe they own it.
+   */
+  async enterMaintenance(): Promise<WebMaintenanceLease> {
+    const result = await this.send((requestId) => ({
+      requestId,
+      type: 'maintenance.enter',
+    }))
+    const leaseId = parseMaintenanceLeaseId(result)
+    if (leaseId === null) {
+      // A success envelope that cannot be read as a lease is a failure: the
+      // caller must never end up holding an unidentified barrier.
+      throw new TaskWorkerClientError('PERSISTENCE_FAILED')
+    }
+
+    let released = false
+    return {
+      leaseId,
+      release: () => {
+        // Client-side convenience only. The authoritative owner check lives in
+        // the worker, so a stale / foreign still has to be rejected there.
+        if (released) {
+          return Promise.resolve()
+        }
+        released = true
+        return this.exitMaintenance(leaseId)
+      },
+    }
+  }
+
+  /**
+   * P6-S4A1R: leave STRONG quiescence as the owner of `leaseId`.
+   *
+   * Worker-side semantics:
+   *   * no active barrier  -> safe NO-OP success;
+   *   * `leaseId` is not the current owner -> deterministic failure, the current
+   *     barrier stays active (a stale owner cannot release a newer one);
+   *   * `leaseId` matches  -> the barrier is released.
+   *
+   * Prefer `lease.release()` from `enterMaintenance()`; this overload stays
+   * public so a caller can deliberately attempt a release it may not own.
+   */
+  async exitMaintenance(leaseId: string): Promise<void> {
+    await this.send((requestId) => ({
+      requestId,
+      type: 'maintenance.exit',
+      leaseId,
+    }))
   }
 
   async shutdown(): Promise<void> {
