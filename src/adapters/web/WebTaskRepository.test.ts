@@ -2,8 +2,11 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import {
   openWebTaskRepository,
+  reserveSharedWebPersistenceSlot,
   WebTaskRepository,
   type OpenWebTaskRepositoryResult,
+  type SharedPersistenceReservationOutcome,
+  type SharedWebPersistenceReservation,
 } from '@/adapters/web/WebTaskRepository'
 import { WebTrashRepository } from '@/adapters/web/WebTrashRepository'
 import { WebArchiveRepository } from '@/adapters/web/WebArchiveRepository'
@@ -553,6 +556,29 @@ async function releaseFinalLease(
   await closing
 }
 
+function requireReservation(
+  outcome: SharedPersistenceReservationOutcome,
+): SharedWebPersistenceReservation {
+  if (!outcome.ok) {
+    throw new Error('Expected a shared persistence slot reservation.')
+  }
+  return outcome.reservation
+}
+
+/**
+ * Deterministic settle point for a Worker that the shared core creates inside a
+ * microtask chain. The default persistence Worker is fully synchronous, so
+ * draining microtasks is exact: no timers and no fixed timeouts.
+ */
+async function awaitCreatedWorker(
+  index: number,
+): Promise<SharedPersistenceFakeWorker> {
+  while (createdWorkers.length <= index) {
+    await Promise.resolve()
+  }
+  return requireCreatedWorker(index)
+}
+
 describe('shared default persistence core', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -792,6 +818,318 @@ describe('shared default persistence core', () => {
 
     await releaseFinalLease(reopenedLease, secondWorker)
     expect(secondWorker.terminated).toBe(true)
+  })
+})
+
+describe('shared persistence slot reservation', () => {
+  let outstanding: SharedWebPersistenceReservation | null = null
+
+  function reserve(): SharedWebPersistenceReservation {
+    const reservation = requireReservation(reserveSharedWebPersistenceSlot())
+    outstanding = reservation
+    return reservation
+  }
+
+  async function release(
+    reservation: SharedWebPersistenceReservation,
+  ): Promise<void> {
+    await reservation.release()
+    if (outstanding === reservation) {
+      outstanding = null
+    }
+  }
+
+  afterEach(async () => {
+    if (outstanding !== null) {
+      await outstanding.release()
+      outstanding = null
+    }
+    vi.unstubAllGlobals()
+    createdWorkers.length = 0
+  })
+
+  test('R-A: a reservation gates admission even when no generation exists', async () => {
+    stubDefaultOpenEnvironment()
+
+    const reservation = reserve()
+    const blocked = openWebTaskRepository()
+
+    // SLOT-level: nothing is created while the reservation is held.
+    expect(createdWorkers).toHaveLength(0)
+
+    await release(reservation)
+
+    const worker = await awaitCreatedWorker(0)
+    expect(worker.messages).toEqual([{ requestId: 1, type: 'initialize' }])
+    worker.respondToLast({ status: 'AVAILABLE' })
+    const lease = requireLease(await blocked)
+    expect(lease.capability).toEqual({ status: 'AVAILABLE' })
+
+    const listed = lease.repository.listTasks()
+    worker.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
+    await releaseFinalLease(lease, worker)
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('R-B: a reservation blocks a new open from joining an active generation', async () => {
+    stubDefaultOpenEnvironment()
+
+    const opened = openWebTaskRepository()
+    const worker = requireCreatedWorker(0)
+    worker.respondToLast({ status: 'AVAILABLE' })
+    const firstLease = requireLease(await opened)
+
+    const reservation = reserve()
+
+    let joinedBeforeRelease = false
+    const blocked = openWebTaskRepository().then((result) => {
+      joinedBeforeRelease = true
+      return result
+    })
+
+    expect(createdWorkers).toHaveLength(1)
+    expect(worker.messages).toHaveLength(1)
+
+    // Deterministic drain: one request/response round trip on the live lease.
+    // An open that ignored the reservation settles on the already resolved
+    // `opening` promise, i.e. in strictly fewer microtask steps than this.
+    const listed = firstLease.repository.listTasks()
+    worker.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+    expect(joinedBeforeRelease).toBe(false)
+
+    await release(reservation)
+    const secondLease = requireLease(await blocked)
+    expect(joinedBeforeRelease).toBe(true)
+
+    // It joined the existing generation instead of creating a second Worker.
+    expect(createdWorkers).toHaveLength(1)
+    expect(worker.messages).toHaveLength(2)
+    expect(secondLease.repository).toBe(firstLease.repository)
+
+    // refCount stays truthful: the joined lease really is a second consumer.
+    await secondLease.dispose()
+    expect(worker.messages.map((message) => message.type)).not.toContain(
+      'shutdown',
+    )
+
+    await releaseFinalLease(firstLease, worker)
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('R-C: a reservation pins the final disposal and blocks the normal close', async () => {
+    stubDefaultOpenEnvironment()
+
+    const opened = openWebTaskRepository()
+    const worker = requireCreatedWorker(0)
+    worker.respondToLast({ status: 'AVAILABLE' })
+    const lease = requireLease(await opened)
+
+    const reservation = reserve()
+    await lease.dispose()
+
+    // refCount is 0 now, yet the slot owner keeps the generation alive: no
+    // shutdown was sent and the generation was never published as closing.
+    expect(worker.messages.map((message) => message.type)).not.toContain(
+      'shutdown',
+    )
+    expect(worker.terminated).toBe(false)
+
+    // Releasing with refCount == 0 restores the normal lifecycle: the close
+    // starts inside the release, which also proves the pinned generation was
+    // still published with `closing === null` and a truthful refCount of 0.
+    await release(reservation)
+    expect(worker.messages.at(-1)).toMatchObject({ type: 'shutdown' })
+    expect(worker.messages.at(-1)?.requestId).toBe(2)
+
+    worker.respondToLast(null)
+
+    // A later open waits for the closed generation and starts a fresh one.
+    const reopened = openWebTaskRepository()
+    const secondWorker = await awaitCreatedWorker(1)
+    secondWorker.respondToLast({ status: 'AVAILABLE' })
+    const reopenedLease = requireLease(await reopened)
+    expect(worker.terminated).toBe(true)
+    expect(reopenedLease.repository).not.toBe(lease.repository)
+
+    await releaseFinalLease(reopenedLease, secondWorker)
+    expect(secondWorker.terminated).toBe(true)
+  })
+
+  test('R-D: a parked open waits for the pinned generation to close instead of joining it', async () => {
+    stubDefaultOpenEnvironment()
+
+    const opened = openWebTaskRepository()
+    const worker = requireCreatedWorker(0)
+    worker.respondToLast({ status: 'AVAILABLE' })
+    const lease = requireLease(await opened)
+
+    const reservation = reserve()
+    const blocked = openWebTaskRepository()
+
+    await lease.dispose()
+    expect(worker.messages.map((message) => message.type)).not.toContain(
+      'shutdown',
+    )
+
+    await release(reservation)
+    expect(worker.messages.at(-1)).toMatchObject({ type: 'shutdown' })
+
+    worker.respondToLast(null)
+    const secondWorker = await awaitCreatedWorker(1)
+    secondWorker.respondToLast({ status: 'AVAILABLE' })
+    const secondLease = requireLease(await blocked)
+
+    expect(worker.terminated).toBe(true)
+    expect(secondLease.capability).toEqual({ status: 'AVAILABLE' })
+    expect(secondLease.repository).not.toBe(lease.repository)
+
+    const listed = secondLease.repository.listTasks()
+    secondWorker.respondToLast([])
+    await expect(listed).resolves.toEqual([])
+
+    await releaseFinalLease(secondLease, secondWorker)
+    expect(secondWorker.terminated).toBe(true)
+  })
+
+  test('R-E: a stale release cannot clear a newer reservation', async () => {
+    stubDefaultOpenEnvironment()
+
+    const stale = reserve()
+    await release(stale)
+    const current = reserve()
+    expect(current.reservationId).not.toBe(stale.reservationId)
+
+    const blocked = openWebTaskRepository()
+    expect(createdWorkers).toHaveLength(0)
+
+    await release(stale)
+    // The stale handle must not have released the current reservation.
+    expect(createdWorkers).toHaveLength(0)
+
+    await release(current)
+    const worker = await awaitCreatedWorker(0)
+    worker.respondToLast({ status: 'AVAILABLE' })
+    const lease = requireLease(await blocked)
+    expect(worker.messages).toEqual([{ requestId: 1, type: 'initialize' }])
+
+    await releaseFinalLease(lease, worker)
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('R-F: an overlapping reservation fails deterministically and keeps the owner', async () => {
+    stubDefaultOpenEnvironment()
+
+    const owner = reserve()
+    expect(reserveSharedWebPersistenceSlot()).toEqual({
+      ok: false,
+      reason: 'OVERLAP',
+    })
+
+    // The refused attempt left the slot in the owner's hands.
+    const blocked = openWebTaskRepository()
+    expect(createdWorkers).toHaveLength(0)
+
+    await release(owner)
+    const worker = await awaitCreatedWorker(0)
+    worker.respondToLast({ status: 'AVAILABLE' })
+    const lease = requireLease(await blocked)
+
+    await releaseFinalLease(lease, worker)
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('R-G: a reservation still gates admission after a normal close settles', async () => {
+    stubDefaultOpenEnvironment()
+
+    const opened = openWebTaskRepository()
+    const worker = requireCreatedWorker(0)
+    worker.respondToLast({ status: 'AVAILABLE' })
+    const lease = requireLease(await opened)
+
+    const closing = lease.dispose()
+    expect(worker.messages.at(-1)).toMatchObject({ type: 'shutdown' })
+
+    const reservation = reserve()
+    const blocked = openWebTaskRepository()
+    expect(createdWorkers).toHaveLength(1)
+
+    worker.respondToLast(null)
+    await closing
+    expect(worker.terminated).toBe(true)
+
+    // The previous generation is gone, but the reservation still owns
+    // admission, so no new generation may be created yet.
+    expect(createdWorkers).toHaveLength(1)
+
+    await release(reservation)
+    const secondWorker = await awaitCreatedWorker(1)
+    secondWorker.respondToLast({ status: 'AVAILABLE' })
+    const secondLease = requireLease(await blocked)
+    expect(secondLease.capability).toEqual({ status: 'AVAILABLE' })
+
+    await releaseFinalLease(secondLease, secondWorker)
+    expect(secondWorker.terminated).toBe(true)
+  })
+
+  test('R-H: a reservation made while a generation is OPENING still gates later opens', async () => {
+    stubDefaultOpenEnvironment()
+
+    const opened = openWebTaskRepository()
+    const worker = requireCreatedWorker(0)
+    expect(worker.messages).toEqual([{ requestId: 1, type: 'initialize' }])
+
+    const reservation = reserve()
+    const blocked = openWebTaskRepository()
+    expect(createdWorkers).toHaveLength(1)
+
+    // The already admitted open finishes its own initialization.
+    worker.respondToLast({ status: 'AVAILABLE' })
+    const lease = requireLease(await opened)
+
+    // The reserved open is still gated even though the opening has settled.
+    expect(createdWorkers).toHaveLength(1)
+    expect(worker.messages).toHaveLength(1)
+
+    await release(reservation)
+    const secondLease = requireLease(await blocked)
+    expect(createdWorkers).toHaveLength(1)
+    expect(worker.messages).toHaveLength(1)
+    expect(secondLease.repository).toBe(lease.repository)
+
+    await secondLease.dispose()
+    expect(worker.messages.map((message) => message.type)).not.toContain(
+      'shutdown',
+    )
+
+    await releaseFinalLease(lease, worker)
+    expect(worker.terminated).toBe(true)
+  })
+
+  test('R-I: an unshared option open is not gated by the slot reservation', async () => {
+    stubDefaultOpenEnvironment()
+
+    const reservation = reserve()
+    const customWorker = new FakeWorker()
+    const opened = openWebTaskRepository({
+      workerSupported: true,
+      crossOriginIsolated: true,
+      workerFactory: () => customWorker,
+    })
+    expect(customWorker.messages).toEqual([{ requestId: 1, type: 'initialize' }])
+
+    customWorker.respondToLast({ status: 'AVAILABLE' })
+    const lease = requireLease(await opened)
+    expect(createdWorkers).toHaveLength(0)
+
+    const closing = lease.dispose()
+    customWorker.respondToLast(null)
+    await closing
+    expect(customWorker.terminated).toBe(true)
+
+    await release(reservation)
   })
 })
 

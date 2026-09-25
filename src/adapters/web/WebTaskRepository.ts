@@ -449,6 +449,54 @@ interface SharedWebPersistenceGeneration {
 
 let sharedWebPersistenceGeneration: SharedWebPersistenceGeneration | null = null
 
+/**
+ * P6-S4A2A: the shared persistence SLOT reservation.
+ *
+ * A reservation is deliberately NOT attached to a generation. It gates
+ * admission to the shared slot itself, which is the only shape that covers all
+ * four lifecycle positions a maintenance handoff can start from: no generation,
+ * OPENING, ACTIVE and CLOSING. While it is published:
+ *
+ *   * `openSharedWebTaskRepository()` waits until it is released instead of
+ *     joining an existing generation or creating a new one — a reservation is
+ *     temporary admission control, not a persistence failure;
+ *   * a final consumer `dispose()` no longer triggers the normal close, so the
+ *     slot owner cannot have the generation torn down underneath it.
+ *
+ * `refCount` stays the truthful consumer count: the reservation only suppresses
+ * the *automatic* close. It never fakes, decrements or disposes a consumer
+ * lease, so consumer ownership remains real. This is a narrow Web-specific
+ * primitive, not a generic lease system, and it does not gate the isolated
+ * `openWebTaskRepository(options)` path which never touches the shared slot.
+ */
+interface SharedSlotReservation {
+  readonly reservationId: string
+  /** Resolves when the slot stops gating admission. */
+  readonly released: Promise<void>
+  markReleased(): void
+}
+
+export interface SharedWebPersistenceReservation {
+  readonly reservationId: string
+  /**
+   * Owner-scoped and idempotent: releasing a stale handle is a safe no-op that
+   * never clears a newer reservation. Resolves once admission is released. A
+   * normal close started by the release itself is not awaited — normal close
+   * stays best-effort, exactly like a consumer `dispose()`.
+   */
+  release(): Promise<void>
+}
+
+export type SharedPersistenceReservationOutcome =
+  | {
+      readonly ok: true
+      readonly reservation: SharedWebPersistenceReservation
+    }
+  | { readonly ok: false; readonly reason: 'OVERLAP' }
+
+let sharedWebPersistenceReservation: SharedSlotReservation | null = null
+let nextSharedWebPersistenceReservationId = 0
+
 function createSharedRepositories(
   client: TaskWorkerClient,
 ): SharedWebPersistenceRepositories {
@@ -509,6 +557,58 @@ function closeSharedGeneration(
   return generation.closing
 }
 
+function releaseSharedWebPersistenceReservation(
+  state: SharedSlotReservation,
+): void {
+  // Owner check: a stale handle must never release a newer reservation.
+  if (sharedWebPersistenceReservation !== state) {
+    return
+  }
+  const generation = sharedWebPersistenceGeneration
+  if (
+    generation !== null &&
+    generation.refCount === 0 &&
+    generation.closing === null
+  ) {
+    // Publish `closing` synchronously, before admission resumes, so a parked
+    // open can never join a generation that is already being torn down. The
+    // close itself stays best-effort (normal lifecycle semantics), which is why
+    // the release does not await it.
+    void closeSharedGeneration(generation)
+  }
+  sharedWebPersistenceReservation = null
+  state.markReleased()
+}
+
+export function reserveSharedWebPersistenceSlot(): SharedPersistenceReservationOutcome {
+  if (sharedWebPersistenceReservation !== null) {
+    return { ok: false, reason: 'OVERLAP' }
+  }
+  let markReleased: () => void = () => undefined
+  const released = new Promise<void>((resolve) => {
+    markReleased = resolve
+  })
+  nextSharedWebPersistenceReservationId += 1
+  const state: SharedSlotReservation = {
+    reservationId: `web-reservation-${nextSharedWebPersistenceReservationId}`,
+    released,
+    markReleased,
+  }
+  // Claimed synchronously: nothing may await between the overlap check above
+  // and this publish, otherwise two callers could both see an empty slot.
+  sharedWebPersistenceReservation = state
+  return {
+    ok: true,
+    reservation: {
+      reservationId: state.reservationId,
+      release: () => {
+        releaseSharedWebPersistenceReservation(state)
+        return state.released
+      },
+    },
+  }
+}
+
 function createSharedLeaseDispose(
   generation: SharedWebPersistenceGeneration,
 ): () => Promise<void> {
@@ -522,15 +622,29 @@ function createSharedLeaseDispose(
     if (generation.refCount > 0) {
       return
     }
+    if (sharedWebPersistenceReservation !== null) {
+      // Pinned by the slot reservation: `refCount` stays truthful (0), the
+      // generation stays published and `closing` stays null until the owner
+      // releases the slot. The owner then decides whether the normal close
+      // starts — never the consumer.
+      return
+    }
     await closeSharedGeneration(generation)
   }
 }
 
 async function openSharedWebTaskRepository(): Promise<OpenWebTaskRepositoryResult> {
-  // Core generations are serialized through shutdown: never join or create a
-  // generation while the previous one is still closing against the same
-  // persistence file.
+  // Core generations are serialized through shutdown, and a slot reservation
+  // gates admission during a maintenance handoff: never join or create a
+  // generation while either is in effect. Both waits re-read the whole slot
+  // afterwards, so a parked caller can never continue from a stale snapshot.
   while (true) {
+    const reservation = sharedWebPersistenceReservation
+    if (reservation !== null) {
+      await reservation.released
+      continue
+    }
+
     const current = sharedWebPersistenceGeneration
     if (current === null || current.closing === null) {
       break
