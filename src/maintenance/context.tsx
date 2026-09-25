@@ -19,6 +19,7 @@
 import { createContext, useContext, useState, type ReactNode } from 'react'
 
 import { MaintenanceCoordinator } from './coordinator'
+import { platformMaintenancePort } from '@/maintenance/platform'
 
 const MaintenanceCoordinatorContext = createContext<MaintenanceCoordinator | null>(null)
 
@@ -31,9 +32,10 @@ export function MaintenanceCoordinatorProvider({
   readonly instance?: MaintenanceCoordinator
 }) {
   // Created once per provider mount; `useState` keeps the value stable without
-  // reading a ref during render.
+  // reading a ref during render. Production injects the build-selected platform
+  // persistence port; tests pass their own `instance`.
   const [coordinator] = useState<MaintenanceCoordinator>(
-    () => instance ?? new MaintenanceCoordinator(),
+    () => instance ?? new MaintenanceCoordinator(platformMaintenancePort),
   )
   return (
     <MaintenanceCoordinatorContext.Provider value={coordinator}>

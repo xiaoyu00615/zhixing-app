@@ -53,11 +53,34 @@
 
 import {
   MaintenanceCoordinatorError,
+  PersistenceMaintenanceError,
   type CoordinatorState,
   type EditorRegistration,
+  type ExclusiveMaintenanceLease,
   type MaintenanceFlushParticipant,
+  type PersistenceMaintenanceLease,
+  type PersistenceMaintenancePort,
   type PreparedMaintenance,
 } from './model'
+
+/**
+ * Safety-net port used when a `MaintenanceCoordinator` is constructed WITHOUT an
+ * explicit platform port (e.g. unit tests that only exercise editor-flush
+ * semantics, or a programming error that forgot to inject the real port).
+ *
+ * It never silently pretends a barrier was acquired: `enterStrongMaintenance()`
+ * fails closed. The production provider always injects the real
+ * `platformMaintenancePort`, so this default is only ever hit by accident.
+ */
+const noopMaintenancePort: PersistenceMaintenancePort = {
+  async enterStrongMaintenance(): Promise<PersistenceMaintenanceLease> {
+    throw new PersistenceMaintenanceError(
+      'NO_PLATFORM_PORT',
+      'BLOCKED',
+      'MaintenanceCoordinator was created without a platform persistence port',
+    )
+  },
+}
 
 function toError(reason: unknown): Error {
   return reason instanceof Error ? reason : new Error(String(reason))
@@ -83,6 +106,27 @@ export class MaintenanceCoordinator {
   private tokenSeq = 0
   private leaseSeq = 0
   private currentLeaseId: string | null = null
+
+  /**
+   * Platform strong-maintenance barrier port. Injected by the provider in
+   * production; defaults to a fail-closed no-op so editor-only unit tests and
+   * accidental misuse never silently claim a barrier.
+   */
+  private readonly port: PersistenceMaintenancePort
+
+  /**
+   * P6-S4C exclusive-session state. `exclusivePlatformLease` is the live platform
+   * lease returned by the port; `exclusiveReleasePromise` implements the
+   * single-flight release (concurrent `release()` calls collapse into one platform
+   * call). Both are null unless an exclusive session is active.
+   */
+  private exclusiveLeaseSeq = 0
+  private exclusivePlatformLease: PersistenceMaintenanceLease | null = null
+  private exclusiveReleasePromise: Promise<void> | null = null
+
+  constructor(port: PersistenceMaintenancePort = noopMaintenancePort) {
+    this.port = port
+  }
 
   /**
    * Register an editor instance as ACTIVE and return a handle scoped to THIS
@@ -160,6 +204,54 @@ export class MaintenanceCoordinator {
    * (without entering a maintenance state) if any of them fails, so maintenance
    * must NOT proceed. On success returns the PREPARED lease.
    */
+  /**
+   * Await every ACTIVE editor flush and every RETIRING completion, then fail
+   * closed on any latched retirement fault. Shared by BOTH `prepareForMaintenance()`
+   * (P6-S2) and `enterExclusiveMaintenance()` (P6-S4C) so the editor-flush
+   * correctness proven by the S2 tests is never duplicated or drifted.
+   *
+   * Leaves a single invariant for the caller: on return the editor side has
+   * settled; on throw the coordinator must be left in a safe (IDLE) state by the
+   * caller's catch.
+   */
+  private async flushEditors(): Promise<void> {
+    this.state = 'FLUSHING_EDITORS'
+    const activeFlushes = [...this.active.values()].map((entry) =>
+      entry.participant.flush(),
+    )
+    const retiringCompletions = [...this.retiring.values()].map(
+      (entry) => entry.completion,
+    )
+    const settled = await Promise.allSettled([
+      ...activeFlushes,
+      ...retiringCompletions,
+    ])
+
+    for (const result of settled) {
+      if (result.status === 'rejected') {
+        throw toError(result.reason)
+      }
+    }
+
+    // Fail closed on any latched fault, even if it completed before
+    // preparation began (it is no longer in RETIRING, so allSettled above
+    // cannot see it).
+    if (this.retiredFailures.size > 0) {
+      const reason = [...this.retiredFailures.values()][0]
+      if (reason !== undefined) {
+        throw reason
+      }
+    }
+  }
+
+  /**
+   * Await every ACTIVE editor flush and every RETIRING completion. Rejects
+   * (without entering a maintenance state) if any of them fails, so maintenance
+   * must NOT proceed. On success returns the PREPARED lease.
+   *
+   * P6-S2 backward-compatible API: this does NOT acquire the platform persistence
+   * barrier. `enterExclusiveMaintenance()` is the platform-aware superset.
+   */
   async prepareForMaintenance(): Promise<PreparedMaintenance> {
     // PREPARING / FLUSHING_EDITORS / PREPARED all hold the operation: only one
     // preparation may exist at a time and a held lease is still a preparation.
@@ -171,33 +263,7 @@ export class MaintenanceCoordinator {
     }
     this.state = 'PREPARING'
     try {
-      this.state = 'FLUSHING_EDITORS'
-      const activeFlushes = [...this.active.values()].map((entry) =>
-        entry.participant.flush(),
-      )
-      const retiringCompletions = [...this.retiring.values()].map(
-        (entry) => entry.completion,
-      )
-      const settled = await Promise.allSettled([
-        ...activeFlushes,
-        ...retiringCompletions,
-      ])
-
-      for (const result of settled) {
-        if (result.status === 'rejected') {
-          throw toError(result.reason)
-        }
-      }
-
-      // Fail closed on any latched fault, even if it completed before
-      // preparation began (it is no longer in RETIRING, so allSettled above
-      // cannot see it).
-      if (this.retiredFailures.size > 0) {
-        const reason = [...this.retiredFailures.values()][0]
-        if (reason !== undefined) {
-          throw reason
-        }
-      }
+      await this.flushEditors()
 
       this.state = 'PREPARED'
       // Unique preparation identity: a stale lease can never unlock a newer one.
@@ -228,6 +294,127 @@ export class MaintenanceCoordinator {
         'FLUSH_FAILED',
         error instanceof Error ? error.message : String(error),
       )
+    }
+  }
+
+  /**
+   * P6-S4C: enter an EXCLUSIVE maintenance session.
+   *
+   * Full handoff chain:
+   *   IDLE → PREPARING → FLUSHING_EDITORS → DRAINING_PERSISTENCE →
+   *   EXCLUSIVE_MAINTENANCE
+   *
+   * The editor flush (FLUSHING_EDITORS) is guaranteed to SETTLE before the
+   * platform barrier is acquired (DRAINING_PERSISTENCE). On an editor failure the
+   * platform port is never touched (port enter call count = 0).
+   *
+   * Platform failure dispositions:
+   *   - RECOVERABLE: the adapter already released any platform owner it obtained,
+   *     so we clear ownership and return to IDLE, then throw PERSISTENCE_FAILED.
+   *   - BLOCKED (or any unexpected/unclassified error): the persistence state may
+   *     still be locked or indeterminately released, so the coordinator lands in
+   *     BLOCKED and MUST NOT return to IDLE.
+   */
+  async enterExclusiveMaintenance(): Promise<ExclusiveMaintenanceLease> {
+    if (this.state !== 'IDLE') {
+      throw new MaintenanceCoordinatorError(
+        'OVERLAP',
+        'an exclusive maintenance session is already active or the coordinator is blocked',
+      )
+    }
+    this.state = 'PREPARING'
+
+    // Phase 1: editor flush must settle before any platform barrier is acquired.
+    try {
+      await this.flushEditors()
+    } catch (error) {
+      this.state = 'IDLE'
+      if (error instanceof MaintenanceCoordinatorError) {
+        throw error
+      }
+      throw new MaintenanceCoordinatorError(
+        'FLUSH_FAILED',
+        error instanceof Error ? error.message : String(error),
+      )
+    }
+
+    // Phase 2: acquire the platform strong persistence barrier.
+    this.state = 'DRAINING_PERSISTENCE'
+    let platformLease: PersistenceMaintenanceLease
+    try {
+      platformLease = await this.port.enterStrongMaintenance()
+    } catch (error) {
+      if (
+        error instanceof PersistenceMaintenanceError &&
+        error.disposition === 'RECOVERABLE'
+      ) {
+        // The adapter released its own platform owner; safe to return to IDLE.
+        this.state = 'IDLE'
+        throw new MaintenanceCoordinatorError(
+          'PERSISTENCE_FAILED',
+          `persistence barrier could not be acquired (${error.code}); safe to retry`,
+        )
+      }
+      // BLOCKED disposition, OR any unexpected/unclassified platform error. The
+      // persistence layer may still be locked — never pretend it recovered.
+      const code =
+        error instanceof PersistenceMaintenanceError
+          ? error.code
+          : 'UNKNOWN_PLATFORM_ERROR'
+      this.state = 'BLOCKED'
+      throw new MaintenanceCoordinatorError(
+        'PERSISTENCE_FAILED',
+        `persistence barrier blocked (${code}); coordinator is now BLOCKED`,
+      )
+    }
+
+    this.state = 'EXCLUSIVE_MAINTENANCE'
+    // Unique exclusive identity: a stale lease can never unlock a newer one.
+    const leaseId = `excl-${this.exclusiveLeaseSeq++}`
+    this.currentLeaseId = leaseId
+    this.exclusivePlatformLease = platformLease
+    this.exclusiveReleasePromise = null
+
+    return {
+      leaseId,
+      release: (): Promise<void> => {
+        // Stale-handle guards: only the CURRENT exclusive owner may release.
+        if (this.state !== 'EXCLUSIVE_MAINTENANCE') {
+          return Promise.resolve()
+        }
+        if (this.currentLeaseId !== leaseId) {
+          return Promise.resolve()
+        }
+        // Single-flight: concurrent release() calls collapse into one platform
+        // release call.
+        if (this.exclusiveReleasePromise !== null) {
+          return this.exclusiveReleasePromise
+        }
+        this.exclusiveReleasePromise = (async () => {
+          const lease = this.exclusivePlatformLease
+          if (lease === null) {
+            this.exclusiveReleasePromise = null
+            return
+          }
+          try {
+            // FIRST: await the platform barrier release.
+            await lease.release()
+          } catch (releaseError) {
+            // On failure the coordinator MUST NOT go IDLE. Reset the single-flight
+            // promise so the SAME handle can be retried later.
+            this.exclusiveReleasePromise = null
+            throw releaseError instanceof Error
+              ? releaseError
+              : new Error(String(releaseError))
+          }
+          // ONLY after the platform release succeeds: clear coordinator ownership.
+          this.exclusivePlatformLease = null
+          this.exclusiveReleasePromise = null
+          this.currentLeaseId = null
+          this.state = 'IDLE'
+        })()
+        return this.exclusiveReleasePromise
+      },
     }
   }
 }

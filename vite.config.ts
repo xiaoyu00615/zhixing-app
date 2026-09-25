@@ -61,6 +61,18 @@ export default defineConfig(({ mode }) => {
     ),
   )
 
+  // P6-S4C: platform maintenance adapter. Web build uses the Web adapter; the
+  // Tauri/Native build uses the Native adapter. Selected purely by build-time
+  // alias (never runtime sniffing), mirroring the existing runtime alias pattern.
+  const maintenancePlatformEntry = fileURLToPath(
+    new URL(
+      process.env.TAURI_ENV_PLATFORM === undefined
+        ? './src/adapters/web/maintenance.ts'
+        : './src/adapters/native/maintenance.ts',
+      import.meta.url,
+    ),
+  )
+
   return {
     plugins: [react(), tailwindcss()],
     server: {
@@ -91,6 +103,10 @@ export default defineConfig(({ mode }) => {
         { find: /^@\/diary\/runtime$/, replacement: diaryRuntimeEntry },
         { find: /^@\/search\/runtime$/, replacement: searchRuntimeEntry },
         { find: /^@\/trash\/runtime$/, replacement: trashRuntimeEntry },
+        {
+          find: /^@\/maintenance\/platform$/,
+          replacement: maintenancePlatformEntry,
+        },
         {
           find: '@',
           replacement: fileURLToPath(new URL('./src', import.meta.url)),
