@@ -46,28 +46,33 @@ class FakeMaintenancePort implements PersistenceMaintenancePort {
   enterCallCount = 0
   releaseCallCount = 0
 
-  async enterStrongMaintenance(): Promise<PersistenceMaintenanceLease> {
+  enterStrongMaintenance(): Promise<PersistenceMaintenanceLease> {
     this.enterCallCount += 1
     switch (this.enterMode) {
       case 'recoverable':
-        throw new PersistenceMaintenanceError('FAKE', 'RECOVERABLE', 'recoverable')
+        return Promise.reject(
+          new PersistenceMaintenanceError('FAKE', 'RECOVERABLE', 'recoverable'),
+        )
       case 'blocked':
-        throw new PersistenceMaintenanceError('FAKE', 'BLOCKED', 'blocked')
+        return Promise.reject(
+          new PersistenceMaintenanceError('FAKE', 'BLOCKED', 'blocked'),
+        )
       case 'unknown':
-        throw new Error('boom')
+        return Promise.reject(new Error('boom'))
     }
     let rejected = false
     const lease: PersistenceMaintenanceLease = {
       leaseId: 'fake-platform-lease',
-      release: async (): Promise<void> => {
+      release: (): Promise<void> => {
         this.releaseCallCount += 1
         if (this.releaseRejectsFirst && !rejected) {
           rejected = true
-          throw new Error('release failed')
+          return Promise.reject(new Error('release failed'))
         }
+        return Promise.resolve()
       },
     }
-    return lease
+    return Promise.resolve(lease)
   }
 }
 

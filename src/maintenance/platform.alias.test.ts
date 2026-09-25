@@ -17,8 +17,15 @@ import * as nativeMod from '@/adapters/native/maintenance'
 
 describe('maintenance platform alias resolution', () => {
   test('resolves to the build-selected adapter', () => {
+    // `process` is intentionally read through a local structural type: the app
+    // TS project does not include `@types/node` (this is the only `src/` file
+    // that needs the ambient build-time env), so referencing it directly would
+    // be an unresolved global.
+    const env = (
+      globalThis as { process?: { env?: Record<string, string | undefined> } }
+    ).process?.env
     const expected =
-      process.env.TAURI_ENV_PLATFORM === undefined
+      env?.TAURI_ENV_PLATFORM === undefined
         ? webMod.platformMaintenancePort
         : nativeMod.platformMaintenancePort
     expect(platformMaintenancePort).toBe(expected)

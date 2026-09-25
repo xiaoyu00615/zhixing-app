@@ -30,7 +30,7 @@ describe('NativeMaintenancePort', () => {
   })
 
   test('enter invokes native_maintenance_enter with no arguments and parses leaseId', async () => {
-    h.invoke.mockImplementation(async (cmd: string) => {
+    h.invoke.mockImplementation((cmd: string) => {
       expect(cmd).toBe('native_maintenance_enter')
       return { leaseId: 'native-maint-0' }
     })
@@ -69,7 +69,7 @@ describe('NativeMaintenancePort', () => {
   })
 
   test('release invokes native_maintenance_exit with { leaseId }', async () => {
-    h.invoke.mockImplementation(async (cmd: string) => {
+    h.invoke.mockImplementation((cmd: string) => {
       if (cmd === 'native_maintenance_enter') return { leaseId: 'native-maint-0' }
       expect(cmd).toBe('native_maintenance_exit')
       return undefined
@@ -84,10 +84,10 @@ describe('NativeMaintenancePort', () => {
 
   test('release failure is retry-capable; eventual success clears the barrier', async () => {
     let exitCount = 0
-    h.invoke.mockImplementation(async (cmd: string) => {
+    h.invoke.mockImplementation((cmd: string) => {
       if (cmd === 'native_maintenance_enter') return { leaseId: 'native-maint-0' }
       exitCount += 1
-      if (exitCount === 1) throw new Error('exit lost')
+      if (exitCount === 1) return Promise.reject(new Error('exit lost'))
       return undefined
     })
     const port = new NativeMaintenancePort()
@@ -99,7 +99,7 @@ describe('NativeMaintenancePort', () => {
   })
 
   test('concurrent release => single exit invoke', async () => {
-    h.invoke.mockImplementation(async (cmd: string) => {
+    h.invoke.mockImplementation((cmd: string) => {
       if (cmd === 'native_maintenance_enter') return { leaseId: 'native-maint-0' }
       return undefined
     })
@@ -113,7 +113,7 @@ describe('NativeMaintenancePort', () => {
   })
 
   test('post-success release => NO-OP (no second exit invoke)', async () => {
-    h.invoke.mockImplementation(async (cmd: string) => {
+    h.invoke.mockImplementation((cmd: string) => {
       if (cmd === 'native_maintenance_enter') return { leaseId: 'native-maint-0' }
       return undefined
     })

@@ -13,13 +13,21 @@ import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { WebMaintenancePort } from './maintenance'
 import { PersistenceMaintenanceError } from '@/maintenance/model'
-import { reserveSharedWebPersistenceSlot } from './WebTaskRepository'
+import {
+  reserveSharedWebPersistenceSlot,
+  type SharedWebPersistenceRetirementOutcome,
+} from './WebTaskRepository'
 
 const h = vi.hoisted(() => ({
   reserveSeq: 0,
   releaseCalls: [] as string[],
   overlap: false,
-  retireResult: Promise.resolve({ ok: true, status: 'NO_RUNTIME' }),
+  // Typed as the real retired-generation union so the failure reasons below
+  // (`{ ok: false, reason }`) are assignable, not just the success statuses.
+  retireResult: Promise.resolve<SharedWebPersistenceRetirementOutcome>({
+    ok: true,
+    status: 'NO_RUNTIME',
+  }),
 }))
 
 vi.mock('./WebTaskRepository', () => ({

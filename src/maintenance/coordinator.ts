@@ -73,11 +73,13 @@ import {
  * `platformMaintenancePort`, so this default is only ever hit by accident.
  */
 const noopMaintenancePort: PersistenceMaintenancePort = {
-  async enterStrongMaintenance(): Promise<PersistenceMaintenanceLease> {
-    throw new PersistenceMaintenanceError(
-      'NO_PLATFORM_PORT',
-      'BLOCKED',
-      'MaintenanceCoordinator was created without a platform persistence port',
+  enterStrongMaintenance(): Promise<PersistenceMaintenanceLease> {
+    return Promise.reject(
+      new PersistenceMaintenanceError(
+        'NO_PLATFORM_PORT',
+        'BLOCKED',
+        'MaintenanceCoordinator was created without a platform persistence port',
+      ),
     )
   },
 }

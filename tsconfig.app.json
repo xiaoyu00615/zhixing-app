@@ -22,6 +22,7 @@
     "noImplicitOverride": true,
     "forceConsistentCasingInFileNames": true,
     "paths": {
+      "@/maintenance/platform": ["./src/adapters/web/maintenance.ts"],
       "@/*": ["./src/*"]
     }
   },
