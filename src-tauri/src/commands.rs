@@ -32,6 +32,7 @@ use crate::task::{
 };
 use crate::RuntimeStatus;
 use crate::archive_db::{ArchiveDbService, ArchiveError, ArchiveItemRecord};
+use crate::maintenance::{CommandDbLease, NativeConnection, NativeMaintenanceState};
 use crate::search_db::{SearchDbService, SearchError, SearchQueryInput, SearchResultRecord};
 use crate::trash_db::{TrashDbService, TrashError, TrashItemRecord};
 
@@ -192,15 +193,23 @@ impl From<TaskError> for TaskCommandErrorDto {
 fn task_connection(
     app: &tauri::AppHandle,
     runtime_status: &RuntimeStatus,
-) -> Result<rusqlite::Connection, TaskCommandErrorDto> {
+) -> Result<CommandDbLease<NativeConnection>, TaskCommandErrorDto> {
     if !matches!(runtime_status, RuntimeStatus::Healthy) {
         return Err(TaskError::PersistenceUnavailable.into());
     }
+    // Strong maintenance admission gate: reject immediately while a maintenance
+    // owner is active. The permit must be acquired BEFORE the DB is opened so
+    // that, once admission closes, no new Connection can ever be created.
+    let permit = app
+        .state::<NativeMaintenanceState>()
+        .acquire_operation_permit()
+        .ok_or_else(|| TaskCommandErrorDto::from(TaskError::PersistenceUnavailable))?;
     let app_config_dir = app
         .path()
         .app_config_dir()
         .map_err(|_| TaskCommandErrorDto::from(TaskError::PersistenceUnavailable))?;
-    TaskDbService::open_existing(&app_config_dir).map_err(Into::into)
+    let connection = TaskDbService::open_existing(&app_config_dir).map_err(TaskCommandErrorDto::from)?;
+    Ok(CommandDbLease::new(NativeConnection(connection), permit))
 }
 
 #[tauri::command]
@@ -1112,15 +1121,21 @@ impl From<CanvasError> for CanvasCommandErrorDto {
 fn canvas_connection(
     app: &tauri::AppHandle,
     runtime_status: &RuntimeStatus,
-) -> Result<rusqlite::Connection, CanvasCommandErrorDto> {
+) -> Result<CommandDbLease<NativeConnection>, CanvasCommandErrorDto> {
     if !matches!(runtime_status, RuntimeStatus::Healthy) {
         return Err(CanvasError::PersistenceUnavailable.into());
     }
+    // Strong maintenance admission gate (see `task_connection`).
+    let permit = app
+        .state::<NativeMaintenanceState>()
+        .acquire_operation_permit()
+        .ok_or_else(|| CanvasCommandErrorDto::from(CanvasError::PersistenceUnavailable))?;
     let app_config_dir = app
         .path()
         .app_config_dir()
         .map_err(|_| CanvasCommandErrorDto::from(CanvasError::PersistenceUnavailable))?;
-    CanvasDbService::open_existing(&app_config_dir).map_err(Into::into)
+    let connection = CanvasDbService::open_existing(&app_config_dir).map_err(CanvasCommandErrorDto::from)?;
+    Ok(CommandDbLease::new(NativeConnection(connection), permit))
 }
 
 #[tauri::command]

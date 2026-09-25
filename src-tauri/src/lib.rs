@@ -30,6 +30,7 @@ mod bootstrap;
 mod canvas;
 mod commands;
 mod db;
+mod maintenance;
 mod diary_db;
 mod diagnostics;
 mod notes_db;
@@ -253,7 +254,9 @@ pub fn run() {
             commands::diary_restore,
             commands::search_query,
             commands::trash_list,
-            commands::archive_list
+            commands::archive_list,
+            maintenance::native_maintenance_enter,
+            maintenance::native_maintenance_exit
         ])
         .setup(|app| {
             // 🔒 冻结 §3：路径统一通过 PathResolver。
@@ -289,6 +292,9 @@ pub fn run() {
             };
             diagnostics::record_startup_status(&runtime_status);
             app.manage(runtime_status);
+            // Native strong maintenance barrier. Exists independently of
+            // RuntimeStatus (even when Degraded) and never opens a database.
+            app.manage(crate::maintenance::NativeMaintenanceState::new());
             Ok(())
         })
         .run(tauri::generate_context!())
