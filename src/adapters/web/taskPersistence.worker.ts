@@ -179,6 +179,35 @@ const workerScope = self as DedicatedWorkerGlobalScope
 let activeMaintenanceLeaseId: string | null = null
 let nextMaintenanceLeaseId = 1
 
+/**
+ * P6-S4A2B1: minimal STRICT-close state of the already-established runtime.
+ *
+ * Deliberately not a general state machine — it exists to make three facts
+ * authoritative in the WORKER:
+ *
+ *   * `OPEN`          — the strict-close primitive has never completed here.
+ *                       Ordinary traffic and `maintenance.exit` behave exactly
+ *                       as before this slice.
+ *   * `CLOSED`        — a strict close SUCCEEDED. The database is really gone,
+ *                       so ordinary traffic and `maintenance.exit` must keep
+ *                       failing: a closed database can never safely return to
+ *                       NORMAL traffic. B2 retires the generation instead.
+ *   * `INDETERMINATE` — `database.close()` THREW. `close()` is not idempotent
+ *                       and the real state of the database is unknown, so this
+ *                       is FAIL CLOSED, and it is explicitly NOT retryable:
+ *                       nothing here automatically retries the close, resumes
+ *                       traffic, terminates the client or unpublishes anything.
+ *
+ * This state tracks the strict-close primitive ONLY. The normal `shutdown`
+ * lifecycle keeps its unchanged best-effort semantics while this state is
+ * `OPEN`; in a terminal state it follows the frozen matrix instead —
+ * `CLOSED` ⇒ deterministic success without re-closing, `INDETERMINATE` ⇒
+ * explicit `PERSISTENCE_FAILED` failure without re-closing.
+ */
+type MaintenanceCloseState = 'OPEN' | 'CLOSED' | 'INDETERMINATE'
+
+let maintenanceCloseState: MaintenanceCloseState = 'OPEN'
+
 interface InitializedDatabase {
   readonly capability: WebPersistenceCapability
   readonly database?: WebTaskDatabase
@@ -335,6 +364,13 @@ async function handleRequest(value: unknown): Promise<void> {
   //   * every ordinary request admitted before it has already completed;
   //   * every ordinary request admitted after it is rejected below.
   if (request.type === 'maintenance.enter') {
+    // P6-S4A2B1 §13: a terminal close state is not resumable, so no new owner
+    // may ever be created on top of it. This is checked BEFORE the overlap rule
+    // so the answer never depends on what the previous owner happened to hold.
+    if (maintenanceCloseState !== 'OPEN') {
+      failure(request.requestId, 'PERSISTENCE_FAILED')
+      return
+    }
     if (activeMaintenanceLeaseId !== null) {
       // Deterministic failure, and the existing owner is left untouched: a
       // second caller must never be able to believe it won the quiescence
@@ -352,6 +388,13 @@ async function handleRequest(value: unknown): Promise<void> {
   }
 
   if (request.type === 'maintenance.exit') {
+    // P6-S4A2B1 §11/§12: once the strict close reached a terminal state the
+    // barrier can no longer be released, because releasing it would re-open the
+    // write admission of a database that is either gone or in an unknown state.
+    if (maintenanceCloseState !== 'OPEN') {
+      failure(request.requestId, 'PERSISTENCE_FAILED')
+      return
+    }
     // NO-OP when inactive: safely aborting a barrier that was never (or no
     // longer) established must not fail.
     if (activeMaintenanceLeaseId === null) {
@@ -370,13 +413,87 @@ async function handleRequest(value: unknown): Promise<void> {
     return
   }
 
+  // ---- P6-S4A2B1 CONTROL: maintenance.close (STRICT close) -----------------
+  // Owns ONLY the closing of the already-established runtime. It deliberately
+  // does NOT release the lease, terminate the client, unpublish the generation,
+  // retire the generation or release the shared slot: none of those lifecycles
+  // belong to this primitive (they are P6-S4A2B2 / B2's responsibility).
+  if (request.type === 'maintenance.close') {
+    // 1. Terminal state first: a CLOSED database must never be closed again
+    //    (`WebTaskDatabase.close()` is not idempotent) and an INDETERMINATE one
+    //    must never be retried automatically.
+    if (maintenanceCloseState !== 'OPEN') {
+      failure(request.requestId, 'PERSISTENCE_FAILED')
+      return
+    }
+    // 2. Owner validation BEFORE anything touches the database. A foreign or
+    //    stale lease neither closes the database nor changes the owner.
+    if (
+      activeMaintenanceLeaseId === null ||
+      request.leaseId !== activeMaintenanceLeaseId
+    ) {
+      failure(request.requestId, 'PERSISTENCE_FAILED')
+      return
+    }
+    // 3. A strict close may only close a runtime that ALREADY exists. Note that
+    //    this reads the memoized `initialization`; it never calls
+    //    `getInitialization()`, so a close can never secretly create / open a
+    //    database that did not exist.
+    const pending = initialization
+    if (pending === null) {
+      failure(request.requestId, 'PERSISTENCE_FAILED')
+      return
+    }
+    const state = await pending
+    if (state.capability.status !== 'AVAILABLE' || state.database === undefined) {
+      // No real database: an optional-chained no-op would report a close that
+      // never happened. Explicit failure instead.
+      failure(request.requestId, 'PERSISTENCE_FAILED')
+      return
+    }
+    // 4. Real close, locally contained. The exception must not escape
+    //    `handleRequest`: the serial `requestQueue` has no `.catch()`, so an
+    //    escaping rejection would silently poison every later request.
+    try {
+      state.database.close()
+    } catch {
+      maintenanceCloseState = 'INDETERMINATE'
+      failure(request.requestId, 'PERSISTENCE_FAILED')
+      return
+    }
+    maintenanceCloseState = 'CLOSED'
+    success(request.requestId, null)
+    return
+  }
+
   // CONTROL: `shutdown` stays allowed while quiescent, because strong
   // maintenance (Restore / Data Root Migration) needs to close the runtime
   // AFTER the barrier is established. `shutdown` alone is still NOT a barrier.
   if (request.type === 'shutdown') {
-    const state = initialization === null ? null : await initialization
-    state?.database?.close()
-    success(request.requestId, null)
+    // Normal lifecycle semantics are unchanged when no strict close happened
+    // (no barrier required, always allowed, best-effort, no owner validation).
+    if (maintenanceCloseState === 'OPEN') {
+      const state = initialization === null ? null : await initialization
+      state?.database?.close()
+      success(request.requestId, null)
+      return
+    }
+    // P6-S4A2B1 shutdown matrix, terminal states:
+    //   * `CLOSED`        — the database is really gone and already closed, so
+    //                       shutdown is a deterministic success. `close()` is
+    //                       NOT idempotent, so it must not run a second time.
+    //   * `INDETERMINATE` — `close()` threw once and the real database state is
+    //                       unknown, so a normal shutdown can neither pretend
+    //                       to have closed it nor retry the close. This is a
+    //                       FAIL CLOSED answer, but it is still a NORMAL failure
+    //                       response: it must be emitted from `handleRequest()`
+    //                       (not thrown), so the serial `requestQueue` — which
+    //                       has no `.catch()` — stays alive.
+    if (maintenanceCloseState === 'CLOSED') {
+      success(request.requestId, null)
+      return
+    }
+    failure(request.requestId, 'PERSISTENCE_FAILED')
     return
   }
 
@@ -387,7 +504,12 @@ async function handleRequest(value: unknown): Promise<void> {
   //   Task -> PERSISTENCE_UNAVAILABLE, Note/Diary/Search/Trash/Archive ->
   //   PERSISTENCE_ERROR, Canvas/Project/Tag -> the same Task mapping they
   //   already use when persistence is not AVAILABLE.
-  if (activeMaintenanceLeaseId !== null) {
+  //
+  // P6-S4A2B1: a terminal strict-close state keeps failing closed for the same
+  // reason — a database that is CLOSED or in an INDETERMINATE state must never
+  // serve ordinary traffic again, and this must hold even after the maintenance
+  // lease is (or becomes) inactive.
+  if (activeMaintenanceLeaseId !== null || maintenanceCloseState !== 'OPEN') {
     if (isNoteOperation(request.type)) {
       noteFailure(request.requestId, 'PERSISTENCE_ERROR')
     } else if (isDiaryOperation(request.type)) {

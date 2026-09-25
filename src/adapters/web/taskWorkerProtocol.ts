@@ -402,6 +402,21 @@ export type TaskWorkerRequest =
       readonly type: 'maintenance.exit'
       readonly leaseId: string
     }
+  // P6-S4A2B1: owner-validated STRICT close of the already-established runtime.
+  //
+  // Deliberately NOT `shutdown`. `shutdown` is a best-effort normal lifecycle
+  // primitive: the client terminates the transport whatever happens, so its
+  // success can never be read as "the database was really closed". Strong
+  // maintenance needs a primitive whose FAILURE PROPAGATES and which can only
+  // close a runtime the caller actually owns. Like every other CONTROL op it
+  // travels through the SAME union / postMessage / requestQueue — no side
+  // channel — and it carries the worker-allocated `leaseId` for owner
+  // validation performed BY THE WORKER.
+  | {
+      readonly requestId: number
+      readonly type: 'maintenance.close'
+      readonly leaseId: string
+    }
 
 export interface TaskWorkerSuccessResponse {
   readonly requestId: number
@@ -736,6 +751,19 @@ export function parseTaskWorkerRequest(
     // so the worker never has to guess at ownership.
     case 'maintenance.exit':
       return typeof value.leaseId === 'string'
+        ? {
+            requestId: value.requestId,
+            type: value.type,
+            leaseId: value.leaseId,
+          }
+        : null
+    // P6-S4A2B1: same rule as `maintenance.exit` — ownership is meaningless
+    // without an identity, so a lease-less (or empty) strict close is rejected
+    // here and can never reach the worker's owner check. No generic
+    // "maintenance payload" framework is introduced: each control op keeps its
+    // own explicit field.
+    case 'maintenance.close':
+      return typeof value.leaseId === 'string' && value.leaseId.length > 0
         ? {
             requestId: value.requestId,
             type: value.type,

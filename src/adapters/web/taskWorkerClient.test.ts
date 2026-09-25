@@ -562,3 +562,103 @@ describe('TaskWorkerClient maintenance control (P6-S4A1)', () => {
     expect(worker.messages.map((message) => message.requestId)).toEqual([1, 2])
   })
 })
+
+describe('TaskWorkerClient strict close + release retry (P6-S4A2B1)', () => {
+  test('closeMaintenance sends the exact maintenance.close envelope', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    void client.closeMaintenance('web-maint-1')
+    await flush()
+
+    expect(worker.messages).toHaveLength(1)
+    expect(worker.messages[0]).toEqual({
+      requestId: 1,
+      type: 'maintenance.close',
+      leaseId: 'web-maint-1',
+    })
+  })
+
+  test('closeMaintenance propagates the worker refusal and never terminates the transport', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    const promise = client.closeMaintenance('web-maint-foreign')
+    await flush()
+    worker.send({
+      requestId: 1,
+      ok: false,
+      error: { code: 'PERSISTENCE_FAILED' },
+    })
+    await flush()
+
+    await expect(promise).rejects.toSatisfy((error) => {
+      expectTaskError(error, 'PERSISTENCE_FAILED')
+      return true
+    })
+    // A strict close may not swallow the failure by tearing the transport down:
+    // `terminate()` would make the outcome unobservable.
+    expect(worker.terminated).toBe(false)
+  })
+
+  test('closeMaintenance resolving proves only the worker acknowledgement', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    const promise = client.closeMaintenance('web-maint-1')
+    await flush()
+    worker.send({ requestId: 1, ok: true, result: null })
+    await flush()
+
+    await expect(promise).resolves.toBeUndefined()
+    // No side effect on the transport: the client is still usable / not
+    // terminated, and no exit was emitted on the caller's behalf.
+    expect(worker.terminated).toBe(false)
+    expect(worker.messages.map((message) => message.type)).toEqual([
+      'maintenance.close',
+    ])
+  })
+
+  test('lease.release() stays retry-capable after a control failure', async () => {
+    const worker = new CapturingWorker()
+    const client = new TaskWorkerClient(worker)
+
+    const entered = client.enterMaintenance()
+    await flush()
+    worker.send({ requestId: 1, ok: true, result: { leaseId: 'web-maint-7' } })
+    await flush()
+    const lease = await entered
+
+    // Attempt 1: the control response fails, so ownership was NOT released.
+    const firstAttempt = lease.release()
+    await flush()
+    worker.send({
+      requestId: 2,
+      ok: false,
+      error: { code: 'PERSISTENCE_FAILED' },
+    })
+    await flush()
+    await expect(firstAttempt).rejects.toSatisfy((error) => {
+      expectTaskError(error, 'PERSISTENCE_FAILED')
+      return true
+    })
+
+    // Attempt 2 with the SAME handle must really be sent again — the previous
+    // failure must not have consumed the handle.
+    const secondAttempt = lease.release()
+    await flush()
+    expect(worker.messages).toHaveLength(3)
+    expect(worker.messages[2]).toEqual({
+      requestId: 3,
+      type: 'maintenance.exit',
+      leaseId: 'web-maint-7',
+    })
+    worker.send({ requestId: 3, ok: true, result: null })
+    await flush()
+    await expect(secondAttempt).resolves.toBeUndefined()
+
+    // Attempt 3: only now is the handle locally consumed, so no request leaves.
+    await lease.release()
+    expect(worker.messages).toHaveLength(3)
+  })
+})

@@ -938,14 +938,19 @@ export class TaskWorkerClient {
     let released = false
     return {
       leaseId,
-      release: () => {
+      release: async () => {
         // Client-side convenience only. The authoritative owner check lives in
         // the worker, so a stale / foreign still has to be rejected there.
         if (released) {
-          return Promise.resolve()
+          return
         }
+        // P6-S4A2B1: `released` is set only AFTER the worker acknowledged the
+        // release. Marking it before the response (as this used to do) turned a
+        // single transient control failure into a permanently unusable handle:
+        // the caller saw a rejection yet could never try again. The retry is
+        // safe precisely because a failed exit never released anything.
+        await this.exitMaintenance(leaseId)
         released = true
-        return this.exitMaintenance(leaseId)
       },
     }
   }
@@ -966,6 +971,31 @@ export class TaskWorkerClient {
     await this.send((requestId) => ({
       requestId,
       type: 'maintenance.exit',
+      leaseId,
+    }))
+  }
+
+  /**
+   * P6-S4A2B1: STRICT close of the already-established worker runtime.
+   *
+   * Only sends the owner-validated CONTROL request and awaits the worker's
+   * explicit response. It deliberately does NOT:
+   *   * call `terminate()` — a terminated transport could not report a failure,
+   *     which would make the strict-close outcome unobservable;
+   *   * release the maintenance lease — the lease lifecycle is not the close's;
+   *   * touch the shared generation or the shared persistence slot.
+   *
+   * Resolving therefore proves ONE thing only: the worker acknowledged that
+   * `database.close()` succeeded. It does NOT prove the generation was retired,
+   * the client terminated or the slot released — those belong to P6-S4A2B2.
+   *
+   * Deliberately separate from `shutdown()`, whose best-effort "always
+   * terminate" semantics are unchanged and are explicitly NOT a strict close.
+   */
+  async closeMaintenance(leaseId: string): Promise<void> {
+    await this.send((requestId) => ({
+      requestId,
+      type: 'maintenance.close',
       leaseId,
     }))
   }

@@ -154,6 +154,54 @@ describe('maintenance ownership (P6-S4A1R)', () => {
   })
 })
 
+describe('maintenance strict close request (P6-S4A2B1)', () => {
+  test('parses maintenance.close with a lease id', () => {
+    expect(
+      parseTaskWorkerRequest({
+        requestId: 3,
+        type: 'maintenance.close',
+        leaseId: 'web-maint-1',
+      }),
+    ).toEqual({
+      requestId: 3,
+      type: 'maintenance.close',
+      leaseId: 'web-maint-1',
+    })
+  })
+
+  test('maintenance.close requires a non-empty lease id', () => {
+    // Without an identity the worker could not validate ownership, so the
+    // request must never reach it.
+    expect(
+      parseTaskWorkerRequest({ requestId: 1, type: 'maintenance.close' }),
+    ).toBeNull()
+    expect(
+      parseTaskWorkerRequest({
+        requestId: 1,
+        type: 'maintenance.close',
+        leaseId: 42,
+      }),
+    ).toBeNull()
+    expect(
+      parseTaskWorkerRequest({
+        requestId: 1,
+        type: 'maintenance.close',
+        leaseId: '',
+      }),
+    ).toBeNull()
+  })
+
+  test('rejects maintenance.close with a malformed requestId', () => {
+    expect(
+      parseTaskWorkerRequest({
+        requestId: 0,
+        type: 'maintenance.close',
+        leaseId: 'web-maint-1',
+      }),
+    ).toBeNull()
+  })
+})
+
 describe('parseTaskWorkerRequest', () => {
   test('accepts known note operations', () => {
     expect(
