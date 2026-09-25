@@ -23,5 +23,16 @@ sha2 = "0.10"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
+# P6-S8: the Windows live-database switch uses the OS atomic replace capability
+# (`ReplaceFileW`), which is the only way to express "replace the live database
+# AND keep the previous one as a rollback candidate" as ONE atomic step. Narrow,
+# target-specific, and deliberately not pulled in on other platforms (the shared
+# restore domain never mentions Windows concepts).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
 [dev-dependencies]
 tempfile = "3"

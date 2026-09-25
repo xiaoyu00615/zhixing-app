@@ -281,7 +281,9 @@ fn scope_dto(scope: &BackupScope) -> BackupScopeDto {
     }
 }
 
-fn is_sha256_hex(value: &str) -> bool {
+/// Lowercase hex SHA-256 metadata check. Shared with the Restore subsystem,
+/// which must validate a recorded checksum before trusting it.
+pub(crate) fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
@@ -665,7 +667,11 @@ pub(crate) fn list_backups(
 
 /// Read-only integrity check. §18: explicit READ ONLY flags, so verification
 /// can never mutate the bundle (no journal-mode change, no write, no checkpoint).
-fn read_only_integrity_check(db_path: &Path) -> rusqlite::Result<bool> {
+///
+/// Shared with the P6-S8 Restore subsystem, which uses the SAME read-only rule
+/// for the restore staging database and for the post-switch live database — the
+/// "is this SQLite file sound?" test exists exactly once in the codebase.
+pub(crate) fn read_only_integrity_check(db_path: &Path) -> rusqlite::Result<bool> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let result: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     Ok(result.eq_ignore_ascii_case("ok"))
@@ -686,25 +692,45 @@ fn failed_verification(
     }
 }
 
-/// Verify one backup bundle by id.
+/// Outcome of locating + fully verifying one bundle by id.
+///
+/// Shared by the explicit verification command AND the P6-S8 Restore
+/// pre-flight, so "what counts as a trustworthy bundle" is defined once.
+pub(crate) enum LocatedVerification {
+    /// Unique bundle; structure, size, streaming SHA-256 and a real read-only
+    /// `integrity_check` all passed. A legitimate V1 bundle.
+    Verified {
+        /// Where the bundle lives. Never crosses the UI boundary.
+        bundle_dir: PathBuf,
+        manifest: BackupManifest,
+        size_bytes: u64,
+        checksum_sha256: String,
+    },
+    /// Unique bundle that cannot serve as a source. A DATA result, never a
+    /// subsystem crash.
+    Damaged {
+        reason: BackupReasonCode,
+        size_bytes: Option<u64>,
+        checksum_sha256: Option<String>,
+    },
+}
+
+/// Locate one bundle by id from a FRESH scan and fully verify it.
 ///
 /// §17 TOCTOU: the id is re-located from a fresh scan of the authoritative
 /// backup root — a previous list is never trusted. §19: size, then streaming
 /// SHA-256, then a real `PRAGMA integrity_check`. All three must pass.
 ///
-/// Outcome model:
-///   * unique, `STRUCTURALLY_VALID` → `Ok(VERIFIED | FAILED)` — a damaged
-///     backup is a DATA result, never a subsystem crash;
-///   * unique but `INCOMPLETE` / `INVALID` → `Ok(FAILED)` with the structural
-///     reason code;
-///   * unique but `UNSUPPORTED` → `Err(Unsupported)`: this build cannot judge
-///     that format, and it must never be reported as corrupt;
+/// Error / data model (unchanged from P6-S6):
+///   * unique, `STRUCTURALLY_VALID` → `Ok(Verified | Damaged)`;
+///   * unique but `INCOMPLETE` / `INVALID` → `Ok(Damaged)`;
+///   * unique but `UNSUPPORTED` → `Err(Unsupported)`: never reported as corrupt;
 ///   * absent → `Err(NotFound)`; several claimants → `Err(Ambiguous)`;
 ///   * unusable id → `Err(RequestInvalid)`; no root → `Err(Unavailable)`.
-pub(crate) fn verify_backup(
+pub(crate) fn locate_and_verify(
     app_config_dir: &Path,
     backup_id: &str,
-) -> Result<BackupVerifyResultDto, BackupInventoryError> {
+) -> Result<LocatedVerification, BackupInventoryError> {
     let requested = Uuid::parse_str(backup_id.trim())
         .map_err(|e| BackupInventoryError::RequestInvalid(format!("backup id is not a UUID: {e}")))?
         .to_string();
@@ -741,43 +767,41 @@ pub(crate) fn verify_backup(
     }
     // Any other unusable bundle is a DATA result with its structural reason.
     if target.item.inventory_status != BackupInventoryStatus::StructurallyValid {
-        return Ok(failed_verification(
-            &requested,
-            target
+        return Ok(LocatedVerification::Damaged {
+            reason: target
                 .item
                 .reason_code
                 .unwrap_or(BackupReasonCode::ManifestInvalid),
-            None,
-            None,
-        ));
+            size_bytes: None,
+            checksum_sha256: None,
+        });
     }
 
-    let claim = target
+    let manifest = target
         .claim
         .as_ref()
-        .expect("structurally valid implies a claimed manifest");
-    let manifest = &claim.manifest;
+        .expect("structurally valid implies a claimed manifest")
+        .manifest
+        .clone();
     let db_path = target.bundle_dir.join(DB_RELATIVE_PATH);
 
     // 1. Actual size must equal the manifest size.
     let size = match fs::symlink_metadata(&db_path) {
         Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => meta.len(),
         _ => {
-            return Ok(failed_verification(
-                &requested,
-                BackupReasonCode::DatabaseUnreadable,
-                None,
-                None,
-            ))
+            return Ok(LocatedVerification::Damaged {
+                reason: BackupReasonCode::DatabaseUnreadable,
+                size_bytes: None,
+                checksum_sha256: None,
+            })
         }
     };
     if size != manifest.database.size_bytes {
-        return Ok(failed_verification(
-            &requested,
-            BackupReasonCode::SizeMismatch,
-            Some(size),
-            None,
-        ));
+        return Ok(LocatedVerification::Damaged {
+            reason: BackupReasonCode::SizeMismatch,
+            size_bytes: Some(size),
+            checksum_sha256: None,
+        });
     }
 
     // 2. Streaming SHA-256 must equal the manifest checksum (never a whole-file
@@ -785,43 +809,78 @@ pub(crate) fn verify_backup(
     let checksum = match sha256_file_hex(&db_path) {
         Ok(checksum) => checksum,
         Err(_) => {
-            return Ok(failed_verification(
-                &requested,
-                BackupReasonCode::DatabaseUnreadable,
-                Some(size),
-                None,
-            ))
+            return Ok(LocatedVerification::Damaged {
+                reason: BackupReasonCode::DatabaseUnreadable,
+                size_bytes: Some(size),
+                checksum_sha256: None,
+            })
         }
     };
     if checksum != manifest.database.sha256 {
-        return Ok(failed_verification(
-            &requested,
-            BackupReasonCode::ChecksumMismatch,
-            Some(size),
-            Some(checksum),
-        ));
+        return Ok(LocatedVerification::Damaged {
+            reason: BackupReasonCode::ChecksumMismatch,
+            size_bytes: Some(size),
+            checksum_sha256: Some(checksum),
+        });
     }
 
     // 3. A REAL read-only integrity check — never the manifest's own claim.
     match read_only_integrity_check(&db_path) {
-        Ok(true) => Ok(BackupVerifyResultDto {
-            backup_id: requested,
-            verification_status: BackupVerificationStatus::Verified,
-            reason_code: None,
+        Ok(true) => Ok(LocatedVerification::Verified {
+            bundle_dir: target.bundle_dir.clone(),
+            manifest,
+            size_bytes: size,
+            checksum_sha256: checksum,
+        }),
+        Ok(false) => Ok(LocatedVerification::Damaged {
+            reason: BackupReasonCode::IntegrityFailed,
             size_bytes: Some(size),
             checksum_sha256: Some(checksum),
         }),
-        Ok(false) => Ok(failed_verification(
+        Err(_) => Ok(LocatedVerification::Damaged {
+            reason: BackupReasonCode::DatabaseUnreadable,
+            size_bytes: Some(size),
+            checksum_sha256: Some(checksum),
+        }),
+    }
+}
+
+/// Verify one backup bundle by id.
+///
+/// Thin projection of `locate_and_verify` onto the P6-S6 verification result
+/// contract; the rules themselves live in `locate_and_verify` so the Restore
+/// pre-flight cannot drift from the explicit verification path.
+pub(crate) fn verify_backup(
+    app_config_dir: &Path,
+    backup_id: &str,
+) -> Result<BackupVerifyResultDto, BackupInventoryError> {
+    // Normalize (and reject a non-UUID id) BEFORE touching the filesystem so the
+    // error precedence of P6-S6 is preserved exactly.
+    let requested = Uuid::parse_str(backup_id.trim())
+        .map_err(|e| BackupInventoryError::RequestInvalid(format!("backup id is not a UUID: {e}")))?
+        .to_string();
+
+    match locate_and_verify(app_config_dir, backup_id)? {
+        LocatedVerification::Verified {
+            size_bytes,
+            checksum_sha256,
+            ..
+        } => Ok(BackupVerifyResultDto {
+            backup_id: requested,
+            verification_status: BackupVerificationStatus::Verified,
+            reason_code: None,
+            size_bytes: Some(size_bytes),
+            checksum_sha256: Some(checksum_sha256),
+        }),
+        LocatedVerification::Damaged {
+            reason,
+            size_bytes,
+            checksum_sha256,
+        } => Ok(failed_verification(
             &requested,
-            BackupReasonCode::IntegrityFailed,
-            Some(size),
-            Some(checksum),
-        )),
-        Err(_) => Ok(failed_verification(
-            &requested,
-            BackupReasonCode::DatabaseUnreadable,
-            Some(size),
-            Some(checksum),
+            reason,
+            size_bytes,
+            checksum_sha256,
         )),
     }
 }

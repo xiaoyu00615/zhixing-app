@@ -28,6 +28,7 @@
 
 mod backup;
 mod backup_inventory;
+mod backup_restore;
 mod bootstrap;
 mod canvas;
 mod commands;
@@ -58,7 +59,8 @@ pub enum RuntimeStatus {
     Degraded(DegradedCause),
 }
 
-/// 结构化退化原因（严格三类：Bootstrap / DataRoot / Database + Tauri PathResolver 合成）。
+/// 结构化退化原因（严格三类：Bootstrap / DataRoot / Database + Tauri PathResolver 合成）
+/// 加 P6-S8R Native Restore 启动恢复门（Restore）。
 #[derive(Debug)]
 pub enum DegradedCause {
     /// Bootstrap 子系统错误（Missing/Valid/Degraded 流程本身、bootstrap.json 读写、Candidate commit）。
@@ -67,6 +69,11 @@ pub enum DegradedCause {
     DataRoot(Issue),
     /// Database 子系统错误（打开、PRAGMA、FTS5、SELECT 1 sanity、父目录存在性验证）。
     Database(Issue),
+    /// Backup/Restore 子系统错误（P6-S8R 进程启动恢复门：存在未决 Restore 操作，且磁盘真值
+    /// 无法证明安全状态 —— 既非已知 target、亦非已知 original）。
+    /// 🔒 绝不能与 Database migration failure / DataRoot missing 混同：三者语义不同，
+    ///    UI / 诊断面板必须能独立识别 `subsystem = "backup_restore"`。
+    Restore(Issue),
     /// Tauri PathResolver::app_config_dir / app_local_data_dir 返回 Err 时的结构化信息。
     /// 框架级：不归属三大子系统；Issue 统一结构保留 subsystem=path_resolver / kind / message。
     PathResolver(Issue),
@@ -186,6 +193,23 @@ impl From<db::error::DbError> for Issue {
     }
 }
 
+/// P6-S8R：Restore 启动恢复门的结构化降级原因。
+///
+/// subsystem 固定 `"backup_restore"`，kind 为稳定的机器可读 token
+/// （`RESTORE_RECOVERY_*`，见 `backup_restore::RestoreRecoveryBlockerCode::kind`）。
+/// 未来 UI / 诊断面板可用 subsystem 精确匹配，或用 kind 前缀识别
+/// `RESTORE_RECOVERY_REQUIRED` 这一整类。
+impl From<backup_restore::RestoreRecoveryBlocker> for Issue {
+    fn from(blocker: backup_restore::RestoreRecoveryBlocker) -> Self {
+        Self {
+            subsystem: "backup_restore",
+            kind: blocker.code.kind().into(),
+            path: blocker.path,
+            message: blocker.detail,
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     diagnostics::init_tracing();
@@ -261,7 +285,9 @@ pub fn run() {
             maintenance::native_maintenance_exit,
             backup::native_backup_create,
             backup_inventory::native_backup_list,
-            backup_inventory::native_backup_verify
+            backup_inventory::native_backup_verify,
+            backup_restore::native_backup_restore_apply,
+            backup_restore::native_backup_restore_reconcile
         ])
         .setup(|app| {
             // 🔒 冻结 §3：路径统一通过 PathResolver。
@@ -384,6 +410,15 @@ fn run_bootstrap_pipeline_with_migrations<S: db::snapshot::SnapshotProvider>(
             match DataRootService::get_and_ensure(&loaded.data_root, InitMode::Existing) {
                 Ok((data_root, manifest)) => {
                     let db_path = DataRootService::resolve_database_path(&data_root, &manifest);
+                    // 🔒 P6-S8R 启动恢复门：必须发生在任何「生产策略」数据库打开之前。
+                    // 进程崩溃会丢失内存 owner，但 metadata/restore/<opId>/operation.json
+                    // 会保留；这里只做只读分类 + terminal journal 落定，绝不修复。
+                    // 未通过 ⇒ Degraded(Restore)：生产 DB 打开次数 = 0、migration = 0。
+                    if let Err(blocker) =
+                        backup_restore::recover_or_classify_pending_operations(&data_root, &manifest)
+                    {
+                        return RuntimeStatus::Degraded(DegradedCause::Restore(blocker.into()));
+                    }
                     // 🔒 P6-F0：Existing 路径必须用 existing-only 打开，严禁 CREATE。
                     // 缺失 zhixing.db 必须 FAIL CLOSED（Degraded），绝不可自动创建替代库。
                     match db::policy::open_existing_configured_connection(&db_path) {
@@ -1122,5 +1157,125 @@ mod tests {
             )
             .unwrap();
         cnt > 0
+    }
+
+    // ============================================================
+    // P6-S8R — Restore startup recovery gate integration
+    // ============================================================
+
+    /// A minimal, valid restore journal: no owner token, no absolute path.
+    fn write_pending_restore_journal(
+        data_root: &std::path::Path,
+        operation_id: &str,
+        expected_target_sha256: &str,
+        original_live_sha256: &str,
+        phase: &str,
+    ) -> std::path::PathBuf {
+        let dir = data_root.join("metadata").join("restore").join(operation_id);
+        fs::create_dir_all(&dir).unwrap();
+        let journal = serde_json::json!({
+            "operation_id": operation_id,
+            "backup_id": "11111111-1111-4111-8111-111111111111",
+            "expected_target_sha256": expected_target_sha256,
+            "original_live_sha256": original_live_sha256,
+            "safety_backup_id": "22222222-2222-4222-8222-222222222222",
+            "phase": phase,
+            "created_at_ms": 1_700_000_000_000i64,
+            "updated_at_ms": 1_700_000_000_000i64,
+        });
+        fs::write(
+            dir.join("operation.json"),
+            serde_json::to_string_pretty(&journal).unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn restore_op_id(n: u8) -> String {
+        format!("00000000-0000-4000-8000-00000000000{n}")
+    }
+
+    /// §11 / §19 — the recovery gate runs BEFORE the production database is
+    /// opened. The live database is absent, so a production open that ran first
+    /// would have reported `Degraded(Database)`; the gate reports
+    /// `Degraded(Restore)` instead, and it never fabricates an empty database.
+    #[test]
+    fn restore_recovery_gate_precedes_the_production_database_open() {
+        let (_t, cfg, local) = sandbox();
+        assert!(matches!(
+            run_bootstrap_pipeline(&cfg, &local),
+            RuntimeStatus::Healthy
+        ));
+        let data_root = load_bootstrap(&cfg).data_root.clone();
+        let db_path = data_root.join("database").join("zhixing.db");
+        assert!(db_path.is_file());
+
+        write_pending_restore_journal(
+            &data_root,
+            &restore_op_id(1),
+            &"aa".repeat(32),
+            &"bb".repeat(32),
+            "PREPARED",
+        );
+        // The live database is gone: if the production open ran first, the
+        // status would be Degraded(Database).
+        fs::remove_file(&db_path).unwrap();
+
+        let status = run_bootstrap_pipeline(&cfg, &local);
+        match &status {
+            RuntimeStatus::Degraded(DegradedCause::Restore(issue)) => {
+                assert_eq!(issue.subsystem, "backup_restore");
+                assert_eq!(issue.kind, "RESTORE_RECOVERY_LIVE_MISSING");
+                assert!(
+                    issue.path.is_some(),
+                    "the offending path must travel with the issue"
+                );
+            }
+            other => panic!("Expected Degraded(Restore), got {other:?}"),
+        }
+        // 🔒 P6-F0：绝不允许因为 Restore journal 存在就新建空库。
+        assert!(!db_path.exists(), "no empty database may ever be created");
+    }
+
+    /// §11 / §19 — with a VALID live database the gate still preempts the rest
+    /// of the pipeline. The same sandbox is Healthy WITHOUT a pending operation
+    /// and `Degraded(Restore)` WITH one, so neither the production open nor the
+    /// migration runner can have executed — and the live file is untouched.
+    #[test]
+    fn restore_recovery_gate_preempts_the_migration_runner() {
+        let (_t, cfg, local) = sandbox();
+        assert!(matches!(
+            run_bootstrap_pipeline(&cfg, &local),
+            RuntimeStatus::Healthy
+        ));
+        let data_root = load_bootstrap(&cfg).data_root.clone();
+        let db_path = data_root.join("database").join("zhixing.db");
+
+        // Control: a second startup over the same Data Root is Healthy.
+        assert!(matches!(
+            run_bootstrap_pipeline(&cfg, &local),
+            RuntimeStatus::Healthy
+        ));
+        let before = fs::read(&db_path).unwrap();
+
+        // A pending operation whose target/original the live db matches neither.
+        write_pending_restore_journal(
+            &data_root,
+            &restore_op_id(2),
+            &"aa".repeat(32),
+            &"bb".repeat(32),
+            "PREPARED",
+        );
+
+        let status = run_bootstrap_pipeline(&cfg, &local);
+        match &status {
+            RuntimeStatus::Degraded(DegradedCause::Restore(issue)) => {
+                assert_eq!(issue.subsystem, "backup_restore");
+                assert_eq!(issue.kind, "RESTORE_RECOVERY_REQUIRED");
+            }
+            other => panic!("Expected Degraded(Restore), got {other:?}"),
+        }
+        // The live database was never opened for write and never migrated.
+        assert_eq!(fs::read(&db_path).unwrap(), before);
     }
 }

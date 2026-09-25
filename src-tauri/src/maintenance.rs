@@ -29,16 +29,29 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
+use uuid::Uuid;
 
 /// Inner synchronized maintenance state.
 struct MaintenanceInner {
     /// Currently active maintenance owner, if any. Its presence CLOSES ordinary
     /// admission — `acquire_operation_permit` rejects while this is `Some`.
+    ///
+    /// P6-S8: the id is a HIGH-ENTROPY `native-maint-<uuid-v4>` rather than a
+    /// predictable monotonic sequence (`native-maint-<n>`). A guessable owner id
+    /// was the one residual weakness of the S4B barrier: anything that could
+    /// spell the next integer could impersonate the owner of a privileged
+    /// maintenance-owned operation. The token is never exposed to the frontend
+    /// (see `src/adapters/native/maintenance.ts`).
     active_owner: Option<String>,
-    /// Monotonic counter used to mint unique, non-reused owner ids per runtime.
-    next_lease_id: u64,
     /// Number of ordinary DB commands currently admitted (permit alive).
     in_flight: u64,
+    /// P6-S8: number of MAINTENANCE-OWNED operations currently admitted
+    /// (`MaintenanceOwnedPermit` alive). Deliberately a SEPARATE counter from
+    /// `in_flight`: an owner operation is not an ordinary operation and must
+    /// never be mistaken for one (or be counted as evidence of ordinary
+    /// quiescence). While this is > 0 the owner may not release the barrier —
+    /// `end_maintenance` fails closed with `MAINTENANCE_BUSY`.
+    owner_ops_in_flight: u64,
 }
 
 /// Shared core. `Arc`-owned so a `NativeDbOperationPermit` can hold a handle to
@@ -64,6 +77,50 @@ pub(crate) struct NativeDbOperationPermit {
     core: Arc<NativeMaintenanceCore>,
     #[cfg(test)]
     drop_log: Option<Arc<Mutex<Vec<&'static str>>>>,
+}
+
+/// RAII token representing one admitted MAINTENANCE-OWNED operation (P6-S8).
+///
+/// **A different type from `NativeDbOperationPermit`, on purpose.** An ordinary
+/// command may never obtain one: `acquire_owner_permit` requires the exact
+/// current owner id, and the two permit types are not interchangeable at the
+/// type level, so an ordinary code path cannot accidentally — or deliberately —
+/// borrow owner authority.
+///
+/// Holding this does NOT lock anything and does NOT close ordinary admission
+/// (that is already closed by the active owner). It only keeps the barrier from
+/// being released underneath a privileged operation: while any owner permit is
+/// alive, `end_maintenance` fails closed with `MAINTENANCE_BUSY` instead of
+/// quietly re-opening ordinary admission.
+///
+/// The `Drop` is panic-safe (poisoned mutex recovered via `into_inner`) but —
+/// unlike the ordinary permit — it must NEVER be shared with, or degenerate
+/// into, the ordinary in-flight semantics: it decrements `owner_ops_in_flight`
+/// only, so a leaked owner permit can never masquerade as ordinary quiescence.
+pub(crate) struct MaintenanceOwnedPermit {
+    core: Arc<NativeMaintenanceCore>,
+}
+
+/// Deliberately opaque: a permit carries no readable state, so a `Debug` render
+/// can never leak an owner id or an internal counter into a log or a test
+/// failure message.
+impl std::fmt::Debug for MaintenanceOwnedPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MaintenanceOwnedPermit")
+    }
+}
+
+impl Drop for MaintenanceOwnedPermit {
+    fn drop(&mut self) {
+        let mut guard = match self.core.inner.lock() {
+            Ok(g) => g,
+            // Even a poisoned mutex must not permanently wedge the barrier.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.owner_ops_in_flight > 0 {
+            guard.owner_ops_in_flight -= 1;
+        }
+    }
 }
 
 /// Production connection wrapper so `CommandDbLease` can be generic over the
@@ -137,8 +194,8 @@ impl NativeMaintenanceState {
             core: Arc::new(NativeMaintenanceCore {
                 inner: Mutex::new(MaintenanceInner {
                     active_owner: None,
-                    next_lease_id: 0,
                     in_flight: 0,
+                    owner_ops_in_flight: 0,
                 }),
                 condvar: Condvar::new(),
             }),
@@ -169,10 +226,14 @@ impl NativeMaintenanceState {
         })
     }
 
-    /// Close ordinary admission and allocate a unique owner id.
+    /// Close ordinary admission and allocate a unique, HIGH-ENTROPY owner id.
     ///
     /// Fails deterministically if a maintenance owner is already active (no
     /// unbounded maintenance queue).
+    ///
+    /// P6-S8: the id is `native-maint-<uuid-v4>`. Ownership is the ONLY thing
+    /// that authorizes a maintenance-owned operation, so it must not be
+    /// guessable from a previous lease id.
     pub(crate) fn begin_maintenance(&self) -> Result<String, NativeMaintenanceErrorDto> {
         let mut guard = match self.core.inner.lock() {
             Ok(g) => g,
@@ -184,10 +245,50 @@ impl NativeMaintenanceState {
                 message: "Another maintenance session is already active.",
             });
         }
-        let owner_id = format!("native-maint-{}", guard.next_lease_id);
-        guard.next_lease_id += 1;
+        let owner_id = format!("native-maint-{}", Uuid::new_v4());
         guard.active_owner = Some(owner_id.clone());
         Ok(owner_id)
+    }
+
+    /// Acquire a permit for one MAINTENANCE-OWNED operation (P6-S8).
+    ///
+    /// Semantics (frozen): the caller must present the EXACT current owner id.
+    /// On success `owner_ops_in_flight` is incremented and a
+    /// `MaintenanceOwnedPermit` — a type NO ordinary command can obtain — is
+    /// returned.
+    ///
+    /// Every failure mode fails closed and mutates nothing:
+    ///   - no active owner      → `MAINTENANCE_NOT_ACTIVE`
+    ///   - a different/stale id → `MAINTENANCE_OWNER_MISMATCH`
+    ///
+    /// Possessing a `MaintenanceOwnedPermit` is NOT permission to write
+    /// anything: it is the proof that the caller is the barrier's owner, so the
+    /// caller may perform the privileged work *inside* the already-acquired
+    /// barrier. Ordinary admission stays closed for the whole time.
+    pub(crate) fn acquire_owner_permit(
+        &self,
+        owner_id: &str,
+    ) -> Result<MaintenanceOwnedPermit, NativeMaintenanceErrorDto> {
+        let mut guard = match self.core.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match guard.active_owner.as_deref() {
+            Some(current) if current == owner_id => {
+                guard.owner_ops_in_flight += 1;
+                Ok(MaintenanceOwnedPermit {
+                    core: Arc::clone(&self.core),
+                })
+            }
+            Some(_) => Err(NativeMaintenanceErrorDto {
+                code: "MAINTENANCE_OWNER_MISMATCH",
+                message: "Provided owner id is not the active maintenance owner.",
+            }),
+            None => Err(NativeMaintenanceErrorDto {
+                code: "MAINTENANCE_NOT_ACTIVE",
+                message: "No maintenance session is active.",
+            }),
+        }
     }
 
     /// Block (off the sync command thread) until every admitted ordinary
@@ -234,10 +335,16 @@ impl NativeMaintenanceState {
     /// Release the barrier.
     ///
     /// - No active owner → safe NO-OP success (matches Web owner contract).
-    /// - `lease_id` matches the current owner → release; ordinary admission
-    ///   resumes.
-    /// - `lease_id` is wrong/stale → failure; the current barrier stays active
-    ///   (a stale owner can never release a newer owner).
+    /// - `lease_id` matches the current owner AND no maintenance-owned operation
+    ///   is in flight → release; ordinary admission resumes.
+    /// - `lease_id` matches but a maintenance-owned operation IS in flight →
+    ///   `MAINTENANCE_BUSY`; the barrier REMAINS ACTIVE. We never wait for the
+    ///   operation and never release underneath it. This is the P6-S8 hard gate:
+    ///   even if the frontend wrongly calls `restore` and `lease.release()`
+    ///   concurrently, Rust cannot re-open ordinary admission while a
+    ///   destructive restore is mid-flight.
+    /// - `lease_id` is wrong/stale → `MAINTENANCE_OWNER_MISMATCH`; the current
+    ///   barrier stays active (a stale owner can never release a newer owner).
     pub(crate) fn end_maintenance(
         &self,
         lease_id: &str,
@@ -249,6 +356,16 @@ impl NativeMaintenanceState {
         match guard.active_owner {
             None => Ok(()),
             Some(ref current) if current == lease_id => {
+                if guard.owner_ops_in_flight > 0 {
+                    // Fail closed: the barrier stays exactly as it is. The
+                    // frontend maps this to BLOCKED and keeps the SAME lease
+                    // retry-capable, so a later release after the operation
+                    // settled succeeds.
+                    return Err(NativeMaintenanceErrorDto {
+                        code: "MAINTENANCE_BUSY",
+                        message: "A maintenance-owned operation is still in flight.",
+                    });
+                }
                 guard.active_owner = None;
                 Ok(())
             }
@@ -256,6 +373,15 @@ impl NativeMaintenanceState {
                 code: "MAINTENANCE_OWNER_MISMATCH",
                 message: "Provided lease id is not the active maintenance owner.",
             }),
+        }
+    }
+
+    /// Test/diagnostic helper: current maintenance-owned in-flight count.
+    #[cfg(test)]
+    pub(crate) fn owner_ops_in_flight_count(&self) -> u64 {
+        match self.core.inner.lock() {
+            Ok(g) => g.owner_ops_in_flight,
+            Err(poisoned) => poisoned.into_inner().owner_ops_in_flight,
         }
     }
 
@@ -655,6 +781,206 @@ mod tests {
         let _owner = state.begin_maintenance().unwrap();
         assert_eq!(crate::commands::native_ping(), "pong");
         let owner = state.active_owner_id().unwrap();
+        state.end_maintenance(&owner).unwrap();
+    }
+
+    // ============================================================
+    // P6-S8 — owner authorization matrix
+    // ============================================================
+
+    /// O-A — the owner id is a high-entropy, well-formed, non-reused token: it
+    /// carries a UUID v4 and two successive sessions never collide.
+    #[test]
+    fn o_a_owner_id_is_random_uuid_and_unique() {
+        let state = Arc::new(NativeMaintenanceState::new());
+        let mut seen = Vec::new();
+        for _ in 0..64 {
+            let owner = state.begin_maintenance().expect("begin");
+            let raw = owner
+                .strip_prefix("native-maint-")
+                .expect("owner id must carry the native-maint- prefix");
+            let uuid = Uuid::parse_str(raw).expect("owner suffix must be a UUID");
+            assert_eq!(uuid.get_version_num(), 4, "owner must be a UUID v4");
+            assert!(
+                !seen.contains(&raw.to_string()),
+                "owner ids must never be reused"
+            );
+            seen.push(raw.to_string());
+            state.end_maintenance(&owner).unwrap();
+        }
+        assert_eq!(seen.len(), 64);
+    }
+
+    /// O-B — owner permit: the exact owner id is accepted, ordinary admission
+    /// stays closed, and the granted permit is an owner permit (not an ordinary
+    /// one — a distinct type, so this is a compile-time property too).
+    #[test]
+    fn o_b_owner_permit_exact_match() {
+        let state = NativeMaintenanceState::new();
+        let owner = state.begin_maintenance().unwrap();
+        let permit: MaintenanceOwnedPermit = state.acquire_owner_permit(&owner).expect("permit");
+        assert_eq!(state.owner_ops_in_flight_count(), 1);
+        assert!(
+            state.acquire_operation_permit().is_none(),
+            "ordinary admission stays closed while the owner works"
+        );
+        drop(permit);
+        assert_eq!(state.owner_ops_in_flight_count(), 0);
+        state.end_maintenance(&owner).unwrap();
+    }
+
+    /// O-C — a wrong owner id is rejected and mutates nothing.
+    #[test]
+    fn o_c_wrong_owner_rejected() {
+        let state = NativeMaintenanceState::new();
+        let owner = state.begin_maintenance().unwrap();
+        let err = state.acquire_owner_permit("native-maint-00000000-0000-4000-8000-000000000000");
+        assert!(err.is_err());
+        assert_eq!(err.unwrap_err().code, "MAINTENANCE_OWNER_MISMATCH");
+        assert_eq!(
+            state.owner_ops_in_flight_count(),
+            0,
+            "a rejected permit must not be counted"
+        );
+        // The real owner is still the only one who can work/release.
+        state.acquire_owner_permit(&owner).expect("real owner");
+        state.end_maintenance(&owner).unwrap();
+    }
+
+    /// O-D — a stale owner id (a lease that has already been released) is
+    /// rejected; it can never act inside a newer barrier.
+    #[test]
+    fn o_d_stale_owner_rejected() {
+        let state = NativeMaintenanceState::new();
+        let stale = state.begin_maintenance().unwrap();
+        state.end_maintenance(&stale).unwrap();
+
+        let fresh = state.begin_maintenance().unwrap();
+        let err = state.acquire_owner_permit(&stale);
+        assert!(err.is_err());
+        assert_eq!(err.unwrap_err().code, "MAINTENANCE_OWNER_MISMATCH");
+        assert_eq!(state.owner_ops_in_flight_count(), 0);
+        // The fresh owner is unaffected.
+        state.acquire_owner_permit(&fresh).expect("fresh owner");
+        drop(state.acquire_owner_permit(&fresh).unwrap());
+        state.end_maintenance(&fresh).unwrap();
+    }
+
+    /// O-E — with NO active barrier there is no owner to prove, so no owner
+    /// permit can be obtained (fail closed, never "owner-less privileged work").
+    #[test]
+    fn o_e_no_active_owner_rejected() {
+        let state = NativeMaintenanceState::new();
+        let err = state.acquire_owner_permit("native-maint-whatever");
+        assert!(err.is_err());
+        assert_eq!(err.unwrap_err().code, "MAINTENANCE_NOT_ACTIVE");
+        assert_eq!(state.owner_ops_in_flight_count(), 0);
+        // Ordinary work is unaffected by a failed owner request.
+        assert!(state.acquire_operation_permit().is_some());
+    }
+
+    /// O-F — during an active barrier an ordinary permit is DENIED, while the
+    /// correct owner permit is ALLOWED. The two admission paths never blur.
+    #[test]
+    fn o_f_ordinary_denied_owner_allowed() {
+        let state = NativeMaintenanceState::new();
+        let owner = state.begin_maintenance().unwrap();
+        assert!(state.acquire_operation_permit().is_none(), "ordinary denied");
+        let permit = state.acquire_owner_permit(&owner).expect("owner allowed");
+        assert!(state.acquire_operation_permit().is_none(), "ordinary still denied");
+        drop(permit);
+        state.end_maintenance(&owner).unwrap();
+        assert!(state.acquire_operation_permit().is_some(), "ordinary resumes");
+    }
+
+    /// O-G — `owner_ops_in_flight` counts owner operations only; ordinary
+    /// in-flight bookkeeping is untouched by owner permits and vice versa.
+    #[test]
+    fn o_g_owner_ops_count_is_separate_from_ordinary() {
+        let state = NativeMaintenanceState::new();
+
+        // Two ordinary operations before the barrier.
+        let ordinary_a = state.acquire_operation_permit().unwrap();
+        let ordinary_b = state.acquire_operation_permit().unwrap();
+        assert_eq!(state.in_flight_count(), 2);
+        assert_eq!(
+            state.owner_ops_in_flight_count(),
+            0,
+            "ordinary permits must never be counted as owner operations"
+        );
+        drop(ordinary_a);
+        drop(ordinary_b);
+
+        let owner = state.begin_maintenance().unwrap();
+        let first = state.acquire_owner_permit(&owner).unwrap();
+        let second = state.acquire_owner_permit(&owner).unwrap();
+        assert_eq!(state.owner_ops_in_flight_count(), 2);
+        assert_eq!(
+            state.in_flight_count(),
+            0,
+            "owner permits must never be counted as ordinary in-flight"
+        );
+        drop(first);
+        assert_eq!(state.owner_ops_in_flight_count(), 1);
+        drop(second);
+        assert_eq!(state.owner_ops_in_flight_count(), 0);
+        state.end_maintenance(&owner).unwrap();
+    }
+
+    /// O-H — THE hard gate: while an owner operation is in flight,
+    /// `end_maintenance` fails with `MAINTENANCE_BUSY`, the barrier REMAINS
+    /// ACTIVE (ordinary admission stays closed), and it is not silently
+    /// released later. Once the owner permit drops, the SAME owner can release
+    /// successfully.
+    #[test]
+    fn o_h_end_maintenance_busy_while_owner_op_active() {
+        let state = NativeMaintenanceState::new();
+        let owner = state.begin_maintenance().unwrap();
+        let permit = state.acquire_owner_permit(&owner).expect("owner permit");
+
+        let busy = state.end_maintenance(&owner);
+        assert!(busy.is_err(), "release must fail while an owner op is active");
+        assert_eq!(busy.unwrap_err().code, "MAINTENANCE_BUSY");
+        assert!(
+            state.acquire_operation_permit().is_none(),
+            "the barrier must REMAIN active after MAINTENANCE_BUSY"
+        );
+        assert_eq!(state.active_owner_id().as_deref(), Some(owner.as_str()));
+
+        // A retry while still busy fails identically — never a silent release.
+        assert_eq!(
+            state.end_maintenance(&owner).unwrap_err().code,
+            "MAINTENANCE_BUSY"
+        );
+
+        // Drop the owner operation → the owner can now release.
+        drop(permit);
+        assert_eq!(state.owner_ops_in_flight_count(), 0);
+        state.end_maintenance(&owner).expect("release after op settled");
+        assert!(state.acquire_operation_permit().is_some(), "ordinary resumes");
+    }
+
+    /// O-I — the ordinary permit's `Drop` and the owner permit's `Drop` are
+    /// independent: an ordinary permit releasing does not unblock a BUSY
+    /// release, and the owner-op drop does not disturb ordinary bookkeeping.
+    #[test]
+    fn o_i_owner_op_drop_does_not_share_ordinary_semantics() {
+        let state = Arc::new(NativeMaintenanceState::new());
+        let owner = state.begin_maintenance().unwrap();
+        let owner_permit = state.acquire_owner_permit(&owner).unwrap();
+
+        // An ordinary permit cannot even be obtained here; but even if an
+        // ordinary count existed it must not let the release through.
+        assert!(state.acquire_operation_permit().is_none());
+        assert_eq!(
+            state.end_maintenance(&owner).unwrap_err().code,
+            "MAINTENANCE_BUSY"
+        );
+
+        // Drop order irrelevant: only the owner-op counter gates the release.
+        drop(owner_permit);
+        assert_eq!(state.in_flight_count(), 0);
+        assert_eq!(state.owner_ops_in_flight_count(), 0);
         state.end_maintenance(&owner).unwrap();
     }
 }

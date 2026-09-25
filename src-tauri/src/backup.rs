@@ -64,6 +64,9 @@ pub(crate) const STAGING_PREFIX: &str = ".creating_";
 pub(crate) const BUNDLE_PREFIX: &str = "backup_";
 /// Fixed subdirectory of the Data Root that holds user backups.
 pub(crate) const BACKUP_DIR_NAME: &str = "backup";
+/// Fixed subdirectory of the Data Root that holds non-user metadata (P6-S8
+/// Restore journals / staging live below it).
+pub(crate) const METADATA_DIR_NAME: &str = "metadata";
 /// Manifest file name inside a bundle directory.
 pub(crate) const MANIFEST_FILENAME: &str = "manifest.json";
 
@@ -218,7 +221,7 @@ pub(crate) struct BackupResultDto {
 
 /// The authoritative current schema version, derived from the production
 /// migration list (never hardcoded; an empty list is handled without panic).
-fn current_schema_version() -> u32 {
+pub(crate) fn current_schema_version() -> u32 {
     MIGRATIONS.last().map(|m| m.version).unwrap_or(0)
 }
 
@@ -281,23 +284,48 @@ pub(crate) fn resolve_existing_backup_root(data_root: &Path) -> Result<PathBuf, 
     }
 }
 
-/// Create a full backup bundle. `_permit` is held for the whole operation so the
-/// strong-maintenance drain can observe the backup as in-flight.
-pub(crate) fn create_backup(
-    app_config_dir: &Path,
-    _permit: NativeDbOperationPermit,
+/// Resolve the `metadata/` root under an authoritative Data Root.
+///
+/// `metadata/` is a FirstBoot-created fixed subdir. Under an Existing Data Root
+/// a missing `metadata/` FAILS CLOSED — the fixed Root layout is never repaired
+/// implicitly. Only the runtime-created descendants
+/// (`metadata/restore/`, `metadata/restore/<operationId>/`) may be created.
+///
+/// Shared with the Restore subsystem.
+pub(crate) fn resolve_existing_metadata_root(data_root: &Path) -> Result<PathBuf, String> {
+    let metadata_root = data_root.join(METADATA_DIR_NAME);
+    match fs::metadata(&metadata_root) {
+        Ok(meta) if meta.is_dir() => Ok(metadata_root),
+        Ok(_) => Err("metadata root exists but is not a directory".into()),
+        Err(e) => Err(format!("metadata root missing: {e}")),
+    }
+}
+
+/// Build AND publish one verified Backup V1 bundle from an authorized live
+/// source.
+///
+/// This is the single shared primitive behind BOTH bundle producers:
+///   - ordinary Backup  — `create_backup()`, called under an ordinary
+///     `NativeDbOperationPermit`, and
+///   - Restore Safety Backup — `backup_restore`, called under a
+///     `MaintenanceOwnedPermit`.
+/// Both produce an indistinguishable, legitimate Backup V1 bundle.
+///
+/// It deliberately does NOT acquire any permit: refusal-before-mutation is the
+/// caller's responsibility, so this function can never open the source database
+/// without admission having been proven first.
+pub(crate) fn build_and_publish_backup_bundle(
+    data_root: &Path,
+    data_manifest: &DataRootManifest,
 ) -> Result<BackupResultDto, BackupError> {
-    // 1. Authoritative Data Root (Valid bootstrap + Existing mode).
-    let (data_root, data_manifest) = resolve_data_root(app_config_dir)?;
-
-    // 2. `backup/` is a FirstBoot-created fixed subdir. Under an existing Data
-    //    Root a missing backup root FAILS CLOSED — never auto-create it.
+    // `backup/` is a FirstBoot-created fixed subdir. Under an existing Data Root
+    // a missing backup root FAILS CLOSED — never auto-create it.
     let backup_root =
-        resolve_existing_backup_root(&data_root).map_err(BackupError::DestinationInvalid)?;
+        resolve_existing_backup_root(data_root).map_err(BackupError::DestinationInvalid)?;
 
-    // 3. Operation-owned staging directory. One backup == one self-contained
-    //    directory; nothing is written into the final location until every
-    //    check has passed.
+    // Operation-owned staging directory. One backup == one self-contained
+    // directory; nothing is written into the final location until every check
+    // has passed.
     let backup_id = Uuid::new_v4().to_string();
     let created_at_ms = now_ms();
     let staging = backup_root.join(format!("{STAGING_PREFIX}{backup_id}"));
@@ -306,7 +334,7 @@ pub(crate) fn create_backup(
     })?;
 
     // From here on, any failure must only remove THIS operation's staging dir.
-    let built = build_bundle(&staging, &data_root, &data_manifest, &backup_id, created_at_ms)
+    let built = build_bundle(&staging, data_root, data_manifest, &backup_id, created_at_ms)
         .and_then(|entry| {
             publish_bundle(&staging, &backup_root, created_at_ms, &backup_id).map(
                 |bundle_name| BackupResultDto {
@@ -331,6 +359,19 @@ pub(crate) fn create_backup(
         best_effort_remove_dir(&staging);
     }
     built
+}
+
+/// Create a full backup bundle. `_permit` is held for the whole operation so the
+/// strong-maintenance drain can observe the backup as in-flight.
+pub(crate) fn create_backup(
+    app_config_dir: &Path,
+    _permit: NativeDbOperationPermit,
+) -> Result<BackupResultDto, BackupError> {
+    // 1. Authoritative Data Root (Valid bootstrap + Existing mode).
+    let (data_root, data_manifest) = resolve_data_root(app_config_dir)?;
+
+    // 2. Shared bundle primitive (see `build_and_publish_backup_bundle`).
+    build_and_publish_backup_bundle(&data_root, &data_manifest)
 }
 
 /// Build the bundle contents inside `staging`, returning the database entry.

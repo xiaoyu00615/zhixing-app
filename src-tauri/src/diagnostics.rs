@@ -24,6 +24,7 @@ pub(crate) fn record_startup_status(status: &RuntimeStatus) {
         DegradedCause::Bootstrap(issue)
         | DegradedCause::DataRoot(issue)
         | DegradedCause::Database(issue)
+        | DegradedCause::Restore(issue)
         | DegradedCause::PathResolver(issue) => issue,
     };
 
