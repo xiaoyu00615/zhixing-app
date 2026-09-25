@@ -27,6 +27,7 @@
 //! 只有在用户明确授权「清理开发数据」时，才允许触碰真实 AppData / Data Root。
 
 mod backup;
+mod backup_inventory;
 mod bootstrap;
 mod canvas;
 mod commands;
@@ -258,7 +259,9 @@ pub fn run() {
             commands::archive_list,
             maintenance::native_maintenance_enter,
             maintenance::native_maintenance_exit,
-            backup::native_backup_create
+            backup::native_backup_create,
+            backup_inventory::native_backup_list,
+            backup_inventory::native_backup_verify
         ])
         .setup(|app| {
             // 🔒 冻结 §3：路径统一通过 PathResolver。

@@ -53,15 +53,19 @@ const BACKUP_STEP_PAUSE: Duration = Duration::from_millis(1);
 
 /// Backup manifest kind discriminator (never confused with the Data Root
 /// manifest, which uses `"data_root"`).
-const MANIFEST_KIND: &str = "backup";
+pub(crate) const MANIFEST_KIND: &str = "backup";
 /// Backup manifest format version for this slice.
-const FORMAT_VERSION: u32 = 1;
+pub(crate) const FORMAT_VERSION: u32 = 1;
 /// Subdirectory inside a bundle that holds the database file.
 const DATABASE_SUBDIR: &str = "database";
 /// Staging directory prefix inside the `backup/` root.
-const STAGING_PREFIX: &str = ".creating_";
+pub(crate) const STAGING_PREFIX: &str = ".creating_";
 /// Final bundle directory prefix inside the `backup/` root.
-const BUNDLE_PREFIX: &str = "backup_";
+pub(crate) const BUNDLE_PREFIX: &str = "backup_";
+/// Fixed subdirectory of the Data Root that holds user backups.
+pub(crate) const BACKUP_DIR_NAME: &str = "backup";
+/// Manifest file name inside a bundle directory.
+pub(crate) const MANIFEST_FILENAME: &str = "manifest.json";
 
 /// Structured backup failure. The concrete `String` detail is for Rust tracing
 /// only and is never sent to the UI; the UI sees a coarse `code` + safe message.
@@ -241,21 +245,40 @@ pub(crate) fn acquire_backup_permit(
 
 /// Resolve the authoritative Data Root: Valid bootstrap only, Existing mode
 /// only. Never guesses, never falls back, never creates.
-fn resolve_data_root(app_config_dir: &Path) -> Result<(PathBuf, DataRootManifest), BackupError> {
+///
+/// Shared with the Backup inventory / verification subsystem so the resolution
+/// rules exist exactly once. The neutral `String` detail lets each caller map
+/// the failure into its own error model.
+pub(crate) fn resolve_existing_data_root(
+    app_config_dir: &Path,
+) -> Result<(PathBuf, DataRootManifest), String> {
     let bootstrap_path = BootstrapService::bootstrap_path(app_config_dir);
     let loaded = match BootstrapService::load(&bootstrap_path) {
         BootstrapState::Valid(loaded) => loaded,
-        BootstrapState::Missing { .. } => {
-            return Err(BackupError::Unavailable("bootstrap.json missing".into()))
-        }
-        BootstrapState::Degraded(e) => {
-            return Err(BackupError::Unavailable(format!(
-                "bootstrap degraded: {e}"
-            )))
-        }
+        BootstrapState::Missing { .. } => return Err("bootstrap.json missing".into()),
+        BootstrapState::Degraded(e) => return Err(format!("bootstrap degraded: {e}")),
     };
     DataRootService::get_and_ensure(&loaded.data_root, InitMode::Existing)
-        .map_err(|e| BackupError::Unavailable(format!("data root unavailable: {e}")))
+        .map_err(|e| format!("data root unavailable: {e}"))
+}
+
+fn resolve_data_root(app_config_dir: &Path) -> Result<(PathBuf, DataRootManifest), BackupError> {
+    resolve_existing_data_root(app_config_dir).map_err(BackupError::Unavailable)
+}
+
+/// Resolve the `backup/` root under an authoritative Data Root.
+///
+/// `backup/` is a FirstBoot-created fixed subdir. Under an Existing Data Root a
+/// missing root FAILS CLOSED — it is never auto-created.
+///
+/// Shared with the Backup inventory / verification subsystem.
+pub(crate) fn resolve_existing_backup_root(data_root: &Path) -> Result<PathBuf, String> {
+    let backup_root = data_root.join(BACKUP_DIR_NAME);
+    match fs::metadata(&backup_root) {
+        Ok(meta) if meta.is_dir() => Ok(backup_root),
+        Ok(_) => Err("backup root exists but is not a directory".into()),
+        Err(e) => Err(format!("backup root missing: {e}")),
+    }
 }
 
 /// Create a full backup bundle. `_permit` is held for the whole operation so the
@@ -269,20 +292,8 @@ pub(crate) fn create_backup(
 
     // 2. `backup/` is a FirstBoot-created fixed subdir. Under an existing Data
     //    Root a missing backup root FAILS CLOSED — never auto-create it.
-    let backup_root = data_root.join("backup");
-    match fs::metadata(&backup_root) {
-        Ok(meta) if meta.is_dir() => {}
-        Ok(_) => {
-            return Err(BackupError::DestinationInvalid(
-                "backup root exists but is not a directory".into(),
-            ))
-        }
-        Err(e) => {
-            return Err(BackupError::DestinationInvalid(format!(
-                "backup root missing: {e}"
-            )))
-        }
-    }
+    let backup_root =
+        resolve_existing_backup_root(&data_root).map_err(BackupError::DestinationInvalid)?;
 
     // 3. Operation-owned staging directory. One backup == one self-contained
     //    directory; nothing is written into the final location until every
@@ -303,7 +314,7 @@ pub(crate) fn create_backup(
                     created_at_ms,
                     size_bytes: entry.size_bytes,
                     checksum_sha256: entry.sha256.clone(),
-                    bundle_relative_path: format!("backup/{bundle_name}"),
+                    bundle_relative_path: format!("{BACKUP_DIR_NAME}/{bundle_name}"),
                     scope: BackupScopeDto {
                         database_included: true,
                         attachments_included: false,
@@ -419,8 +430,8 @@ fn build_bundle(
 fn write_manifest(staging: &Path, manifest: &BackupManifest) -> Result<(), BackupError> {
     let json = serde_json::to_string_pretty(manifest)
         .map_err(|e| BackupError::ManifestFailed(format!("serialize: {e}")))?;
-    let part_path = staging.join("manifest.json.part");
-    let final_path = staging.join("manifest.json");
+    let part_path = staging.join(format!("{MANIFEST_FILENAME}.part"));
+    let final_path = staging.join(MANIFEST_FILENAME);
     {
         let mut file = fs::File::create(&part_path)
             .map_err(|e| BackupError::ManifestFailed(format!("create part: {e}")))?;
