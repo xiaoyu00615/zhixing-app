@@ -38,6 +38,8 @@ mod diary_db;
 mod diagnostics;
 mod notes_db;
 mod archive_db;
+mod data_root_migration;
+mod platform_atomic_file;
 mod project;
 mod search_db;
 mod storage;
@@ -74,6 +76,11 @@ pub enum DegradedCause {
     /// 🔒 绝不能与 Database migration failure / DataRoot missing 混同：三者语义不同，
     ///    UI / 诊断面板必须能独立识别 `subsystem = "backup_restore"`。
     Restore(Issue),
+    /// Data Root Migration 子系统错误（P6-S9 进程启动恢复门：存在未决的物理 Data Root
+    /// 迁移，且 `bootstrap.json` / target / source 无法证明哪个才是权威根）。
+    /// 🔒 绝不能与 Database **schema** migration 混同：`subsystem = "data_root_migration"`，
+    ///    kind 前缀 `DATA_ROOT_MIGRATION_RECOVERY_`，UI 可整类识别。
+    DataRootMigration(Issue),
     /// Tauri PathResolver::app_config_dir / app_local_data_dir 返回 Err 时的结构化信息。
     /// 框架级：不归属三大子系统；Issue 统一结构保留 subsystem=path_resolver / kind / message。
     PathResolver(Issue),
@@ -210,6 +217,22 @@ impl From<backup_restore::RestoreRecoveryBlocker> for Issue {
     }
 }
 
+/// P6-S9：Data Root Migration 启动恢复门的结构化降级原因。
+///
+/// subsystem 固定 `"data_root_migration"`，kind 为稳定的机器可读 token
+/// （`DATA_ROOT_MIGRATION_RECOVERY_*`）。未来 UI / 诊断面板可用 subsystem 精确匹配，
+/// 或用 kind 前缀识别 `DATA_ROOT_MIGRATION_RECOVERY_*` 这一整类。
+impl From<data_root_migration::MigrationRecoveryBlocker> for Issue {
+    fn from(blocker: data_root_migration::MigrationRecoveryBlocker) -> Self {
+        Self {
+            subsystem: "data_root_migration",
+            kind: blocker.code.kind().into(),
+            path: blocker.path,
+            message: blocker.detail,
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     diagnostics::init_tracing();
@@ -287,7 +310,9 @@ pub fn run() {
             backup_inventory::native_backup_list,
             backup_inventory::native_backup_verify,
             backup_restore::native_backup_restore_apply,
-            backup_restore::native_backup_restore_reconcile
+            backup_restore::native_backup_restore_reconcile,
+            data_root_migration::native_data_root_migration_apply,
+            data_root_migration::native_data_root_migration_reconcile
         ])
         .setup(|app| {
             // 🔒 冻结 §3：路径统一通过 PathResolver。
@@ -359,6 +384,19 @@ fn run_bootstrap_pipeline_with_migrations<S: db::snapshot::SnapshotProvider>(
     snapshot: S,
 ) -> RuntimeStatus {
     let default_data_root = storage_paths::default_data_root(app_local_data_dir);
+
+    // 🔒 P6-S9 启动恢复门（§59 冻结顺序）：
+    //   PathResolver → Data Root Migration 恢复门 → BootstrapService::load → FirstBoot / Existing
+    //
+    // 必须跑在 bootstrap 流水线的**最前面**：迁移 journal 位于 app_config_dir
+    // （不是任何 Data Root），所以无论 bootstrap 当前指向 old root 还是 new root 都能找到它。
+    // 存在未决迁移时，bootstrap 即使缺失也**绝不**进入 FirstBoot（否则会新建一个空 Data Root）。
+    // 门只做只读分类 + terminal journal 落定，绝不 switch / rollback / 清理 / 初始化。
+    if let Err(blocker) =
+        data_root_migration::recover_or_classify_pending_migrations(app_config_dir)
+    {
+        return RuntimeStatus::Degraded(DegradedCause::DataRootMigration(blocker.into()));
+    }
 
     match BootstrapService::load(&BootstrapService::bootstrap_path(app_config_dir)) {
         BootstrapState::Missing { bootstrap_path } => {

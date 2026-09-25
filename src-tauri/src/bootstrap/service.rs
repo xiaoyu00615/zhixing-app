@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::platform_atomic_file::{atomic_replace_file, write_file_durable};
+
 use super::{device_id::DeviceId, error::*, BOOTSTRAP_FILENAME, BOOTSTRAP_VERSION};
 
 /// Bootstrap 服务句柄。不持有状态；接受路径入参以便可测试。
@@ -169,4 +171,108 @@ impl BootstrapCandidate {
             bootstrap_path: self.path.clone(),
         })
     }
+}
+
+/// Why an atomic `data_root` re-point did not happen.
+///
+/// Deliberately NARROW and non-leaking: the detail is Rust-side diagnosis only
+/// and never crosses the Tauri boundary (the migration maps it into its own
+/// stable machine codes).
+#[derive(Debug, thiserror::Error)]
+pub enum BootstrapRewriteError {
+    /// `bootstrap.json` is missing / unreadable / unsupported. Nothing written.
+    #[error("bootstrap.json is not loadable: {0}")]
+    Unavailable(String),
+    /// The current `data_root` is NOT the expected one. Another state already
+    /// changed the bootstrap, so this operation must NOT overwrite it.
+    #[error("bootstrap.json data_root has changed since the migration started")]
+    Changed,
+    /// The new bootstrap could not be written / atomically installed.
+    #[error("bootstrap.json rewrite failed: {0}")]
+    Write(String),
+}
+
+/// P6-S9 §37–§40 — narrow, purpose-built atomic re-point of `data_root`.
+///
+/// This is deliberately NOT a general "rewrite bootstrap" API:
+///
+/// - it preserves `bootstrap_version` and `device_id` (a migration must never
+///   regenerate a device identity, §68, and never doubles as a bootstrap schema
+///   upgrade, §69);
+/// - it changes ONLY `data_root`;
+/// - it RE-READS `bootstrap.json` immediately before switching and requires the
+///   current `data_root` to equal `expected_current_data_root`, so it can never
+///   clobber a bootstrap that some other state already moved (§38);
+/// - it installs the new content with the OS atomic-replace primitive rather
+///   than `fs::rename` over an existing file, which on Windows is not a
+///   write-through replace (§40).
+///
+/// On success the file at `bootstrap_path` describes `new_data_root`; on ANY
+/// failure the previous bootstrap is left exactly as it was.
+pub fn rewrite_data_root_atomically(
+    bootstrap_path: &Path,
+    expected_current_data_root: &Path,
+    new_data_root: &Path,
+) -> Result<LoadedBootstrap, BootstrapRewriteError> {
+    if !new_data_root.is_absolute() {
+        return Err(BootstrapRewriteError::Write(
+            "the new data root must be an absolute path".into(),
+        ));
+    }
+
+    // Expected-old check FIRST: the switch is authorized only against the exact
+    // root this operation started from.
+    let current = match BootstrapService::load(bootstrap_path) {
+        BootstrapState::Valid(loaded) => loaded,
+        BootstrapState::Missing { .. } => {
+            return Err(BootstrapRewriteError::Unavailable(
+                "bootstrap.json is missing".into(),
+            ))
+        }
+        BootstrapState::Degraded(e) => {
+            return Err(BootstrapRewriteError::Unavailable(format!(
+                "bootstrap.json degraded: {e}"
+            )))
+        }
+    };
+    if current.data_root != expected_current_data_root {
+        return Err(BootstrapRewriteError::Changed);
+    }
+
+    // Preserve version + device identity; change ONLY the root.
+    let payload = BootstrapJson {
+        bootstrap_version: current.bootstrap_version,
+        device_id: current.device_id.clone(),
+        data_root: new_data_root.to_path_buf(),
+    };
+    let json = serde_json::to_string_pretty(&payload).expect("序列化 BootstrapJson 不会失败");
+
+    let parent = bootstrap_path
+        .parent()
+        .expect("bootstrap_path 必须是文件路径，应有父目录")
+        .to_path_buf();
+    if !parent.exists() {
+        fs::create_dir_all(&parent).map_err(|source| {
+            BootstrapRewriteError::Write(format!("create config dir: {source}"))
+        })?;
+    }
+
+    // Durable temp file in the SAME directory (same volume) → sync_all → ONE OS
+    // atomic replace of the existing bootstrap.json.
+    let tmp_path = bootstrap_path.with_extension("json.migrating");
+    write_file_durable(&tmp_path, json.as_bytes())
+        .map_err(|source| BootstrapRewriteError::Write(format!("write temp bootstrap: {source}")))?;
+
+    if let Err(failure) = atomic_replace_file(bootstrap_path, &tmp_path, None) {
+        // The old bootstrap is untouched; drop our temp file best-effort.
+        let _ = fs::remove_file(&tmp_path);
+        return Err(BootstrapRewriteError::Write(failure.detail()));
+    }
+
+    Ok(LoadedBootstrap {
+        bootstrap_version: current.bootstrap_version,
+        device_id: current.device_id.clone(),
+        data_root: new_data_root.to_path_buf(),
+        bootstrap_path: bootstrap_path.to_path_buf(),
+    })
 }

@@ -92,7 +92,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
@@ -114,6 +114,10 @@ use crate::db::policy::open_existing_configured_connection;
 use crate::maintenance::{
     MaintenanceOwnedPermit, NativeMaintenanceErrorDto, NativeMaintenanceState,
 };
+// P6-S9 §41: the Windows atomic replace (and its bounded retry) was extracted
+// into a narrow shared OS primitive so Native Data Root Migration does not
+// hand-roll a second `ReplaceFileW` call site. Semantics are UNCHANGED here.
+use crate::platform_atomic_file::{atomic_replace_file, AtomicReplaceFailure};
 use crate::storage::manifest::{DataRootManifest, DB_RELATIVE_PATH};
 use crate::storage::DataRootService;
 
@@ -136,10 +140,6 @@ const REJECTED_DB_FILENAME: &str = "rejected.db";
 const SIDECARS_DIR_NAME: &str = "sidecars";
 /// Exact derived sidecar suffixes of the live database file.
 const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
-/// Fixed, small upper bound on OS atomic-replace attempts (1 + retries).
-const REPLACE_MAX_ATTEMPTS: u32 = 6;
-/// Fixed, short delay between those attempts. No unbounded backoff.
-const REPLACE_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -855,38 +855,6 @@ fn quarantine_sidecars(
 // The platform atomic replace
 // ============================================================
 
-/// One attempt's outcome.
-enum ReplaceAttempt {
-    Done,
-    /// Another process holds a handle (or a lock) on one of the files. Retryable
-    /// within a fixed bound.
-    Contended(String),
-    /// Any other failure. Not retryable.
-    Failed(String),
-}
-
-/// Bounded retry: a FIXED upper bound and a FIXED short delay. No infinite
-/// loop, no unbounded backoff, no "sleep a bit longer and hope".
-fn run_with_bounded_retry<F>(mut attempt: F) -> Result<(), ReplaceAttempt>
-where
-    F: FnMut() -> ReplaceAttempt,
-{
-    let mut attempt_number: u32 = 0;
-    loop {
-        attempt_number += 1;
-        match attempt() {
-            ReplaceAttempt::Done => return Ok(()),
-            ReplaceAttempt::Failed(detail) => return Err(ReplaceAttempt::Failed(detail)),
-            ReplaceAttempt::Contended(detail) => {
-                if attempt_number >= REPLACE_MAX_ATTEMPTS {
-                    return Err(ReplaceAttempt::Contended(detail));
-                }
-                std::thread::sleep(REPLACE_RETRY_DELAY);
-            }
-        }
-    }
-}
-
 /// Why a bounded run of OS atomic replacements did not produce a switch.
 #[derive(Debug)]
 enum SwitchFailure {
@@ -901,74 +869,23 @@ enum SwitchFailure {
 }
 
 /// ONE platform atomic replace, with a rollback copy, as a single step.
-#[cfg(windows)]
+///
+/// The OS call itself now lives in [`crate::platform_atomic_file`] (P6-S9 §41)
+/// so Native Data Root Migration reuses it instead of hand-rolling a second
+/// `ReplaceFileW`. Every Restore guarantee — one atomic step, the displaced
+/// database kept as the rollback candidate, a fixed retry bound, and a
+/// fail-closed answer on platforms without the primitive — is unchanged.
 fn atomic_replace_live_database(
     live: &Path,
     replacement: &Path,
     rollback: &Path,
 ) -> Result<(), SwitchFailure> {
-    match run_with_bounded_retry(|| replace_file_once(live, replacement, rollback)) {
+    match atomic_replace_file(live, replacement, Some(rollback)) {
         Ok(()) => Ok(()),
-        Err(ReplaceAttempt::Failed(detail)) => Err(SwitchFailure::CouldNotSwitch(detail)),
-        Err(_) => Err(SwitchFailure::CouldNotSwitch(
-            "the operating system refused the atomic replace after bounded retries".into(),
-        )),
-    }
-}
-
-/// Non-Windows: Restore V1 has NO atomic-replace primitive, so it fails closed
-/// BEFORE touching anything. Android gets its own implementation in a later
-/// slice; the shared restore domain never mentions Windows concepts.
-#[cfg(not(windows))]
-fn atomic_replace_live_database(
-    _live: &Path,
-    _replacement: &Path,
-    _rollback: &Path,
-) -> Result<(), SwitchFailure> {
-    Err(SwitchFailure::UnsupportedPlatform)
-}
-
-/// `ReplaceFileW` — replace `live` with `replacement`, saving the previous
-/// `live` to `rollback`, in ONE operating-system operation.
-#[cfg(windows)]
-fn replace_file_once(live: &Path, replacement: &Path, rollback: &Path) -> ReplaceAttempt {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::{
-        GetLastError, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
-    };
-    use windows_sys::Win32::Storage::FileSystem::{ReplaceFileW, REPLACEFILE_WRITE_THROUGH};
-
-    fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0u16))
-            .collect()
-    }
-
-    let live_w = wide(live);
-    let replacement_w = wide(replacement);
-    let rollback_w = wide(rollback);
-    // SAFETY: all three pointers are NUL-terminated UTF-16 buffers that outlive
-    // the call; the two reserved parameters are documented as NULL.
-    let ok = unsafe {
-        ReplaceFileW(
-            live_w.as_ptr(),
-            replacement_w.as_ptr(),
-            rollback_w.as_ptr(),
-            REPLACEFILE_WRITE_THROUGH,
-            std::ptr::null(),
-            std::ptr::null(),
-        )
-    };
-    if ok != 0 {
-        return ReplaceAttempt::Done;
-    }
-    let code = unsafe { GetLastError() };
-    let detail = format!("replace file failed (win32 error {code})");
-    if code == ERROR_SHARING_VIOLATION || code == ERROR_LOCK_VIOLATION {
-        ReplaceAttempt::Contended(detail)
-    } else {
-        ReplaceAttempt::Failed(detail)
+        Err(AtomicReplaceFailure::CouldNotReplace(detail)) => {
+            Err(SwitchFailure::CouldNotSwitch(detail))
+        }
+        Err(AtomicReplaceFailure::UnsupportedPlatform) => Err(SwitchFailure::UnsupportedPlatform),
     }
 }
 
@@ -1931,6 +1848,9 @@ mod tests {
         list_backups, verify_backup, BackupInventoryStatus, BackupVerificationStatus,
     };
     use crate::maintenance::NativeMaintenanceState;
+    // The bounded-retry primitive now lives in the shared OS module (P6-S9
+    // §41); its contract is proven here, from the Restore side.
+    use crate::platform_atomic_file::{run_with_bounded_retry, ReplaceAttempt, REPLACE_MAX_ATTEMPTS};
     use serde_json::json;
     use std::sync::Arc;
     use tempfile::tempdir;

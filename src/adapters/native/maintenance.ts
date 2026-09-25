@@ -17,20 +17,40 @@
  *
  * The native owner id (`native-maint-<uuid-v4>`) returned by
  * `native_maintenance_enter` is the ONLY thing that authorizes a
- * maintenance-owned operation (a database restore). It is therefore treated as a
- * secret and kept in a closure owned by this module:
+ * maintenance-owned operation. It is therefore treated as a secret and kept in
+ * closures owned by this module:
  *
- *   - it is never returned to the Coordinator / React / the shared restore
+ *   - it is never returned to the Coordinator / React / any restore or migration
  *     domain, and it is deliberately NOT reachable through any accessor — there
  *     is no `getToken()`, no `rawOwnerId()`, and no token field anywhere;
- *   - the only way to use it is `ownerCapability()`, which hands out an object
- *     with EXACTLY two methods, each bound to ONE privileged Tauri command. The
- *     raw token appears only as an argument inside those two closures.
+ *   - there is deliberately NO generic `invokeAsMaintenanceOwner(command, args)`
+ *     helper: a generic privileged command bus would turn "may restore" into
+ *     "may run anything as the barrier owner", which is exactly the escalation
+ *     this design refuses.
  *
- * There is deliberately NO generic `invokeAsMaintenanceOwner(command, args)`
- * helper: a generic privileged command bus would turn "may restore" into "may
- * run anything as the barrier owner", which is exactly the escalation this
- * design refuses.
+ * ---------------------------------------------------------------------------
+ * P6-S9R · ONE owner, TWO purpose-bound capabilities
+ * ---------------------------------------------------------------------------
+ *
+ * Restore privilege is NOT Data Root Migration privilege. A single capability
+ * object carrying all four commands would mean "whoever may restore may also
+ * move the whole Data Root", which is not the authority model this task is
+ * granted. So the ONE owner token yields TWO independent capabilities, each with
+ * exactly two hard-wired commands:
+ *
+ *   restore capability    -> native_backup_restore_apply
+ *                            native_backup_restore_reconcile
+ *   migration capability  -> native_data_root_migration_apply
+ *                            native_data_root_migration_reconcile
+ *
+ * The separation is real, not cosmetic: each is constructed by its own builder,
+ * typed by its own interface, and handed out through its own narrow source. No
+ * consumer ever receives an object that answers both purposes, so no `Pick<...>`
+ * narrowing at the call site is needed — or even possible.
+ *
+ * The raw token appears only as an argument inside the closures below. It is
+ * still ONE token shared by both capabilities: being handed a capability is not
+ * a way to obtain the other one, and neither capability can reach it.
  */
 
 import { invoke } from '@tauri-apps/api/core'
@@ -45,6 +65,8 @@ const ENTER_COMMAND = 'native_maintenance_enter'
 const EXIT_COMMAND = 'native_maintenance_exit'
 const RESTORE_APPLY_COMMAND = 'native_backup_restore_apply'
 const RESTORE_RECONCILE_COMMAND = 'native_backup_restore_reconcile'
+const MIGRATION_APPLY_COMMAND = 'native_data_root_migration_apply'
+const MIGRATION_RECONCILE_COMMAND = 'native_data_root_migration_reconcile'
 
 /**
  * Strict parse of the enter response. Returns null on ANY malformation so a
@@ -73,11 +95,23 @@ export interface MaintenanceOwnedRestoreRequest {
 }
 
 /**
- * The ONLY privileged surface a maintenance owner hands out (P6-S8).
+ * One maintenance-owned Data Root Migration request (P6-S9).
  *
- * Purpose-bound by construction: two methods, each hard-wired to one Tauri
- * command, and nothing else. The raw owner id is captured in the closure that
- * builds this object and never leaves it.
+ * `targetDataRoot` is the user's own destination folder — the same value the
+ * caller already holds — and never a hidden platform path. It is the ONLY path
+ * this request carries.
+ */
+export interface MaintenanceOwnedMigrationRequest {
+  readonly operationId: string
+  readonly targetDataRoot: string
+}
+
+/**
+ * The RESTORE surface (P6-S8). Exactly two methods, nothing else.
+ *
+ * Purpose-bound by construction: each method is hard-wired to ONE Tauri command
+ * (the two restore ones) inside `buildRestoreOwnerCapability`, and there is no
+ * third method, no command-name parameter, and no generic invoke.
  *
  * The returned values are UNVALIDATED transport payloads; re-validating them is
  * the consuming adapter's job, so a malformed payload can never be mistaken for
@@ -89,9 +123,26 @@ export interface MaintenanceOwnerCapability {
 }
 
 /**
- * A source of the current owner capability. Implemented by
+ * The DATA ROOT MIGRATION surface (P6-S9R). Exactly two methods, nothing else.
+ *
+ * Deliberately a SEPARATE interface sharing nothing with
+ * `MaintenanceOwnerCapability`: "may restore" must not imply "may move the whole
+ * Data Root". Both capabilities are derived from the same hidden owner token,
+ * but neither can reach the other, and no object ever answers both purposes.
+ */
+export interface DataRootMigrationOwnerCapability {
+  applyDataRootMigration(
+    request: MaintenanceOwnedMigrationRequest,
+  ): Promise<unknown>
+  reconcileDataRootMigration(
+    request: MaintenanceOwnedMigrationRequest,
+  ): Promise<unknown>
+}
+
+/**
+ * A source of the current RESTORE capability. Implemented by
  * `NativeMaintenancePort`; typed separately so the restore adapter depends on
- * the narrow contract instead of the whole maintenance port.
+ * this narrow contract — and can never see a migration method even structurally.
  */
 export interface MaintenanceOwnerCapabilitySource {
   /**
@@ -103,12 +154,23 @@ export interface MaintenanceOwnerCapabilitySource {
 }
 
 /**
- * Bind the raw owner id into two command-specific closures.
+ * A source of the current DATA ROOT MIGRATION capability. The analogue of
+ * `MaintenanceOwnerCapabilitySource` for the migration purpose — implemented by
+ * the same port, consumed by a different adapter, and never interchangeable with
+ * the restore one.
+ */
+export interface DataRootMigrationCapabilitySource {
+  dataRootMigrationCapability(): DataRootMigrationOwnerCapability | null
+}
+
+/**
+ * Bind the raw owner id into the two RESTORE closures.
  *
  * `ownerLeaseId` is captured here and appears ONLY as an argument of the two
  * `invoke` calls below — it is never returned, stored on an object, or logged.
+ * It accepts no command name and produces no migration method.
  */
-function buildOwnerCapability(
+function buildRestoreOwnerCapability(
   ownerLeaseId: string,
 ): MaintenanceOwnerCapability {
   return {
@@ -125,21 +187,60 @@ function buildOwnerCapability(
   }
 }
 
+/**
+ * Bind the raw owner id into the two DATA ROOT MIGRATION closures.
+ *
+ * The SAME hidden token is reused — one owner legitimately holds several
+ * purpose-bound authorities — but this builder yields nothing the restore surface
+ * exposes, just as the restore builder yields nothing this one exposes.
+ */
+function buildDataRootMigrationCapability(
+  ownerLeaseId: string,
+): DataRootMigrationOwnerCapability {
+  return {
+    applyDataRootMigration: ({
+      operationId,
+      targetDataRoot,
+    }: MaintenanceOwnedMigrationRequest): Promise<unknown> =>
+      invoke(MIGRATION_APPLY_COMMAND, {
+        ownerLeaseId,
+        operationId,
+        targetDataRoot,
+      }),
+    reconcileDataRootMigration: ({
+      operationId,
+      targetDataRoot,
+    }: MaintenanceOwnedMigrationRequest): Promise<unknown> =>
+      invoke(MIGRATION_RECONCILE_COMMAND, {
+        ownerLeaseId,
+        operationId,
+        targetDataRoot,
+      }),
+  }
+}
+
 export class NativeMaintenancePort
-  implements PersistenceMaintenancePort, MaintenanceOwnerCapabilitySource
+  implements
+    PersistenceMaintenancePort,
+    MaintenanceOwnerCapabilitySource,
+    DataRootMigrationCapabilitySource
 {
   /**
-   * The current owner capability, or null. The raw owner token itself lives
-   * INSIDE the closure this holds — it is never stored as a field, so nothing
-   * can read it off this instance.
+   * The two current capabilities, or null. The raw owner token itself lives
+   * INSIDE the closures these point at — it is never stored as a field, so
+   * nothing can read it off this instance.
    *
-   * A TRUE ECMAScript private field, not the `private` keyword: a TypeScript
+   * TRUE ECMAScript private fields, not the `private` keyword: a TypeScript
    * `private` member is compile-time only and still exists as an own,
    * enumerable property at runtime, so anyone holding this port could read
-   * `.capability` — or spread the object — and walk away with a live privileged
-   * capability. `#` makes that unreachable from outside the class.
+   * `.restoreCapability` — or spread the object — and walk away with a live
+   * privileged capability. `#` makes that unreachable from outside the class.
+   *
+   * They are two SEPARATE fields rather than one object holding both purposes:
+   * a holder of one capability can never obtain the other, even by accident.
    */
-  #capability: MaintenanceOwnerCapability | null = null
+  #restoreCapability: MaintenanceOwnerCapability | null = null
+  #migrationCapability: DataRootMigrationOwnerCapability | null = null
 
   async enterStrongMaintenance(): Promise<PersistenceMaintenanceLease> {
     let raw: unknown
@@ -166,14 +267,16 @@ export class NativeMaintenancePort
       )
     }
 
-    // Publish the purpose-bound capability for the whole lifetime of this lease.
-    this.#capability = buildOwnerCapability(nativeOwnerId)
+    // Publish BOTH purpose-bound capabilities for the whole lifetime of this
+    // lease: one authority each, both derived from the same hidden token.
+    this.#restoreCapability = buildRestoreOwnerCapability(nativeOwnerId)
+    this.#migrationCapability = buildDataRootMigrationCapability(nativeOwnerId)
 
     // The RAW native owner id is never exposed. The lease handed back carries an
-    // OPAQUE, local-only identity, and the token survives only inside the two
-    // closures above (capability) and below (release). Nothing outside this
-    // function can read it — not the Coordinator, not React, not the restore
-    // domain, and not a consumer of `lease.leaseId`.
+    // OPAQUE, local-only identity, and the token survives only inside the four
+    // closures above (capabilities) and below (release). Nothing outside this
+    // function can read it — not the Coordinator, not React, not the restore or
+    // migration domain, and not a consumer of `lease.leaseId`.
     const leaseId = `native-lease-${crypto.randomUUID()}`
 
     // Single-flight release: concurrent release() calls collapse into one invoke;
@@ -206,10 +309,13 @@ export class NativeMaintenancePort
             'Native maintenance exit rejected; barrier release unproven',
           )
         }
-        // ONLY after a proven release: retract the capability. A failed exit
-        // (e.g. `MAINTENANCE_BUSY` while a restore is still in flight) keeps it,
-        // because the barrier is still held and the same lease stays retryable.
-        this.#capability = null
+        // ONLY after a proven release: retract BOTH capabilities. A failed exit
+        // (e.g. `MAINTENANCE_BUSY` while an operation is still in flight) keeps
+        // them, because the barrier is still held and the same lease stays
+        // retryable. One barrier, one lifetime — never one capability released
+        // while the other outlives it.
+        this.#restoreCapability = null
+        this.#migrationCapability = null
         released = true
         releasePromise = null
       })()
@@ -223,7 +329,11 @@ export class NativeMaintenancePort
   }
 
   ownerCapability(): MaintenanceOwnerCapability | null {
-    return this.#capability
+    return this.#restoreCapability
+  }
+
+  dataRootMigrationCapability(): DataRootMigrationOwnerCapability | null {
+    return this.#migrationCapability
   }
 }
 
