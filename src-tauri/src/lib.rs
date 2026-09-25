@@ -26,6 +26,7 @@
 //! 测试异常状态 → 仅允许：tempfile::TempDir / sandbox / 测试专用路径。
 //! 只有在用户明确授权「清理开发数据」时，才允许触碰真实 AppData / Data Root。
 
+mod backup;
 mod bootstrap;
 mod canvas;
 mod commands;
@@ -256,7 +257,8 @@ pub fn run() {
             commands::trash_list,
             commands::archive_list,
             maintenance::native_maintenance_enter,
-            maintenance::native_maintenance_exit
+            maintenance::native_maintenance_exit,
+            backup::native_backup_create
         ])
         .setup(|app| {
             // 🔒 冻结 §3：路径统一通过 PathResolver。
