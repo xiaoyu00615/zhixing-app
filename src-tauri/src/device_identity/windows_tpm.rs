@@ -237,62 +237,58 @@ mod tests {
     /// not about this machine having a TPM: a machine with no TPM is a perfectly valid
     /// environment for Gate B, and reporting `NotFound` here would then be a pass, not a
     /// failure.
+    /// §25 / §14-§17 — run a REAL probe on this machine and HARDEN the assertions.
+    ///
+    /// - `Available` ⇒ the TPM-backed Platform Crypto Provider MUST open, its impl-type
+    ///   query MUST succeed, and it MUST report hardware backing (§15). A bare `eprintln`
+    ///   is not enough: a missing hardware flag is a capability failure, not a pass.
+    /// - `NotFound` ⇒ a valid environment; the selection must be `SoftwareCng` (§16).
+    /// - `ProbeFailed` ⇒ capability validation could NOT be measured. This MUST NOT count
+    ///   as a pass (§17): "could not measure" is not "no TPM". Fail loudly, preserving the
+    ///   raw status.
     #[test]
     fn real_machine_probe_is_classified_and_reported() {
         let outcome = probe_tpm();
+        let selection = select_identity_backend(&outcome);
         match outcome {
-            TpmProbeOutcome::Available {
-                tpm_version,
-                interface_type,
-            } => {
-                eprintln!(
-                    "GATE_B tbs_result=TBS_SUCCESS tpm_version={tpm_version:?} tpm_interface_type={interface_type}"
-                );
+            TpmProbeOutcome::Available { .. } => {
+                eprintln!("GATE_B tbs_result=TBS_SUCCESS — verifying platform provider");
                 let probe = inspect_platform_crypto_provider();
+                // §15 — when a TPM is reported, the TPM-backed provider MUST be openable and
+                // MUST report hardware backing; otherwise capability validation fails.
+                assert!(
+                    probe.opened,
+                    "TPM available but Platform Crypto Provider did not open: {probe:?}"
+                );
+                assert_eq!(
+                    probe.open_status, 0,
+                    "platform provider open status must be success: {probe:?}"
+                );
+                assert!(
+                    probe.impl_type.is_some(),
+                    "impl_type query must succeed once the provider opened: {probe:?}"
+                );
+                assert!(
+                    probe.hardware_backed(),
+                    "the platform provider must report hardware backing: {probe:?}"
+                );
                 eprintln!("GATE_B provider={PLATFORM_PROVIDER_LABEL} {:?}", probe);
-                if probe.opened {
-                    eprintln!(
-                        "GATE_B impl_type={:?} hardware_backed={}",
-                        probe.impl_type,
-                        probe.hardware_backed()
-                    );
-                }
+                assert_eq!(selection, IdentityBackendSelection::PlatformCng);
             }
             TpmProbeOutcome::NotFound => {
                 eprintln!(
                     "GATE_B tbs_result=TBS_E_TPM_NOT_FOUND (0x{:08X}) — software fallback path",
                     TBS_E_TPM_NOT_FOUND as u32
                 );
+                assert_eq!(selection, IdentityBackendSelection::SoftwareCng);
             }
             TpmProbeOutcome::ProbeFailed { status } => {
-                eprintln!("GATE_B tbs_result=0x{status:08X} (probe failed, no silent fallback)");
-            }
-        }
-
-        // Whatever the machine says, the probe must land in exactly one of the three
-        // distinguishable outcomes, and the decision derived from it must be consistent.
-        let selection = select_identity_backend(&outcome);
-        match outcome {
-            TpmProbeOutcome::Available { .. } => {
-                assert_eq!(selection, IdentityBackendSelection::PlatformCng)
-            }
-            TpmProbeOutcome::NotFound => {
-                assert_eq!(selection, IdentityBackendSelection::SoftwareCng)
-            }
-            TpmProbeOutcome::ProbeFailed { status } => {
-                match selection {
-                    IdentityBackendSelection::Error(error) => {
-                        assert_eq!(error.kind(), "TpmProbeFailed");
-                        // The raw status must survive all the way into the error value.
-                        assert_eq!(
-                            error,
-                            super::super::IdentityBackendError::TpmProbeFailed { status }
-                        );
-                    }
-                    other => {
-                        panic!("an unexpected probe failure must not select a backend: {other:?}")
-                    }
-                }
+                // §17 — capability validation could not be measured. This is NOT a pass:
+                // the raw status is preserved and the test fails loudly.
+                panic!(
+                    "GATE_B capability validation could NOT be measured (probe failed 0x{status:08X}). \
+                     This is not a pass — 'could not measure' != 'no TPM'."
+                );
             }
         }
     }

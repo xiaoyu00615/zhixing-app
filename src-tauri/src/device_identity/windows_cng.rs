@@ -21,6 +21,7 @@
 
 use super::IdentityBackendError;
 use windows_sys::core::PCWSTR;
+use windows_sys::Win32::Foundation::NTE_BAD_KEYSET;
 use windows_sys::Win32::Security::Cryptography::{
     NCryptCreatePersistedKey, NCryptDeleteKey, NCryptExportKey, NCryptFinalizeKey,
     NCryptFreeObject, NCryptGetProperty, NCryptOpenKey, NCryptOpenStorageProvider,
@@ -79,6 +80,11 @@ pub(crate) struct GateAReport {
     /// Independent, black-box proof that the key is gone: re-opening it by name fails.
     /// A status code alone is not proof of absence (§17).
     pub cleanup_verified_absent: bool,
+    /// Raw `SECURITY_STATUS` of the `NCryptFreeObject` that released the still-owned key
+    /// handle AFTER a `NCryptDeleteKey` failure (§4). `None` when deletion succeeded (no
+    /// extra free needed, none performed). Retained so a delete-failure's handle-release
+    /// step is observable and never silently swallowed.
+    pub cleanup_release_status: Option<u32>,
     pub first_error: Option<IdentityBackendError>,
 }
 
@@ -99,6 +105,7 @@ impl GateAReport {
             private_export_succeeded: false,
             cleanup_status: None,
             cleanup_verified_absent: false,
+            cleanup_release_status: None,
             first_error: None,
         }
     }
@@ -187,23 +194,86 @@ impl PersistedTestKey {
     /// makes the explicit call in [`run_gate_a`] and the `Drop` backstop safe to
     /// combine.
     ///
-    /// On failure the handle is deliberately NOT freed with `NCryptFreeObject`: if the
-    /// deletion did take effect, freeing the handle would be a double free, and guessing
-    /// is not acceptable for a safety-relevant handle. The key identifier is reported to
-    /// the caller instead, so a human can remove the key by hand (§17).
-    fn delete(&mut self) -> Option<u32> {
+    /// The ownership rule is encoded in [`classify_delete_outcome`] (§3): a successful
+    /// `NCryptDeleteKey` *consumes* the handle (the key object is destroyed), so it must
+    /// NOT be freed again; a failed `NCryptDeleteKey` leaves the key — and the still-owned
+    /// handle — intact, so the handle is released with `NCryptFreeObject` to avoid a leak.
+    /// The outcome (the delete status plus the release status) is returned so neither can
+    /// be silently lost (§4).
+    fn delete(&mut self) -> Option<DeleteOutcome> {
         let handle = self.handle.take()?;
-        // SAFETY: `handle` is a live persisted-key handle owned by this value, and it is
-        // taken out of `self` first so it can never be passed twice. `NCryptDeleteKey`
-        // consumes the handle: the key object is destroyed, and the handle is not freed
-        // separately afterwards.
-        Some(unsafe { NCryptDeleteKey(handle, 0) } as u32)
+        // SAFETY: `handle` is a live persisted-key handle owned by this value, taken out of
+        // `self` first so it can never be passed twice.
+        let status = unsafe { NCryptDeleteKey(handle, 0) };
+        let release_after_delete_failure_status = match classify_delete_outcome(status) {
+            DeleteHandleAction::ConsumedByDelete => {
+                // SUCCESS: the handle was consumed by `NCryptDeleteKey`. Freeing it again
+                // would be a double free, so nothing more is done (§3).
+                None
+            }
+            DeleteHandleAction::FreeAfterFailure => {
+                // FAILURE: the key still exists and `handle` is still owned by the caller.
+                // Release it to avoid a handle leak (§3).
+                // SAFETY: `handle` is a live, still-owned key handle (the delete did not
+                // consume it).
+                Some(unsafe { NCryptFreeObject(handle) } as u32)
+            }
+        };
+        Some(DeleteOutcome {
+            delete_status: status as u32,
+            release_after_delete_failure_status,
+        })
     }
 }
 
 impl Drop for PersistedTestKey {
     fn drop(&mut self) {
+        // Best-effort: `Drop` cannot return the outcome. `delete` already releases the
+        // handle on the failure path, so this never leaks (§5). It also never panics and
+        // never touches secret material.
         self.delete();
+    }
+}
+
+/// Pure ownership rule for a `NCryptDeleteKey` result (§3).
+///
+/// Kept separate from the FFI call so the rule is unit-testable without forcing a real
+/// Windows key-store failure (§22).
+#[derive(Debug, PartialEq)]
+pub(crate) enum DeleteHandleAction {
+    /// `NCryptDeleteKey` succeeded → the handle is consumed; no extra `NCryptFreeObject`.
+    ConsumedByDelete,
+    /// `NCryptDeleteKey` failed → the handle is still owned → release it with
+    /// `NCryptFreeObject` to avoid a leak.
+    FreeAfterFailure,
+}
+
+/// Decides the cleanup ownership action for a raw `NCryptDeleteKey` status (§3).
+pub(crate) fn classify_delete_outcome(delete_status: i32) -> DeleteHandleAction {
+    if delete_status == CNG_SUCCESS {
+        DeleteHandleAction::ConsumedByDelete
+    } else {
+        DeleteHandleAction::FreeAfterFailure
+    }
+}
+
+/// Outcome of [`PersistedTestKey::delete`] (§3 / §4).
+///
+/// Both pieces of evidence are retained so a cleanup failure is never mistaken for success,
+/// and the best-effort handle release after a failed delete is itself observable.
+#[derive(Debug, PartialEq)]
+pub(crate) struct DeleteOutcome {
+    /// Raw `SECURITY_STATUS` of `NCryptDeleteKey`.
+    pub delete_status: u32,
+    /// Raw `SECURITY_STATUS` of the `NCryptFreeObject` that released the still-owned handle
+    /// after a delete failure. `None` when deletion succeeded (no extra free needed or done).
+    pub release_after_delete_failure_status: Option<u32>,
+}
+
+impl DeleteOutcome {
+    /// `true` iff the deletion itself succeeded.
+    pub fn succeeded(&self) -> bool {
+        self.delete_status == CNG_SUCCESS as u32
     }
 }
 
@@ -488,24 +558,53 @@ fn query_private_export_required_size(
     }
 }
 
+/// Tri-state result of a read-only presence probe (§6 / §7).
+///
+/// Only `NTE_BAD_KEYSET` may be read as "absent". Any other non-success status is treated as
+/// "the probe could not determine the answer" and must NOT be flattened into "absent" —
+/// "could not prove it is gone" is not the same as "it is gone" (fail-closed, §8 / §9).
+#[derive(Debug, PartialEq)]
+pub(crate) enum PersistedKeyPresence {
+    /// The key is present (the open succeeded).
+    Present,
+    /// The key is absent. Only ever produced for `NTE_BAD_KEYSET` (§7).
+    Absent,
+    /// The probe failed for a reason other than "key not there". The raw status travels so
+    /// the failure is never mis-reported as "deleted" (§8 / §9).
+    ProbeFailed { status: u32 },
+}
+
+/// Pure classifier for a raw `NCryptOpenKey` status (§10). Kept separate from the FFI call so
+/// the tri-state rule is unit-testable without touching the real key store.
+pub(crate) fn classify_open_key_status(status: i32) -> PersistedKeyPresence {
+    if status == CNG_SUCCESS {
+        PersistedKeyPresence::Present
+    } else if status == NTE_BAD_KEYSET as i32 {
+        PersistedKeyPresence::Absent
+    } else {
+        PersistedKeyPresence::ProbeFailed {
+            status: status as u32,
+        }
+    }
+}
+
 /// Read-only presence probe. Frees the handle it opens and never deletes anything, which
 /// is what makes it usable as proof that a deletion already happened (§17).
-fn persisted_key_is_present(provider: &CngProviderHandle, key_name: &str) -> (bool, u32) {
+fn persisted_key_is_present(provider: &CngProviderHandle, key_name: &str) -> PersistedKeyPresence {
     let name = wide(key_name);
     let mut handle: NCRYPT_KEY_HANDLE = 0;
     // SAFETY: the provider handle is live, `name` is a NUL-terminated UTF-16 buffer that
     // outlives the call, and `handle` is a valid out-parameter.
     let status = unsafe { NCryptOpenKey(provider.raw(), &mut handle, name.as_ptr(), 0, 0) };
-    if status == CNG_SUCCESS {
+    let presence = classify_open_key_status(status);
+    if let PersistedKeyPresence::Present = presence {
         // SAFETY: `handle` was just produced by a successful `NCryptOpenKey` and is not
         // stored anywhere, so it is freed exactly once here.
         unsafe {
             NCryptFreeObject(handle);
         }
-        (true, CNG_SUCCESS as u32)
-    } else {
-        (false, status as u32)
     }
+    presence
 }
 
 // ---------------------------------------------------------------------------
@@ -530,32 +629,49 @@ pub(crate) fn run_gate_a() -> GateAReport {
     // §17 — delete the test key explicitly so its status can be reported, and then prove
     // the deletion independently by re-opening the key by name.
     if let Some(mut key) = slots.key.take() {
-        let status = key.delete();
-        report.cleanup_status = status;
-        if let Some(status) = status {
-            if status != CNG_SUCCESS as u32 {
+        if let Some(outcome) = key.delete() {
+            report.cleanup_status = Some(outcome.delete_status);
+            report.cleanup_release_status = outcome.release_after_delete_failure_status;
+            if !outcome.succeeded() {
+                // The deletion itself failed. The handle was already released on the failure
+                // path (§3), so there is no leak, but cleanup did NOT happen and this must
+                // surface as an error (§4).
                 report
                     .first_error
                     .get_or_insert(IdentityBackendError::CleanupFailed {
                         key_name: key_name.clone(),
-                        status,
+                        status: outcome.delete_status,
                     });
             }
         }
     }
     if let Some(provider) = slots.provider.as_ref() {
-        let (present, open_status) = persisted_key_is_present(provider, &key_name);
-        report.cleanup_verified_absent = !present;
-        if present {
-            // `open_status` is non-zero only when the open failed; when the key is still
-            // present the open SUCCEEDED, so 0 is the truthful status here. The point of
-            // this branch is the key identifier, which travels with the error.
-            report
-                .first_error
-                .get_or_insert(IdentityBackendError::CleanupFailed {
-                    key_name: key_name.clone(),
-                    status: open_status,
-                });
+        match persisted_key_is_present(provider, &key_name) {
+            PersistedKeyPresence::Absent => {
+                // Independent, black-box proof that the key is gone (§17).
+                report.cleanup_verified_absent = true;
+            }
+            PersistedKeyPresence::Present => {
+                // The key is still openable: cleanup did not remove it.
+                report.cleanup_verified_absent = false;
+                report
+                    .first_error
+                    .get_or_insert(IdentityBackendError::CleanupFailed {
+                        key_name: key_name.clone(),
+                        status: CNG_SUCCESS as u32,
+                    });
+            }
+            PersistedKeyPresence::ProbeFailed { status } => {
+                // The probe could not determine presence. "Could not prove absence" must NOT
+                // be reported as "deleted" — fail closed (§8 / §9).
+                report.cleanup_verified_absent = false;
+                report
+                    .first_error
+                    .get_or_insert(IdentityBackendError::KeyPresenceProbeFailed {
+                        key_name: key_name.clone(),
+                        status,
+                    });
+            }
         }
     }
 
@@ -625,7 +741,7 @@ fn gate_a_steps(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows_sys::Win32::Foundation::NTE_EXISTS;
+    use windows_sys::Win32::Foundation::{NTE_EXISTS, NTE_INVALID_HANDLE, NTE_INVALID_PARAMETER};
     use windows_sys::Win32::Security::Cryptography::{
         NCRYPT_ALLOW_EXPORT_FLAG, NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG,
     };
@@ -748,11 +864,11 @@ mod tests {
 
             // Precondition: the committed key is present, so the assertion after the guard
             // runs proves a deletion and not an absent key.
-            let (present, status) =
-                persisted_key_is_present(slots.provider.as_ref().unwrap(), &key_name);
-            assert!(
-                present,
-                "precondition: the finalized test key must exist (open status 0x{status:08X})"
+            let presence = persisted_key_is_present(slots.provider.as_ref().unwrap(), &key_name);
+            assert_eq!(
+                presence,
+                PersistedKeyPresence::Present,
+                "precondition: the finalized test key must exist: {presence:?}"
             );
 
             // A REAL failure from the OS, after the key is committed, with no side effect:
@@ -773,12 +889,15 @@ mod tests {
             // the key.
         }
 
-        // Independent proof of absence.
+        // Independent proof of absence. A `ProbeFailed` here is NOT "deleted": if the
+        // presence probe could not determine the answer, the test must fail loudly rather
+        // than treat the unknown as a success (fail-closed, §8 / §9).
         let provider = open_provider(PROVIDER_NAME, PROVIDER_LABEL).unwrap();
-        let (present, _status) = persisted_key_is_present(&provider, &key_name);
-        assert!(
-            !present,
-            "the cleanup guard must delete the persisted test key on the failure path"
+        let presence = persisted_key_is_present(&provider, &key_name);
+        assert_eq!(
+            presence,
+            PersistedKeyPresence::Absent,
+            "the cleanup guard must delete the persisted test key on the failure path: {presence:?}"
         );
     }
 
@@ -798,20 +917,26 @@ mod tests {
         // (`NCryptOpenKey` answers `NTE_BAD_KEYSET`), so without this the "stays deleted"
         // assertion below would hold even if nothing had ever been deleted.
         finalize_key(handle).expect("finalizing the persisted test key must succeed");
-        let (present, status) = persisted_key_is_present(&provider, &key_name);
-        assert!(
-            present,
-            "precondition: the finalized test key must exist (open status 0x{status:08X})"
+        let presence = persisted_key_is_present(&provider, &key_name);
+        assert_eq!(
+            presence,
+            PersistedKeyPresence::Present,
+            "precondition: the finalized test key must exist: {presence:?}"
         );
 
         let mut key = PersistedTestKey::new(handle);
-        assert_eq!(key.delete(), Some(0), "the first deletion must succeed");
+        let first = key.delete().expect("the first deletion must succeed");
+        assert!(first.succeeded(), "the first deletion must succeed");
         assert_eq!(key.delete(), None, "the second deletion must be a no-op");
         // …and the `Drop` backstop still runs without deleting anything twice.
         drop(key);
 
-        let (present, _status) = persisted_key_is_present(&provider, &key_name);
-        assert!(!present, "the key must stay deleted");
+        let presence = persisted_key_is_present(&provider, &key_name);
+        assert_eq!(
+            presence,
+            PersistedKeyPresence::Absent,
+            "the key must stay deleted: {presence:?}"
+        );
     }
 
     /// §16 — the test-key namespace is dedicated, so no production identity key name can
@@ -877,10 +1002,11 @@ mod tests {
         finalize_key(handle_a).expect("finalizing key A must succeed");
 
         // Precondition: key A is really present, so the duplicate attempt targets a real key.
-        let (present, open_status) = persisted_key_is_present(&provider, &key_name);
-        assert!(
-            present,
-            "precondition: finalized key A must exist (open status 0x{open_status:08X})"
+        let presence = persisted_key_is_present(&provider, &key_name);
+        assert_eq!(
+            presence,
+            PersistedKeyPresence::Present,
+            "precondition: finalized key A must exist: {presence:?}"
         );
 
         // Second create, SAME name, flags = 0 (no `NCRYPT_OVERWRITE_KEY_FLAG`, Current User).
@@ -912,8 +1038,12 @@ mod tests {
         assert_eq!(handle_b, 0, "NTE_EXISTS must not yield a second key handle");
 
         drop(key_a);
-        let (present, _) = persisted_key_is_present(&provider, &key_name);
-        assert!(!present, "key A must be verifiably absent after cleanup");
+        let presence = persisted_key_is_present(&provider, &key_name);
+        assert_eq!(
+            presence,
+            PersistedKeyPresence::Absent,
+            "key A must be verifiably absent after cleanup: {presence:?}"
+        );
 
         eprintln!(
             "DUP_CONTRACT first_key_finalized=true open_by_name=true second_create_flags=0 \
@@ -973,16 +1103,13 @@ mod tests {
         );
 
         // Explicit cleanup, then black-box proof of absence (§17).
-        let cleanup_status = key.delete();
+        let cleanup_outcome = key.delete().expect("deleting the control key must succeed");
+        assert!(cleanup_outcome.succeeded(), "deleting the control key must succeed");
+        let presence = persisted_key_is_present(&provider, &key_name);
         assert_eq!(
-            cleanup_status,
-            Some(0),
-            "deleting the control key must succeed"
-        );
-        let (present, _) = persisted_key_is_present(&provider, &key_name);
-        assert!(
-            !present,
-            "the control key must be verifiably absent afterwards"
+            presence,
+            PersistedKeyPresence::Absent,
+            "the control key must be verifiably absent afterwards: {presence:?}"
         );
 
         eprintln!(
@@ -1101,6 +1228,101 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "the {TEST_KEY_PREFIX} namespace must be empty after the suite: {leftovers:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // §22 — PURE classifier / ownership unit tests (no real key store needed)
+    // -----------------------------------------------------------------------
+
+    /// `SECURITY_STATUS == 0` from `NCryptOpenKey` means the key is present (§6).
+    #[test]
+    fn classify_open_key_status_success_maps_to_present() {
+        assert_eq!(classify_open_key_status(0), PersistedKeyPresence::Present);
+    }
+
+    /// Only `NTE_BAD_KEYSET` may be read as "absent": the key store literally reports
+    /// "no such key set" (§7).
+    #[test]
+    fn classify_open_key_status_bad_keyset_maps_to_absent() {
+        assert_eq!(
+            classify_open_key_status(NTE_BAD_KEYSET as i32),
+            PersistedKeyPresence::Absent
+        );
+    }
+
+    /// Any OTHER non-success status is "the probe could not determine the answer", and
+    /// must NOT be flattened into "absent" (fail-closed, §8 / §9).
+    #[test]
+    fn classify_open_key_status_unexpected_error_maps_to_probe_failed() {
+        let status = NTE_INVALID_HANDLE as i32;
+        match classify_open_key_status(status) {
+            PersistedKeyPresence::ProbeFailed { status: reported } => {
+                assert_eq!(reported, status as u32);
+            }
+            other => panic!("unexpected OpenKey status must be ProbeFailed, got {other:?}"),
+        }
+    }
+
+    /// A second distinct unexpected error is also `ProbeFailed` — the classifier is not
+    /// special-casing one particular failure code (§8).
+    #[test]
+    fn classify_open_key_status_other_unexpected_error_maps_to_probe_failed() {
+        let status = NTE_INVALID_PARAMETER as i32;
+        match classify_open_key_status(status) {
+            PersistedKeyPresence::ProbeFailed { status: reported } => {
+                assert_eq!(reported, status as u32);
+            }
+            other => panic!("unexpected OpenKey status must be ProbeFailed, got {other:?}"),
+        }
+    }
+
+    /// A successful `NCryptDeleteKey` CONSUMES the handle: it must not be freed again
+    /// (double-free), so the ownership action is `ConsumedByDelete` (§3).
+    #[test]
+    fn classify_delete_outcome_success_consumes_handle() {
+        assert_eq!(
+            classify_delete_outcome(0),
+            DeleteHandleAction::ConsumedByDelete
+        );
+    }
+
+    /// A failed `NCryptDeleteKey` leaves the handle owned by the caller: it must be
+    /// released with `NCryptFreeObject` to avoid a leak, so the action is
+    /// `FreeAfterFailure` (§3).
+    #[test]
+    fn classify_delete_outcome_failure_releases_handle() {
+        assert_eq!(
+            classify_delete_outcome(NTE_INVALID_HANDLE as i32),
+            DeleteHandleAction::FreeAfterFailure
+        );
+    }
+
+    /// On success, `DeleteOutcome` records the successful status and NO extra free was
+    /// needed or performed (§3 / §4).
+    #[test]
+    fn delete_outcome_success_has_no_extra_release() {
+        let outcome = DeleteOutcome {
+            delete_status: 0,
+            release_after_delete_failure_status: None,
+        };
+        assert!(outcome.succeeded());
+        assert_eq!(outcome.release_after_delete_failure_status, None);
+    }
+
+    /// On failure, `DeleteOutcome` records the failing status AND keeps the best-effort
+    /// handle-release status observable, so a leak can never be silently swallowed (§4).
+    #[test]
+    fn delete_outcome_failure_keeps_release_status_observable() {
+        let release_status: u32 = NTE_INVALID_HANDLE as u32;
+        let outcome = DeleteOutcome {
+            delete_status: NTE_INVALID_HANDLE as u32,
+            release_after_delete_failure_status: Some(release_status),
+        };
+        assert!(!outcome.succeeded());
+        assert_eq!(
+            outcome.release_after_delete_failure_status,
+            Some(release_status)
         );
     }
 }

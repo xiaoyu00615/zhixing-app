@@ -105,6 +105,11 @@ pub(crate) enum IdentityBackendError {
     /// The dedicated test key could not be deleted. Carries the key identifier so a
     /// human can remove it by hand (§17).
     CleanupFailed { key_name: String, status: u32 },
+    /// The cleanup verification re-open could not determine presence: the key is NOT
+    /// proven absent. Deliberately distinct from [`Self::CleanupFailed`] (which means the
+    /// deletion itself failed) — "could not prove absence" must never be reported as
+    /// "deleted" (§8 / §9, fail-closed).
+    KeyPresenceProbeFailed { key_name: String, status: u32 },
 }
 
 impl IdentityBackendError {
@@ -122,6 +127,7 @@ impl IdentityBackendError {
             Self::TpmNotFound => "TpmNotFound",
             Self::TpmProbeFailed { .. } => "TpmProbeFailed",
             Self::CleanupFailed { .. } => "CleanupFailed",
+            Self::KeyPresenceProbeFailed { .. } => "KeyPresenceProbeFailed",
         }
     }
 
@@ -137,7 +143,8 @@ impl IdentityBackendError {
             | Self::KeyFinalizeFailed { status }
             | Self::PublicExportFailed { status }
             | Self::TpmProbeFailed { status }
-            | Self::CleanupFailed { status, .. } => Some(*status),
+            | Self::CleanupFailed { status, .. }
+            | Self::KeyPresenceProbeFailed { status, .. } => Some(*status),
             Self::ExportPolicyReadBackMismatch { actual, .. } => Some(*actual),
             // Neither of these is an OS status: one is a verdict about an export that
             // must never have succeeded, the other is a condition, not a failure.
@@ -287,6 +294,10 @@ mod tests {
             IdentityBackendError::TpmNotFound,
             IdentityBackendError::TpmProbeFailed { status: 1 },
             IdentityBackendError::CleanupFailed {
+                key_name: "k".into(),
+                status: 1,
+            },
+            IdentityBackendError::KeyPresenceProbeFailed {
                 key_name: "k".into(),
                 status: 1,
             },
