@@ -4,6 +4,8 @@
 日期：2026-08-19  
 状态：CURRENT
 
+> Phase 6 / Phase 7 当前状态段落于 2026-09-26 同步至 baseline `e2b80e19dd95c69558742a6935a1833ef7f90198`。
+
 ## Phase 0｜项目技术评审
 
 ### 目标
@@ -560,6 +562,36 @@ V1 未实现（future / planned）：Diary Archive、Canvas Archive、Permanent 
 - Staging Restore；
 - Hash / DB / Attachment Integrity Check。
 
+### Phase 6 当前状态
+
+> 以上 Storage / Migration / Backup / Restore bullets 是 Phase 6 原始产品 roadmap，予以保留。
+
+状态：**CORE BACKEND CLOSED / PRODUCT SURFACE PARTIAL**。
+
+Core Backend slices：P6-S4 Maintenance Foundation、P6-S5 Native Backup V1、P6-S6 Backup Inventory + Verification、P6-S8 Native Database Restore V1、P6-S9 Native Data Root Migration V1，全部 FORMALLY CLOSED / REMOTE CLOSED。
+
+closeout commit：`e2b80e19dd95c69558742a6935a1833ef7f90198 feat: add native data root migration v1`。
+
+#### Implemented
+
+- Strong Maintenance Foundation（Weak + Strong quiescence、owner-scoped release、`MAINTENANCE_BUSY`）；
+- **Database** Backup V1（Native；SQLite Online Backup + manifest + SHA-256 + `integrity_check` + staging 原子发布）；
+- Backup Inventory / Verification（Native；四态分类；`list` 与 `verify` 分离）；
+- **Database** Restore V1（Native；Safety Backup → staging → 原子替换 → rollback → IPC / 崩溃启动恢复）；
+- **Simple** Data Root Migration V1（Native / Windows；whole-root 保留、原子 bootstrap 切换、rollback、old-root retention、runtime handoff）。
+
+#### Deferred / Not Implemented
+
+- 高级模式分路径（Advanced split storage）；
+- Auto Backup；
+- Portable Settings Backup / Restore；
+- Attachment Backup / Restore；
+- Web Backup / Restore；
+- Backup retention / delete；
+- Phase 6 UI surfaces（Backup History UI、Manual Backup UI、Verify UI、Restore UI、Migration UI、Recovery UI、Auto Backup UI）。
+
+限制：Backup / Restore 为 Database-only，不含 Attachment 与 Portable Settings；Data Root Migration 为 Simple Data Root-only，当前仅 Native / Windows。
+
 ---
 
 ## Phase 7｜LAN Device Sync
@@ -594,6 +626,39 @@ V1 未实现（future / planned）：Diary Archive、Canvas Archive、Permanent 
 Windows <-> Android。
 
 Android UI 设计必须在本 Phase 正式验收前补齐。
+
+### Phase 7 当前状态
+
+状态：**NOT STARTED**。就绪度：**READY FOR ARCHITECTURE DESIGN**（仅架构设计，不含 implementation）。
+
+下一动作（待显式授权）：
+
+```text
+Phase 7 Boundary / Threat / Identity / Sync Model Design
+```
+
+不得直接进入：networking 实现、创建 sync tables、实现 Pair Code。
+
+#### 已具备的 Ready foundation
+
+- `stable device_id`（bootstrap 持久化、重启不变、Data Root Migration 明确保留、不进入 portable backup）；
+- SQLite / 本地域持久化（Task / Note / Diary / Canvas / Search / Archive / Trash / Tag / Project）；
+- migration infrastructure（MigrationRunner + production migration history）；
+- maintenance / data safety barrier（Weak + Strong quiescence、owner permit 与 ordinary permit 分离、fail-closed）。
+
+#### 尚未设计（属 Phase 7 架构设计范围）
+
+- Trust Identity（当前无 keypair / trust store / peer identity / pairing credential / revocation）；
+- Pairing credentials；
+- SyncChange / Revision / Cursor / Tombstone；
+- Conflict model；
+- network transport。
+
+`device_id` 不等于 Trust Identity：它只是稳定设备标识，不含密钥与授信关系。
+
+#### Attachment
+
+当前尚无共享 Attachment / File Asset contract 与 attachment hash model。该缺失**只阻塞 Attachment Sync 子切片**（Hash / Missing File Detection / File Transfer），**不阻塞** Phase 7 架构设计；不得扩大为整个 Phase 7 的 blocker。
 
 ---
 
