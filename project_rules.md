@@ -129,16 +129,18 @@ React Component 不允许直接执行 SQL；业务页面不得直接散落 `db.e
 
 ## 7. 核心实体统一规则
 
-核心实体原则上预留：
+核心业务实体的**业务字段**由各 domain contract 决定；不得仅因旧的通用预留规则，把所有业务表强制成同一字段集合。
+
+当前已确立的通用约定（按各 domain 的真实 Schema 描述，不得据此凭空新增字段）：
 
 - `id`（UUID）；
-- `created_at`；
-- `updated_at`；
-- `deleted_at`；
-- `revision`；
-- `device_id`。
+- `created_at` / `updated_at`；
+- `deleted_at`（Soft Delete）；
+- 需要归档能力的实体优先考虑 `archived_at nullable`。
 
-需要归档能力的实体优先考虑 `archived_at nullable`，最终 Schema 在 Phase 0 批准。
+真实 Schema 以已批准的 migration history 为准；本规则**不得**被解读为要求给现有业务表补 `revision` / `device_id`。
+
+**同步元数据不属于业务实体字段基线。** Phase 7 的同步 identity / revision / causality metadata（`revision`、origin device、causal context、sync tombstone 等）**不得**仅因旧的通用预留规则而强制写入所有业务表。它们是否需要按行存储、还是独立存在于同步层（SyncChange / SyncState / Tombstone / Conflict 等），由 **Phase 7 Sync Data Model** 单独设计；具体物理模型 NOT FROZEN。
 
 核心删除默认 Soft Delete。Permanent Delete 只能从 Trash 发生。
 
@@ -369,9 +371,40 @@ Remove Device = 撤销 Trust；不得远程删除另一设备业务数据，也�
 
 Sync 状态不做多人 Presence 系统，优先使用“可连接 / 不可连接 / 正在同步 / 同步完成 / 需要处理”等设备状态。
 
-不得默认用静默 Last Write Wins 丢弃用户数据。不可安全自动合并时必须进入 Conflict。
+不得默认用静默 Last Write Wins 丢弃用户数据。不可安全自动合并时必须进入 Conflict。**`updatedAtMs` 较新不得自动取胜**（时钟漂移 / 离线 / 并发写使时间戳不足以作为冲突真值）。无法安全自动合并时：保留双方 → 持久 Conflict → 用户解决；Note / Diary 正文 V1 不得静默覆盖。
 
-Attachment Sync 不同步另一设备的实际路径；同步 metadata + hash + file bytes，目标设备由自己的 StorageAdapter 决定保存位置。
+`device_id` **不等于** cryptographic Trust Identity：它只是稳定设备标识，不携带密钥、不能用于认证。Trust Identity 属于 Device-local state，需要密码学身份；**private key / device secret 不得随普通 Database Backup / Restore 被恢复到另一设备**。具体 secret storage backend（例如平台安全存储 / 安全 vault）由后续 P7-S1 研究决定，本规则不选库、不装依赖。
+
+Device-local trust 数据区分两类，**不要求相同物理存储**：
+
+- **DeviceSecret**（private key、pairing secret、其他密码学 secret）：高度敏感 Device-local state；
+- **device-local trust metadata**（trusted peer public identity、fingerprint、display name、revocation status）。
+
+Change capture 必须满足**同事务原子性**：business mutation 与其对应的 SyncChange 必须落在同一事务，不得出现「业务已提交但 sync change 缺失」。具体代码结构（persistence-layer dual-write 等）DEFER 到 Sync Data Model / implementation design。
+
+Change identity **不得**只依赖 `(device_id, restorable monotonic seq)`：Database Restore 会造成 sequence rewind ⇒ identity collision。方向为 globally unique random identity（UUID-style）。
+
+**Restore × Sync 不变量**：Database Restore 可能回滚 business rows / sync journal / cursor / sequence，因此 Phase 7 必须具备 device incarnation / sync epoch 或等价 restore-safe 机制；Restore 成功后不得继续盲信旧 cursor 与旧 sequence identity。**Data Root Migration = same device ≠ new device**，不得仅因 data root 路径变化而旋转 device identity。
+
+因果性：Sync protocol 必须能够区分 causally newer / causally older / concurrent / duplicate；**wall-clock only 不足**。具体 causal representation（Version Vector / Dotted Version Vector / HLC / 其他 bounded causal representation）留待 Sync Data Model slice 决定。
+
+关系（如 `task_tags`）必须解决 add / remove 并发；物理删除必须有 tombstone / deletion event 或等价传播证据。OR-Set 仅为候选，**不是** V1 强制算法。
+
+Search / FTS 是 **derived local projection**，不得作为跨设备业务真值同步；正确方向是 business data sync → 对端本地 triggers / rebuild → 本地 Search projection。
+
+**不参与同步**（NOT SYNCED）：search / FTS projection、`schema_migrations`、backup bundles、restore operation journal、data-root-migration journal、`bootstrap.json`、private trust secrets、device-local paths / settings。
+
+Maintenance：Sync **必须复用** Phase 6 Maintenance admission / barrier；Restore / Data Root Migration 进入 exclusive maintenance 时，已有 sync DB work 必须 drain、新 sync apply 不得进入。**禁止**引入第二套 DB global lock。
+
+Transport：必须是 **authenticated encrypted transport**，需满足 Windows + Android、mutual device authentication、MITM resistance、reconnect、batching、backpressure。候选方向为 Noise-family 或 TLS 1.3 with pinned device identity；最终选择 DEFER 到 transport research。**禁止 custom crypto。**
+
+Sync Engine 实现层面：**Rust Native Core 为 RECOMMENDED ARCHITECTURE DIRECTION**（理由：SQLite transaction、networking、crypto、Windows + Android 复用、maintenance 集成），不是「唯一理论可行方案」。
+
+Phase 7 V1 第一验收目标为 **Windows ↔ Android**；**Web Sync 对 V1 为 OUT OF SCOPE**，共享逻辑模型仍应尽量保持平台无关。
+
+Attachment Sync 不同步另一设备的实际路径；同步 metadata + hash + bytes，目标设备由自己的 StorageAdapter 决定保存位置。Attachment Sync **implementation 当前 BLOCKED**（no shared File Asset contract / no production writer / no hash ownership），但该缺失**不阻塞** Phase 7 核心架构。
+
+P7-S0 冻结粒度：**Boundary / Threat principles / Identity separation / Sync safety invariants = FROZEN**；**exact causal model / exact CRDT·relation algorithm / crypto backend / transport implementation = NOT FROZEN**。
 
 LAN Sync 正式实现只属于 Phase 7。Phase 1–6 最多做接口与数据结构预留。
 

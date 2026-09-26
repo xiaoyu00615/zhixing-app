@@ -4,7 +4,7 @@
 日期：2026-08-19  
 状态：CURRENT
 
-> Phase 6 / Phase 7 当前状态段落于 2026-09-26 同步至 baseline `e2b80e19dd95c69558742a6935a1833ef7f90198`。
+> Phase 6 当前状态段落于 2026-09-26 同步至 baseline `e2b80e19dd95c69558742a6935a1833ef7f90198`；Phase 7 当前状态段落于同日同步 P7-S0 架构设计结论（Human Review PASS）。
 
 ## Phase 0｜项目技术评审
 
@@ -601,9 +601,10 @@ closeout commit：`e2b80e19dd95c69558742a6935a1833ef7f90198 feat: add native dat
 - 同一用户自己的设备；
 - 每台设备独立 SQLite；
 - Peer-to-Peer，无默认主设备；
-- device_id + Trust Identity；
+- `device_id`（稳定设备标识）**≠** Trust Identity（密码学身份）；
 - IP 不是设备身份；
 - 不共享 SQLite 文件；
+- Backup / Restore ≠ Sync；
 - 不默认静默 Last Write Wins。
 
 ### 内容
@@ -629,15 +630,29 @@ Android UI 设计必须在本 Phase 正式验收前补齐。
 
 ### Phase 7 当前状态
 
-状态：**NOT STARTED**。就绪度：**READY FOR ARCHITECTURE DESIGN**（仅架构设计，不含 implementation）。
+- Phase 7 **implementation**：**NOT STARTED**（未写 networking、未创建 sync tables、未实现 Pair Code）。
+- **P7-S0**｜Phase 7 Boundary / Threat / Identity / Sync Model Design：**COMPLETE / HUMAN REVIEW PASS**。
+- Architecture：**PARTIALLY FROZEN**。
+- 本轮概念范围（Device / Pair Code / Trust / SyncChange / Revision / Cursor / Push·Pull·Ack / Tombstone / Conflict / Attachment / Resume / Remove Device）**具体物理模型 NOT FROZEN**，见 P7-S0 报告。
+
+FROZEN（已批准、可正式冻结）：
+
+- Boundary（IN / OUT of scope）与概念职责分离；
+- Threat principles（LAN 不可信、默认 fail-closed）；
+- Identity separation（`device_id` ≠ Trust Identity；Trust Identity 属 Device-local；device secret 不得随 Backup / Restore 跨设备恢复）；
+- Sync safety invariants（同事务原子性、change identity 不得依赖可回滚 seq、Restore × Sync 需 epoch / incarnation、no silent LWW、Search 不同步、maintenance 复用、authenticated encrypted transport 要求）。
+
+NOT FROZEN（留待后续 slice）：exact causal model（VV / Dotted VV / HLC）、exact CRDT·relation 算法（OR-Set 仅候选）、crypto backend、transport implementation、全部物理表结构。
 
 下一动作（待显式授权）：
 
 ```text
-Phase 7 Boundary / Threat / Identity / Sync Model Design
+P7-S1 Device Secret / Trust Store Architecture Research
 ```
 
 不得直接进入：networking 实现、创建 sync tables、实现 Pair Code。
+
+后续 slice（未开始）：P7-S1.5 crypto selection review；P7-S2 Android Target Bring-up（最大未知风险，建议尽早）；P7-S3 Sync Data Model；P7-S4 Change Capture；P7-S5 Transport & Protocol；P7-S6 Pairing & Device Management；P7-S7 Core DB Sync；P7-S8 Conflict Handling；P7-S9 Windows ↔ Android E2E。
 
 #### 已具备的 Ready foundation
 
@@ -646,13 +661,13 @@ Phase 7 Boundary / Threat / Identity / Sync Model Design
 - migration infrastructure（MigrationRunner + production migration history）；
 - maintenance / data safety barrier（Weak + Strong quiescence、owner permit 与 ordinary permit 分离、fail-closed）。
 
-#### 尚未设计（属 Phase 7 架构设计范围）
+#### 尚未设计（属 Phase 7 后续 slice）
 
 - Trust Identity（当前无 keypair / trust store / peer identity / pairing credential / revocation）；
 - Pairing credentials；
-- SyncChange / Revision / Cursor / Tombstone；
-- Conflict model；
-- network transport。
+- SyncChange / Revision / Cursor / Tombstone 物理模型；
+- Conflict model 物理模型；
+- network transport 实现。
 
 `device_id` 不等于 Trust Identity：它只是稳定设备标识，不含密钥与授信关系。
 
