@@ -35,6 +35,12 @@ mod commands;
 mod db;
 mod maintenance;
 mod diary_db;
+// P7-S2 capability foundation (Windows CNG / TBS). It is deliberately NOT wired to any
+// command, IPC surface, startup path or UI — see the module docs. Until a real caller
+// exists, the non-test build would report its items as unused; that is expected for a
+// foundation slice, so the allow is scoped to this module only.
+#[allow(dead_code)]
+mod device_identity;
 mod diagnostics;
 mod notes_db;
 mod archive_db;

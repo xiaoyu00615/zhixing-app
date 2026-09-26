@@ -32,6 +32,11 @@ tracing-subscriber = "0.3"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    # P7-S2: Gate A exercises the CNG key-storage providers (`NCrypt*`), and Gate B
+    # reads TPM capability through TBS (`Tbsi_GetDeviceInfo`). Both are reached through
+    # the SAME already-approved `windows-sys` crate — no new dependency is introduced.
+    "Win32_Security_Cryptography",
+    "Win32_System_TpmBaseServices",
 ] }
 
 [dev-dependencies]
