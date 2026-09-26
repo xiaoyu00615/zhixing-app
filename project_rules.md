@@ -353,6 +353,8 @@ Settings 必须区分：
 - Portable Settings：可迁移用户偏好；
 - Device-local Settings：`device_id`、本机绝对路径、Pairing / Trust 凭证、系统权限等，不得被另一个设备的 Backup 无脑覆盖。
 
+Device Identity 的 private key material **不属于 Backup 内容**：它既不进入业务 SQLite，也不进入 Database Backup、Portable Settings 或 Data Root。**禁止**出现「完整备份 / 恢复即可把设备身份复制到另一设备」的语义。
+
 Data Root Manifest 与 Backup Manifest 是两个独立文件格式，可复用部分类型定义但职责不同。
 
 Restore 优先采用 Staging Restore：先在临时恢复区解包并完成 Manifest / Hash / Database / Attachment 校验，再切换为正式数据；Restore 前仍必须创建当前数据 Safety Snapshot。
@@ -373,7 +375,20 @@ Sync 状态不做多人 Presence 系统，优先使用“可连接 / 不可连�
 
 不得默认用静默 Last Write Wins 丢弃用户数据。不可安全自动合并时必须进入 Conflict。**`updatedAtMs` 较新不得自动取胜**（时钟漂移 / 离线 / 并发写使时间戳不足以作为冲突真值）。无法安全自动合并时：保留双方 → 持久 Conflict → 用户解决；Note / Diary 正文 V1 不得静默覆盖。
 
-`device_id` **不等于** cryptographic Trust Identity：它只是稳定设备标识，不携带密钥、不能用于认证。Trust Identity 属于 Device-local state，需要密码学身份；**private key / device secret 不得随普通 Database Backup / Restore 被恢复到另一设备**。具体 secret storage backend（例如平台安全存储 / 安全 vault）由后续 P7-S1 研究决定，本规则不选库、不装依赖。
+`device_id` **不等于** cryptographic Trust Identity：它只是稳定设备标识，不携带密钥、不能用于认证。Trust Identity 属于 Device-local state，需要密码学身份；**private key / device secret 不得随普通 Database Backup / Restore 被恢复到另一设备**。
+
+**Device Identity 存储方向（P7-S1 + P7-S1R，HUMAN REVIEW PASS）**：backend 方向已由 `P7-S1 Device Secret / Trust Store Architecture Research` 与 `P7-S1R Windows CNG / TPM Secret Backend Review`（Human Review PASS）研究并冻结方向；本规则仍**不选具体库、不装依赖**。以下是永久不变量：
+
+- **operation-oriented Device Identity**：共享 capability 围绕 `ensure identity` / `status` / `public identity` / `sign` / `key agreement where required` / `explicit reset·rotation` 设计；
+- **no `getPrivateKeyBytes` shared contract**：禁止把「导出私钥字节」类入口（含任何等价命名）写进 shared contract；
+- **private identity material 是 Device-local**：不进入业务 SQLite、不进入 Database Backup、不进入 Portable Settings、不进入 Data Root；
+- **无 Backup / Restore 可移植性**：不得因未来「完整备份」而把设备身份私钥复制到另一台设备；
+- **Windows 存储方向**：Preferred = Microsoft Platform Crypto Provider（TPM-backed）；Fallback = Microsoft Software Key Storage Provider（CNG key isolation）；两者皆不可用 ⇒ Sync identity = UNAVAILABLE，**fail closed**；
+- **no silent raw-byte downgrade**：provider-managed key 不可用时不得静默回退到原始字节凭据存储；Credential Manager / DPAPI 仅保留为 raw-byte fallback candidate，**不是** preferred identity backend；
+- **no silent key regeneration**：`device_id` 存在但身份私钥不可用时，结果为 Sync unavailable / fail closed 并保留 trust 证据，**绝不**自动重建；必须由用户显式 repair 或 reset identity / re-pair；
+- **Restore / Migration × crypto identity**：Database Restore **旋转 sync epoch**，但**不改变** cryptographic device identity；Data Root Migration **既不改变** crypto identity，**也不改变** sync epoch（same device ≠ new device）。
+
+以下**不**写成永久冻结规则：exact algorithm / curve / key size、exact API method names、physical trust metadata format；三者分别留待 Identity Crypto Design 与 Sync Data Model。
 
 Device-local trust 数据区分两类，**不要求相同物理存储**：
 
