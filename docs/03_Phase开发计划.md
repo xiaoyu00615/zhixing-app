@@ -4,7 +4,7 @@
 日期：2026-08-19  
 状态：CURRENT
 
-> Phase 6 当前状态段落于 2026-09-26 同步至 baseline `e2b80e19dd95c69558742a6935a1833ef7f90198`；Phase 7 当前状态段落于同日同步 P7-S0 架构设计结论（Human Review PASS），并进一步同步 P7-S1 / P7-S1R 设备密钥与信任存储架构研究结论。
+> Phase 6 当前状态段落于 2026-09-26 同步至 baseline `e2b80e19dd95c69558742a6935a1833ef7f90198`（该 commit 保留为 Phase 6 historical implementation baseline）；Phase 7 当前状态段落于同日经 P7-S0 / P7-S1 / P7-S1R、P7-S2 / S2R / S2R2 / S2B / S2BR（Windows Device Identity capability foundation，Phase 7 implementation HEAD = `c4f3430`）、P7-S2C–P7-T2V 研究与验证、以及 **P7-TD 综合文档冻结**逐次同步（V1 = TCP + TLS 1.3 等，详见技术架构规范 §17.9）。
 
 ## Phase 0｜项目技术评审
 
@@ -630,48 +630,63 @@ Android UI 设计必须在本 Phase 正式验收前补齐。
 
 ### Phase 7 当前状态
 
-- Phase 7 **implementation**：**NOT STARTED**（未写 networking、未创建 sync tables、未实现 Pair Code）。
+- Phase 7 production **implementation**（Sync Data Model / Trust Store / Pairing / Transport / Core Sync 等）：**NOT STARTED**（未写 networking、未创建 sync tables、未实现 Pair Code）。
 - **P7-S0**｜Phase 7 Boundary / Threat / Identity / Sync Model Design：**FORMALLY CLOSED / HUMAN REVIEW PASS**。
-- **P7-S1**｜Device Secret / Trust Store Architecture Research：**COMPLETE**。
-- **P7-S1R**｜Windows CNG / TPM Secret Backend Review：**HUMAN REVIEW PASS**。
-- Architecture：**PARTIALLY FROZEN**。
-- Device Identity 存储方向：**FROZEN**（Windows：TPM-backed preferred / Software KSP fallback；Android：方向 FROZEN、implementation DEFER）。
+- **P7-S1 / P7-S1R**｜Device Secret / Trust Store Architecture Research：**CLOSED / HUMAN REVIEW PASS**。
+- **P7-S2 / S2R / S2R2**（Windows CNG capability validation + 修复加固）与 **P7-S2B / S2BR**（Windows Device Identity Provider Foundation + 平台边界修复）：**REMOTE CLOSED**（Phase 7 production implementation HEAD = `c4f3430 feat: add windows device identity capability foundation`；`e2b80e1` 保留为 Phase 6 historical implementation baseline）。
+- **P7-S2C / S2CR**（设备密码学身份设计研究）：**HUMAN REVIEW PASS**。
+- **P7-T0 / T0R**（Transport 生态 MSRV 研究）：**HUMAN REVIEW PASS**。
+- **P7-T1 / T1R**（配对仪式 / SAS 凭据绑定）：**HUMAN REVIEW PASS**。
+- **P7-T2 / T2R**（安全握手选型 / TLS 选型边界修正）：**HUMAN REVIEW PASS**。
+- **P7-T2V**（Windows 硬件签名 → rustls 集成验证）：**STRONG PASS / VALIDATION CLOSED**（真机 TPM：provider-managed 不可导出 P-256 键经 rustls `SigningKey`/`Signer` 完成真实 TLS 1.3 握手 + 对端真实验签 + 负向测试；P1363 → DER 转换 validated；RFC 7250 RPK server / mutual PASS、wrong pin REJECTED）。
+- **P7-TD**（Identity + Pairing + Transport 综合文档冻结）：**已完成**（结论冻结于技术架构规范 §17.9）。
+- Architecture：**substantially frozen**（V1 Carrier = TCP、V1 Secure Handshake = TLS 1.3、RPK carrier direction 等 FROZEN，见下）。
+- Device Identity 存储方向：**FROZEN**（Windows：TPM-backed preferred / Software KSP fallback；Android：方向 FROZEN、implementation = **P7-S3 ANDROID BRING-UP REQUIRED**）。
 - Dependency decision：**DEFER**（未批准任何新依赖；`rust-version` 维持 `1.77`）。
 - 本轮概念范围（Device / Pair Code / Trust / SyncChange / Revision / Cursor / Push·Pull·Ack / Tombstone / Conflict / Attachment / Resume / Remove Device）**具体物理模型 NOT FROZEN**，见 P7-S0 报告。
 
-FROZEN（已批准、可正式冻结）：
+FROZEN（已批准、可正式冻结；含 P7-TD 新增收口）：
 
 - Boundary（IN / OUT of scope）与概念职责分离；
-- Threat principles（LAN 不可信、默认 fail-closed）；
+- Threat principles（LAN 不可信、默认 fail-closed；Discovery ≠ trust）；
 - Identity separation（`device_id` ≠ Trust Identity；Trust Identity 属 Device-local；device secret 不得随 Backup / Restore 跨设备恢复）；
 - Sync safety invariants（同事务原子性、change identity 不得依赖可回滚 seq、Restore × Sync 需 epoch / incarnation、no silent LWW、Search 不同步、maintenance 复用、authenticated encrypted transport 要求）；
-- Device Secret boundary：operation-oriented Device Identity；**禁止** `getPrivateKeyBytes` 类私钥导出入口进入 shared contract；private identity material 为 Device-local，不进业务 SQLite / Database Backup / Portable Settings / Data Root；
+- Device Secret boundary：operation-oriented Device Identity；**禁止** `getPrivateKeyBytes` 类私钥导出入口进入 shared contract；private identity material 为 Device-local，不进业务 SQLite / Database Backup / Portable Settings / Data Root；秘密丢失 fail closed、NO silent regeneration、显式 reset / re-pair；
 - Windows storage direction：Preferred = Microsoft Platform Crypto Provider（TPM-backed）；Fallback = Microsoft Software Key Storage Provider（CNG key isolation）；两者皆不可用 ⇒ Sync identity UNAVAILABLE / fail closed；**禁止** silent raw-byte downgrade 与 silent key regeneration；
 - Android storage direction：Android Keystore operation-oriented，私钥材料不得经 shared contract 导出；硬件保护 preferred、StrongBox optional；
-- Shared operation contract：`ensure identity` / `status` / `public identity` / `sign` / `key agreement where required` / `explicit reset·rotation`（**方法名 NOT FROZEN**）；
+- Shared operation contract：`ensure identity` / `status·readiness` / `public identity` / `sign`（**REQUIRED BY FROZEN V1 TLS AUTH ARCHITECTURE**）/ `explicit reset·rotation`（**方法名 NOT FROZEN**；long-lived `agree()` V1 NOT REQUIRED）；
+- Key separation：一把 long-lived key 默认不得同时承担 SIGN 与 key agreement；TLS ephemeral 会话密钥材料分离；
 - Trust metadata：location = `app_config_dir`、lifecycle = device-local、Database Restore 不得回滚它、Data Root Migration 不得移动它；
-- Restore / Migration × crypto identity：Database Restore 旋转 sync epoch 但不改变 crypto identity；Data Root Migration 两者都不改变。
+- Restore / Migration × crypto identity：Database Restore 旋转 sync epoch 但不改变 crypto identity；Data Root Migration 两者都不改变；
+- **V1 Carrier = TCP**（QUIC DEFER；不得把 QUIC 写成 Noise 替代品）；
+- **V1 Secure Handshake = TLS 1.3**（RFC 9846 家族；mutual device authentication + 加密 + forward secrecy）；
+- **RFC 7250 RPK = FROZEN transport credential carrier direction**（P7-T2V：server RPK / mutual RPK PASS、wrong pin REJECTED）；
+- crypto provider 职责分离：rustls / TLS provider 管会话加密与验证，platform Device Identity provider 管长期认证签名（ring 不持有 Device Identity 私钥）；
+- C1 连接生命周期（专用配对连接 → trust commit → close → 新建 sync 连接；C2 NOT SELECTED FOR V1，不得写「RFC 9266 证明 C2 非法」）；
+- **0-RTT V1 DISABLED**；**Resumption V1 初始 DISABLED**（未来启用必须 re-check Trust Store、绝不绕过 REVOKED）；
+- Protocol version binding requirement（候选机制 ALPN + application transcript；exact ALPN string DEFER）；
+- Trust commit 状态机（UNTRUSTED → authenticated OOB → binding validation → user authorization → atomic TRUSTED commit；无 half-trusted peer）；
+- Trust Store = per-peer、device-local security state，非业务 SyncChange、不随 Backup / Data Root portable；概念状态 UNTRUSTED / TRUSTED / REVOKED（PAIRING 为 process state）；
+- Revocation：Remove Device = local trust revocation（后续连接拒绝、live session 失效、resumption 失效、cached credentials 不再充分、resume 不得绕过 trust；不远程删除对端数据）；
+- Identity change ⇒ fail closed ⇒ 显式 re-pair（无 auto-replace）；transport credential rotation 原则（有 authenticated continuity proof 可保留 trust；proof 格式 DEFER）；
+- Sync protocol separation（SyncChange / Ack / Resume / Conflict 不得直接依赖 rustls / TLS / RPK resolver 类型）；
+- Application framing REQUIRED（TCP + TLS 只是 byte stream；V1 direction = length-prefixed frames）。
 
-NOT FROZEN（留待后续 slice）：exact causal model（VV / Dotted VV / HLC）、exact CRDT·relation 算法（OR-Set 仅候选）、crypto backend 具体库与依赖、algorithm / curve / key size、transport implementation、全部物理表结构、trust metadata physical format。
+NOT FROZEN / DEFER（留待后续 slice）：exact causal model（VV / Dotted VV / HLC）、exact CRDT·relation 算法（OR-Set 仅候选）、crypto backend 具体库与 exact dependency version（rustls 0.23 family = RECOMMENDED / VALIDATED DIRECTION，ring = validated scratch candidate，rustls-cng = REFERENCE IMPLEMENTATION，均不构成依赖批准）、algorithm / curve / key size（**PARTIALLY FROZEN**：V1 Windows 候选 ECDSA P-256 已 Windows runtime validated，跨平台最终冻结 pending P7-S3）、identity ↔ transport credential 对象模型与 binding object、SAS exact entropy / commitment / encoding、trust metadata physical format、ALPN string、serialization 格式、async runtime、全部物理表结构。
 
 下一动作（待显式授权）：
 
 ```text
-Windows CNG capability validation / foundation   （NOT STARTED）
+P7-S3 Android Bring-up   （NOT STARTED；IMPLEMENTATION GATE）
 ```
 
-该 slice 必须先验证两个 CNG **implementation gate**（它们是 implementation gate，**不是**当前架构 blocker）：
-
-```text
-Gate A：private export 被禁用时，public key blob 是否仍按预期导出
-Gate B：无 TPM 环境下 Platform Crypto Provider 的真实失败行为 / error
-```
+P7-S3 必须至少 validate：P-256 signing、provider-managed private key、public identity export、rustls external signer bridge、TLS signature encoding / interoperability、（若生产选 RPK）RPK。Android provider-managed TLS signer 与 RPK mutual auth 当前均 **NOT RUNTIME VALIDATED**；本机 Windows 无 Android build/device 环境时不得伪造 runtime PASS。
 
 不得直接进入：networking 实现、创建 sync tables、实现 Pair Code、引入新依赖、提升 `rust-version`。
 
-后续 slice 方向顺序（全部 **NOT STARTED**）：Device Secret / Trust Store design（P7-S1 / P7-S1R 已完成）→ Windows CNG capability validation → Android Target Bring-up（最大未知风险，建议尽早）→ Sync Data Model → Change Capture → Transport & Protocol → Pairing & Device Management → Core DB Sync → Conflict Handling → Windows ↔ Android E2E。
+后续 slice 方向顺序（全部 **NOT STARTED**）：**P7-S3 Android Bring-up → Production Device Identity implementation → Trust Store → Pairing → Sync Data Model → Change Capture → Transport implementation → Core Sync → Conflict → Windows ↔ Android E2E**。
 
-> 注：此前列出的 `P7-S1.5 crypto selection review`、`P7-S2 Android Target Bring-up`、`P7-S3 Sync Data Model` … `P7-S9` 编号属 P7-S0 时期的前瞻性列表，尚未按 P7-S1 / P7-S1R 结论重新基线化；本计划本次不为它们冻结新编号。
+> 注：此前列出的 `P7-S1.5 crypto selection review`、`P7-S2 Android Target Bring-up`、`P7-S3 Sync Data Model` … `P7-S9` 编号属 P7-S0 时期的前瞻性列表，尚未按 P7-S1 / P7-S1R 结论重新基线化；本计划本次不为它们冻结新编号（P7-T2V / P7-TD 等编号以 `.workbuddy/` 研究报告与 00 清单为准）。
 
 #### 已具备的 Ready foundation
 
