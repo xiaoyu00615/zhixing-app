@@ -31,7 +31,7 @@ use windows_sys::Win32::Security::Cryptography::{
 
 /// CNG success (`SECURITY_STATUS == 0`). Every `NCrypt*` call returns an `HRESULT`;
 /// only `0` is success.
-pub(super) const CNG_SUCCESS: i32 = 0;
+pub(crate) const CNG_SUCCESS: i32 = 0;
 
 /// `NCRYPT_EXPORT_POLICY_PROPERTY` is a DWORD. `0` means "no export is permitted"
 /// (§12) — the policy is set EXPLICITLY so no provider default is ever used as proof.
@@ -150,10 +150,10 @@ impl GateAReport {
 ///
 /// Shared with the Gate B module, which reuses this RAII wrapper rather than writing a
 /// second one (§6 — reuse before create).
-pub(super) struct CngProviderHandle(NCRYPT_PROV_HANDLE);
+pub(crate) struct CngProviderHandle(NCRYPT_PROV_HANDLE);
 
 impl CngProviderHandle {
-    pub(super) fn raw(&self) -> NCRYPT_PROV_HANDLE {
+    pub(crate) fn raw(&self) -> NCRYPT_PROV_HANDLE {
         self.0
     }
 }
@@ -315,7 +315,7 @@ fn unique_test_key_name(purpose: &str) -> String {
 ///
 /// Visible to the sibling Gate B module so the Platform Crypto Provider is opened through
 /// the SAME RAII wrapper and the same error mapping (§6).
-pub(super) fn open_provider(
+pub(crate) fn open_provider(
     provider_name: PCWSTR,
     label: &'static str,
 ) -> Result<CngProviderHandle, IdentityBackendError> {
@@ -331,6 +331,23 @@ pub(super) fn open_provider(
         });
     }
     Ok(CngProviderHandle(handle))
+}
+
+/// Serializes every test that touches the Microsoft Software Key Storage Provider.
+///
+/// The key store is a SHARED, process-external resource, and `cargo test` runs tests in
+/// parallel by default. Without this lock a "namespace is empty" check (here or in the
+/// sibling `windows_capability` module) could observe a key a concurrently running test is
+/// legitimately holding — a flaky failure rather than a finding. `pub(crate)` so the
+/// capability module's read-only sweep joins the SAME critical section.
+pub(crate) static KEYSTORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquires [`KEYSTORE_LOCK`], ignoring poisoning: a test that panicked while holding it
+/// must not turn every later test into a failure about the lock.
+pub(crate) fn keystore_lock() -> std::sync::MutexGuard<'static, ()> {
+    KEYSTORE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
 }
 
 fn create_persisted_key(
@@ -1104,7 +1121,10 @@ mod tests {
 
         // Explicit cleanup, then black-box proof of absence (§17).
         let cleanup_outcome = key.delete().expect("deleting the control key must succeed");
-        assert!(cleanup_outcome.succeeded(), "deleting the control key must succeed");
+        assert!(
+            cleanup_outcome.succeeded(),
+            "deleting the control key must succeed"
+        );
         let presence = persisted_key_is_present(&provider, &key_name);
         assert_eq!(
             presence,
@@ -1122,22 +1142,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // §17 — proof that the suite leaves nothing behind in the user's key store
     // -----------------------------------------------------------------------
-
-    /// Serializes every test that touches the Microsoft Software Key Storage Provider.
-    ///
-    /// The key store is a SHARED, process-external resource, and `cargo test` runs tests in
-    /// parallel by default. Without this lock the "namespace is empty" check below could
-    /// observe a key that a concurrently running test is legitimately holding, which would
-    /// be a flaky failure rather than a finding.
-    static KEYSTORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Acquires [`KEYSTORE_LOCK`], ignoring poisoning: a test that panicked while holding it
-    /// must not turn every later test into a failure about the lock.
-    fn keystore_lock() -> std::sync::MutexGuard<'static, ()> {
-        KEYSTORE_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-    }
 
     /// Enumerates the key names the provider reports for the CURRENT USER.
     ///
