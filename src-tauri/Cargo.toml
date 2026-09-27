@@ -3,7 +3,7 @@ name = "zhixing"
 version = "0.0.0"
 description = "Tauri native skeleton for zhixing"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.88"
 
 [lib]
 name = "zhixing_lib"

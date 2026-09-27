@@ -645,7 +645,8 @@ Android UI 设计必须在本 Phase 正式验收前补齐。
 - Architecture：**substantially frozen**（V1 Carrier = TCP、V1 Secure Handshake = TLS 1.3、RPK carrier direction 等 FROZEN，见下）。
 - Device Identity 存储方向：**FROZEN**（Windows：TPM-backed preferred / Software KSP fallback，**Windows 生产实现已 IMPLEMENTED**；Android：方向 FROZEN、**生产 adapter NOT IMPLEMENTED**——Android Keystore 能力已由 P7-S3 在 API 34 模拟器验证，真实真机与 TEE / StrongBox 硬件运行时 NOT VALIDATED）。
 - **V1 Device Identity Algorithm = ECDSA P-256 / SHA-256：FROZEN FOR V1**（P7-S4 已按此实现；**not permanently frozen for future versions**）。
-- Dependency decision：**DEFER**（未批准任何新依赖；`rust-version` 维持 `1.77`）。
+- Dependency decision：**DEFER**（未批准任何新依赖；`keyring-core` / `windows-native-keyring-store` 仍不视为已批准）。
+- **Rust toolchain baseline（P7-S5A-T2，Human Review 已批准）**：Native 语言 architecture policy = **Rust stable**（**不**固定单一版本）；**current approved project MSRV = `1.88`**（`src-tauri/Cargo.toml` `rust-version = "1.88"`）；repository toolchain pin = 仓库根 `rust-toolchain.toml`（channel `1.88.0` / profile `minimal`，**未含** Android target —— Android target set 待 P7-S5A 恢复时单独评审）。此前 project MSRV 为 `1.77`，且「`rust-version >= 1.88` 未批准」曾为现行结论（该结论已由 P7-S5A-T2 Human Review 取代；完整表述见 00 清单第 2 节与技术架构规范对应段落）。P7-S5A（Android Product Runtime + Keystore Bridge Gate）此前受「锁定依赖图整体超出 Rust 1.77」阻塞；该阻塞的工具链前提现已不存在，但 **P7-S5A 仍需显式授权后方可恢复**（本 Slice 不恢复 Android 实现）。
 - 本轮概念范围（Device / Pair Code / Trust / SyncChange / Revision / Cursor / Push·Pull·Ack / Tombstone / Conflict / Attachment / Resume / Remove Device）**具体物理模型 NOT FROZEN**，见 P7-S0 报告。
 
 FROZEN（已批准、可正式冻结；含 P7-TD 新增收口）：
@@ -685,7 +686,7 @@ Android Production Device Identity   （NOT STARTED）
 
 Windows Production Device Identity 已 REMOTE CLOSED（`b81f5aa`）；Android 侧生产 provider 为下一个实现切片。Android Keystore 能力已由 P7-S3 在 API 34 模拟器验证，但**真实 Android 真机、TEE / StrongBox 硬件运行时与 Tauri Zhixing Android 产品运行时仍 NOT VALIDATED**；不得伪造 runtime PASS，也不得把 P7-S3 写成 Android production complete。
 
-不得直接进入：networking 实现、创建 sync tables、实现 Pair Code、引入新依赖、提升 `rust-version`。
+不得直接进入：networking 实现、创建 sync tables、实现 Pair Code、引入新依赖。（`提升 rust-version` 原列于本禁止清单；该事项已由 **P7-S5A-T2** 单独授权并执行：project MSRV `1.77` → `1.88`，并新增仓库根 `rust-toolchain.toml`（`1.88.0` / `minimal`）。此后再次调整 project MSRV 仍需单独授权，不得由本地工具链版本自动推导。）
 
 后续 slice 方向顺序（全部 **NOT STARTED**）：**Android Production Device Identity → Trust Store → Pairing → Sync Data Model → Change Capture → Transport implementation → Core Sync → Conflict → Windows ↔ Android E2E**。
 
