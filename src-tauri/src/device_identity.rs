@@ -33,10 +33,30 @@
 //!   fallback: **Microsoft Software Key Storage Provider**; if both are unavailable
 //!   the answer is `UNAVAILABLE` / fail closed — never a silent raw-byte downgrade.
 //! - The shared contract stays **operation-oriented**; `getPrivateKeyBytes()` (or any
-//!   equivalent raw-private-key export entry point) must never appear in it.
-//! - The identity **algorithm is NOT FROZEN**. `ECDSA P-256` appears in this slice
-//!   strictly as a **TEST / CAPABILITY PROBE ONLY** value and must not be promoted to
-//!   the final identity algorithm by anything written here.
+//!   equivalent raw-private-key export entry point) must never appear in it (§7).
+
+// ---------------------------------------------------------------------------
+// P7-S4 — V1 Device Identity algorithm freeze (§3)
+// ---------------------------------------------------------------------------
+//
+// The identity algorithm IS frozen for V1 as **ECDSA P-256 / SHA-256**:
+//
+// - Windows TPM / CNG runtime validated (P7-S2 / P7-T2V);
+// - Android Keystore runtime validated on the P7-S3 emulator probe;
+// - Windows ↔ Android signature interoperability PASS (P7-S3 §28);
+// - P-256 is officially supported by both platform key stores.
+//
+// This is a **V1 freeze only** — it is NOT a statement that P-256 is permanent for all
+// future versions. Nothing outside this module may introduce a second V1 algorithm, and
+// no platform adapter may negotiate one at runtime.
+//
+// What remains platform-neutral and unchanged: the security classification
+// [`IdentitySecurityLevel`] (§4) names a security PROPERTY, never a platform
+// implementation (no TPM / TEE / StrongBox / provider name may enter the shared domain).
+
+// SHA-256 is used for the canonical identity fingerprint (§9): `SHA-256(SPKI DER)`. The
+// crate is already a project dependency — no new dependency is introduced (§37).
+use sha2::Digest;
 
 // ---------------------------------------------------------------------------
 // TPM probe vocabulary (no Win32 type — see §5)
@@ -94,12 +114,23 @@ pub(crate) enum IdentityBackendError {
     ProviderOpenFailed { provider: &'static str, status: u32 },
     /// `NCryptCreatePersistedKey` failed.
     KeyCreateFailed { status: u32 },
+    /// P7-S4R — `NCryptCreatePersistedKey` returned `NTE_EXISTS`: a FINALIZED key with
+    /// this name already lives in the store.
+    ///
+    /// Distinct from [`Self::KeyCreateFailed`] because the required answer is not "fail
+    /// and stop": an existing production-name key must never be overwritten, so the caller
+    /// re-enters state reconciliation (§12). Collapsing the two would make a two-instance
+    /// race indistinguishable from a broken provider.
+    KeyAlreadyExists { status: u32 },
     /// A key property could not be written.
     PropertySetFailed { property: &'static str, status: u32 },
     /// The written export policy did not read back as written.
     ExportPolicyReadBackMismatch { expected: u32, actual: u32 },
     /// `NCryptFinalizeKey` failed.
     KeyFinalizeFailed { status: u32 },
+    /// `NCryptSignHash` failed (P7-S4 §28). The identity is then unusable: a signing error
+    /// is never substituted with another key or another answer.
+    SignFailed { status: u32 },
     /// The PUBLIC key blob could not be exported (Gate A's positive case failed).
     PublicExportFailed { status: u32 },
     /// A PRIVATE blob export was permitted. This is the failure Gate A exists to
@@ -141,9 +172,11 @@ impl IdentityBackendError {
         match self {
             Self::ProviderOpenFailed { .. } => "ProviderOpenFailed",
             Self::KeyCreateFailed { .. } => "KeyCreateFailed",
+            Self::KeyAlreadyExists { .. } => "KeyAlreadyExists",
             Self::PropertySetFailed { .. } => "PropertySetFailed",
             Self::ExportPolicyReadBackMismatch { .. } => "ExportPolicyReadBackMismatch",
             Self::KeyFinalizeFailed { .. } => "KeyFinalizeFailed",
+            Self::SignFailed { .. } => "SignFailed",
             Self::PublicExportFailed { .. } => "PublicExportFailed",
             Self::UnexpectedPrivateExportSuccess => "UnexpectedPrivateExportSuccess",
             Self::TpmNotFound => "TpmNotFound",
@@ -164,8 +197,10 @@ impl IdentityBackendError {
         match self {
             Self::ProviderOpenFailed { status, .. }
             | Self::KeyCreateFailed { status }
+            | Self::KeyAlreadyExists { status }
             | Self::PropertySetFailed { status, .. }
             | Self::KeyFinalizeFailed { status }
+            | Self::SignFailed { status }
             | Self::PublicExportFailed { status }
             | Self::TpmProbeFailed { status }
             | Self::CleanupFailed { status, .. }
@@ -243,7 +278,8 @@ pub(crate) fn select_identity_backend(probe: &TpmProbeOutcome) -> IdentityBacken
 /// Platform-neutral: the variants describe a SECURITY PROPERTY, never a platform
 /// implementation name, so a future Android Keystore / TEE / StrongBox backend maps onto
 /// the same two levels without modifying this enum (§8).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum IdentitySecurityLevel {
     /// Backed by a discrete/measured hardware root of trust (e.g. TPM, TEE, StrongBox).
     HardwareBacked,
@@ -333,8 +369,321 @@ pub(crate) trait DeviceIdentityProvider {
 }
 
 // ---------------------------------------------------------------------------
+// P7-S4 — production identity capability (§6–§27), platform-neutral
+// ---------------------------------------------------------------------------
+//
+// Everything below is the SEMANTIC contract a future `AndroidDeviceIdentityProvider` must
+// also implement: NO Win32 type, NO provider name, NO secret bytes, NO private-key entry
+// point (§7). The only platform-shaped value that crosses this boundary is a raw OS status
+// carried as a `u32` inside a stable error token — a structured number, never prose.
+
+/// The frozen V1 Device Identity algorithm (§3 / §11).
+///
+/// Only the algorithm that actually has callers exists: adding `Ed25519`, `P384`, `RSA` or
+/// a placeholder "future" variant would be a hierarchy without a use case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DeviceIdentityAlgorithm {
+    /// `ECDSA P-256` with `SHA-256`, signatures encoded as DER `ECDSA-Sig-Value`.
+    #[serde(rename = "ecdsa-p256-sha256")]
+    EcdsaP256Sha256,
+}
+
+impl DeviceIdentityAlgorithm {
+    /// Stable machine-readable token (§11).
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::EcdsaP256Sha256 => "ecdsa-p256-sha256",
+        }
+    }
+}
+
+/// The signature scheme a signed authentication message was produced with (§12).
+///
+/// Deliberately NOT `rustls::SignatureScheme`: Device Identity must stay
+/// transport-independent, so the transport adapter maps this onto whatever its TLS stack
+/// wants when (and only when) transport is implemented (§38 / §43).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeviceSignatureScheme {
+    /// `ECDSA P-256` over `SHA-256` of the UNHASHED message, DER `ECDSA-Sig-Value`.
+    EcdsaP256Sha256,
+}
+
+impl DeviceSignatureScheme {
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::EcdsaP256Sha256 => "ecdsa-p256-sha256",
+        }
+    }
+}
+
+/// A produced signature in the shared, platform-neutral output format (§14).
+///
+/// Windows converts its native P-1363 output to DER; Android already emits DER. Callers
+/// therefore never see — and never branch on — a platform difference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeviceSignature {
+    /// The scheme the signature was produced with.
+    pub scheme: DeviceSignatureScheme,
+    /// DER `ECDSA-Sig-Value` bytes.
+    pub der: Vec<u8>,
+}
+
+/// The canonical V1 public Device Identity (§10).
+///
+/// - `spki_der` is the canonical DER `SubjectPublicKeyInfo` (§8) — platform-neutral bytes,
+///   never a provider-native blob, handle or platform object.
+/// - `fingerprint` is `SHA-256(spki_der)` (§9): the stable trust identifier used for
+///   pairing display / reference and for the future Trust Store key. It is never derived
+///   from a provider blob, a display name, a `device_id` or an IP address.
+///
+/// Immutable value semantics: the fields are private and there is no mutation path — the
+/// only constructor validates the canonical encoding, so a `DevicePublicIdentity` can only
+/// ever hold a well-formed V1 identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DevicePublicIdentity {
+    algorithm: DeviceIdentityAlgorithm,
+    spki_der: Vec<u8>,
+    fingerprint: [u8; 32],
+}
+
+impl DevicePublicIdentity {
+    /// Builds the canonical identity from a DER `SubjectPublicKeyInfo` (§8 / §9).
+    ///
+    /// Rejects anything that is not a canonical P-256 SPKI: this is the single place where
+    /// a provider-native blob is stopped from ever becoming the wire identity.
+    pub(crate) fn from_spki(spki_der: Vec<u8>) -> Result<Self, IdentityError> {
+        if !der::is_canonical_p256_spki(&spki_der) {
+            return Err(IdentityError::PublicIdentityUnavailable {
+                kind: "NonCanonicalSpki",
+                status: None,
+            });
+        }
+        let digest = sha2::Sha256::digest(&spki_der);
+        let mut fingerprint = [0u8; 32];
+        fingerprint.copy_from_slice(digest.as_slice());
+        Ok(Self {
+            algorithm: DeviceIdentityAlgorithm::EcdsaP256Sha256,
+            spki_der,
+            fingerprint,
+        })
+    }
+
+    pub(crate) fn algorithm(&self) -> DeviceIdentityAlgorithm {
+        self.algorithm
+    }
+
+    /// Canonical DER `SubjectPublicKeyInfo` (§8).
+    pub(crate) fn spki_der(&self) -> &[u8] {
+        &self.spki_der
+    }
+
+    /// `SHA-256(canonical SPKI DER)` (§9).
+    pub(crate) fn fingerprint(&self) -> [u8; 32] {
+        self.fingerprint
+    }
+
+    /// Lowercase hex fingerprint — the canonical comparison/display form (§9).
+    pub(crate) fn fingerprint_hex(&self) -> String {
+        der::hex(&self.fingerprint)
+    }
+
+    /// Constant-shape fingerprint comparison against the recorded hex value (§23).
+    pub(crate) fn matches_fingerprint_hex(&self, fingerprint_hex: &str) -> bool {
+        self.fingerprint_hex() == fingerprint_hex
+    }
+}
+
+/// Platform-neutral identity failure model (§21–§24, §30).
+///
+/// Every variant is a distinct, stable answer; the fail-closed cases
+/// ([`Self::IdentityMaterialMissing`], [`Self::IdentityMetadataMissing`],
+/// [`Self::FingerprintMismatch`], [`Self::SecurityLevelMismatch`],
+/// [`Self::UnexpectedPrivateExportSuccess`], [`Self::Unavailable`]) exist so a caller can
+/// never mistake "identity is gone" for "identity was never here" or for success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IdentityError {
+    /// No usable backend on this device (§15 / §5 on Android: provider unavailable ⇒
+    /// identity unavailable).
+    Unavailable { reason: IdentityAvailabilityError },
+    /// P7-S4R2 §15 — FROZEN meaning:
+    ///
+    /// ```text
+    /// NOT_PROVISIONED  iff  metadata absent AND provider key absent
+    /// ```
+    ///
+    /// It is NEVER used for an incomplete established state (key present without a record,
+    /// record present without a key, damaged record, drift): those are all fail-closed
+    /// errors, so "nothing was here" and "something here cannot be trusted" stay different
+    /// answers forever.
+    NotProvisioned,
+    /// Metadata says an identity was established, but its key material is gone (§22).
+    /// NEVER silently regenerated.
+    IdentityMaterialMissing,
+    /// P7-S4R — the provider key EXISTS but no trusted metadata record does.
+    ///
+    /// Without trusted metadata, an existing production-name key cannot be distinguished
+    /// from interrupted provisioning, deleted state, or an unexpected/pre-seeded key.
+    /// Therefore it is not silently adopted: fail closed, and never reconstruct a record
+    /// from the key alone. This is the mirror of [`Self::IdentityMaterialMissing`] (key
+    /// gone / record present) and is NEVER reported as [`Self::NotProvisioned`] — by ANY
+    /// entry point (`ensure_identity`, `public_identity`, `sign`), because all of them run
+    /// the same state reconciliation (P7-S4R2 §14).
+    IdentityMetadataMissing,
+    /// The provider key's canonical public identity does not match the recorded
+    /// fingerprint (§23 / §24) — including a same-named key found in a different provider.
+    FingerprintMismatch,
+    /// P7-S4R — the recorded [`IdentitySecurityLevel`] differs from the security level
+    /// currently observed from the platform.
+    ///
+    /// V1 does NOT distinguish an upgrade from a downgrade: `HardwareBacked →
+    /// SoftwareIsolated` fails and `SoftwareIsolated → HardwareBacked` fails too. The
+    /// record is never silently rewritten; an explicit, reviewed security migration would
+    /// need its own real use case.
+    SecurityLevelMismatch,
+    /// The device-local metadata record is damaged or unreadable-as-valid (§19).
+    MetadataCorrupt { detail: &'static str },
+    /// The metadata file could not be read or written (§19).
+    MetadataIo { detail: &'static str },
+    /// The platform provider failed: key creation, policy, presence probe, or export.
+    ProviderFailure {
+        kind: &'static str,
+        status: Option<u32>,
+    },
+    /// The signing operation failed (§28). Fail closed — a missing or invalid signature is
+    /// never substituted.
+    SignFailed {
+        kind: &'static str,
+        status: Option<u32>,
+    },
+    /// The public identity could not be derived from the provider key (§8 / §30).
+    PublicIdentityUnavailable {
+        kind: &'static str,
+        status: Option<u32>,
+    },
+    /// P7-S4R — provisioning created a key, the metadata record could NOT be written, and
+    /// the just-created key could not be PROVEN removed.
+    ///
+    /// "Provisioning failed" must never be reported as "the environment is back as it
+    /// was": a key left behind without a record is exactly the orphan state that later
+    /// fails closed, so the caller has to be told the cleanup did not complete.
+    ProvisionCleanupIncomplete {
+        kind: &'static str,
+        status: Option<u32>,
+    },
+    /// A private-key export SUCCEEDED. The production key must be non-exportable (§30), so
+    /// success here is a failure — and it is never reported as a usable identity.
+    UnexpectedPrivateExportSuccess,
+}
+
+impl IdentityError {
+    /// Stable, machine-readable token (same convention as the rest of the module family).
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Unavailable { .. } => "UNAVAILABLE",
+            Self::NotProvisioned => "NOT_PROVISIONED",
+            Self::IdentityMaterialMissing => "IDENTITY_MATERIAL_MISSING",
+            Self::IdentityMetadataMissing => "IDENTITY_METADATA_MISSING",
+            Self::FingerprintMismatch => "FINGERPRINT_MISMATCH",
+            Self::SecurityLevelMismatch => "SECURITY_LEVEL_MISMATCH",
+            Self::MetadataCorrupt { .. } => "METADATA_CORRUPT",
+            Self::MetadataIo { .. } => "METADATA_IO",
+            Self::ProviderFailure { .. } => "PROVIDER_FAILURE",
+            Self::SignFailed { .. } => "SIGN_FAILED",
+            Self::PublicIdentityUnavailable { .. } => "PUBLIC_IDENTITY_UNAVAILABLE",
+            Self::ProvisionCleanupIncomplete { .. } => "PROVISION_CLEANUP_INCOMPLETE",
+            Self::UnexpectedPrivateExportSuccess => "UNEXPECTED_PRIVATE_EXPORT_SUCCESS",
+        }
+    }
+
+    /// The stable sub-token that distinguishes failures sharing a class (§30 / §38).
+    pub(crate) fn detail(&self) -> Option<&'static str> {
+        match self {
+            Self::MetadataCorrupt { detail } | Self::MetadataIo { detail } => Some(detail),
+            Self::ProviderFailure { kind, .. }
+            | Self::SignFailed { kind, .. }
+            | Self::PublicIdentityUnavailable { kind, .. }
+            | Self::ProvisionCleanupIncomplete { kind, .. } => Some(kind),
+            _ => None,
+        }
+    }
+
+    /// The raw structured OS status, when one was captured. Statuses stay numbers all the
+    /// way through (§31 of the Windows slice): no localized error string ever travels here.
+    pub(crate) fn status(&self) -> Option<u32> {
+        match self {
+            Self::ProviderFailure { status, .. }
+            | Self::SignFailed { status, .. }
+            | Self::PublicIdentityUnavailable { status, .. }
+            | Self::ProvisionCleanupIncomplete { status, .. } => *status,
+            _ => None,
+        }
+    }
+}
+
+impl From<metadata::MetadataError> for IdentityError {
+    fn from(error: metadata::MetadataError) -> Self {
+        match error {
+            metadata::MetadataError::Corrupt { detail } => Self::MetadataCorrupt { detail },
+            metadata::MetadataError::Io { detail } => Self::MetadataIo { detail },
+        }
+    }
+}
+
+/// The production device-identity capability (§6).
+///
+/// `resolve` remains the side-effect-free readiness read; the three methods below are the
+/// production capability every platform adapter (Windows today, Android next) must
+/// provide:
+///
+/// - [`Self::ensure_identity`] — provisioning, idempotent (§25);
+/// - [`Self::public_identity`] — read-only, no side-effect creation (§26);
+/// - [`Self::sign`] — sign an UNHASHED authentication message (§12 / §28).
+///
+/// P7-S4R — there is deliberately NO `reset_identity` / `rotate_identity` method: a
+/// method whose only implementation is "not permitted" is a fake API, not a boundary.
+/// Rotation and reset remain frozen ARCHITECTURE semantics; their API is DEFERRED UNTIL
+/// A REAL CALLER EXISTs (§27).
+///
+/// NO private-key entry point exists and none may be added (§7). This is an internal
+/// native capability: it is never exposed as a frontend "sign arbitrary bytes" command
+/// (§13), and no Trust Store / pairing / transport behaviour lives here (§42 / §43).
+pub(crate) trait DeviceIdentityCapability: DeviceIdentityProvider {
+    /// Ensures a V1 identity exists and returns its canonical public identity.
+    ///
+    /// Idempotent: repeated calls return the SAME identity and never generate a second key
+    /// (§25). `metadata_dir` is the app config dir (§17); the provider applies every
+    /// fail-closed rule (§20–§24) before touching anything.
+    fn ensure_identity(&self, metadata_dir: &std::path::Path)
+        -> Result<DevicePublicIdentity, IdentityError>;
+
+    /// Reads the already-established identity. NEVER provisions (§26).
+    fn public_identity(
+        &self,
+        metadata_dir: &std::path::Path,
+    ) -> Result<DevicePublicIdentity, IdentityError>;
+
+    /// Signs an UNHASHED authentication message with the device identity.
+    ///
+    /// The provider performs `SHA-256` exactly once and returns DER (§12 / §14 / §28).
+    /// The recorded identity must still match the provider key or the call fails closed
+    /// (§23) — signing with an unattested key is never allowed.
+    fn sign(
+        &self,
+        metadata_dir: &std::path::Path,
+        message: &[u8],
+    ) -> Result<DeviceSignature, IdentityError>;
+}
+
+// ---------------------------------------------------------------------------
 // Windows-only implementation
 // ---------------------------------------------------------------------------
+
+// Platform-neutral building blocks: canonical encodings (§8 / §14) and the device-local
+// identity record (§17–§19). Both compile on every target, so a future Android adapter
+// reuses them instead of growing a second encoding path.
+pub(crate) mod der;
+pub(crate) mod metadata;
 
 #[cfg(windows)]
 pub(crate) mod windows_cng;
@@ -344,6 +693,10 @@ pub(crate) mod windows_tpm;
 
 #[cfg(windows)]
 pub(crate) mod windows_capability;
+
+/// P7-S4 — Windows production identity provider (§15 / §28).
+#[cfg(windows)]
+pub(crate) mod windows_identity;
 
 #[cfg(test)]
 mod tests {
@@ -417,6 +770,7 @@ mod tests {
                 status: 1,
             },
             IdentityBackendError::KeyCreateFailed { status: 1 },
+            IdentityBackendError::KeyAlreadyExists { status: 1 },
             IdentityBackendError::PropertySetFailed {
                 property: "Export Policy",
                 status: 1,
@@ -522,6 +876,255 @@ mod tests {
         assert_ne!(
             IdentityAvailabilityError::NoBackendAvailable.kind(),
             IdentityAvailabilityError::SecurityLevelUnverified.kind()
+        );
+    }
+
+    // --- P7-S4 — canonical public identity (§8 / §9 / §10) -------------------
+
+    /// A canonical P-256 SPKI: fixed prefix + SEC1 uncompressed point (91 bytes).
+    fn canonical_spki(fill: u8) -> Vec<u8> {
+        let mut spki = der::P256_SPKI_PREFIX.to_vec();
+        spki.push(0x04);
+        spki.extend(std::iter::repeat(fill).take(der::P256_POINT_LEN - 1));
+        spki
+    }
+
+    /// §9 — the fingerprint is `SHA-256(canonical SPKI DER)`, deterministic and hex-stable.
+    #[test]
+    fn fingerprint_is_sha256_of_the_canonical_spki() {
+        let spki = canonical_spki(0x11);
+        let identity = DevicePublicIdentity::from_spki(spki.clone()).expect("canonical spki");
+        assert_eq!(identity.algorithm(), DeviceIdentityAlgorithm::EcdsaP256Sha256);
+        assert_eq!(identity.spki_der(), &spki[..]);
+        assert_eq!(identity.spki_der().len(), der::P256_SPKI_LEN);
+
+        let expected = sha2::Sha256::digest(&spki);
+        assert_eq!(identity.fingerprint(), expected.as_slice());
+        assert_eq!(identity.fingerprint_hex().len(), 64);
+        assert!(identity.matches_fingerprint_hex(&der::hex(&identity.fingerprint())));
+
+        // Deterministic: the same bytes always yield the same identity reference.
+        let again = DevicePublicIdentity::from_spki(spki).expect("canonical spki");
+        assert_eq!(again.fingerprint(), identity.fingerprint());
+        // A different key is a different identity — the fingerprint is never constant.
+        let other = DevicePublicIdentity::from_spki(canonical_spki(0x22)).expect("canonical spki");
+        assert_ne!(other.fingerprint(), identity.fingerprint());
+    }
+
+    /// §8 — a provider-native blob must never become the canonical public identity.
+    #[test]
+    fn non_canonical_spki_is_rejected() {
+        let mut blob = vec![0u8; 8 + 2 * der::P256_SCALAR_LEN];
+        blob[0..4].copy_from_slice(&der::BCRYPT_ECDSA_PUBLIC_P256_MAGIC.to_le_bytes());
+        blob[4..8].copy_from_slice(&(der::P256_SCALAR_LEN as u32).to_le_bytes());
+        let error = DevicePublicIdentity::from_spki(blob).expect_err("blob must be rejected");
+        assert_eq!(error.kind(), "PUBLIC_IDENTITY_UNAVAILABLE");
+        assert_eq!(error.detail(), Some("NonCanonicalSpki"));
+
+        // Wrong length, and a well-formed length with the wrong algorithm identifier.
+        assert!(DevicePublicIdentity::from_spki(vec![0u8; 90]).is_err());
+        let mut wrong_alg = canonical_spki(0x11);
+        wrong_alg[4] = 0x00;
+        assert!(DevicePublicIdentity::from_spki(wrong_alg).is_err());
+    }
+
+    /// §11 / §12 — only the algorithms that exist have tokens, and they are stable.
+    #[test]
+    fn algorithm_and_signature_scheme_tokens_are_stable() {
+        assert_eq!(
+            DeviceIdentityAlgorithm::EcdsaP256Sha256.kind(),
+            "ecdsa-p256-sha256"
+        );
+        assert_eq!(
+            DeviceSignatureScheme::EcdsaP256Sha256.kind(),
+            "ecdsa-p256-sha256"
+        );
+        // The frozen algorithm survives a metadata round-trip unchanged (§3 / §19).
+        let json = serde_json::to_string(&DeviceIdentityAlgorithm::EcdsaP256Sha256)
+            .expect("serialize algorithm");
+        assert_eq!(json, "\"ecdsa-p256-sha256\"");
+        let back: DeviceIdentityAlgorithm = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, DeviceIdentityAlgorithm::EcdsaP256Sha256);
+    }
+
+    /// §21–§24 — every failure has a stable token, and the fail-closed answers never
+    /// collapse into "not provisioned" or into success.
+    #[test]
+    fn identity_error_kinds_are_stable_machine_tokens() {
+        let samples = [
+            IdentityError::Unavailable {
+                reason: IdentityAvailabilityError::NoBackendAvailable,
+            },
+            IdentityError::NotProvisioned,
+            IdentityError::IdentityMaterialMissing,
+            IdentityError::IdentityMetadataMissing,
+            IdentityError::FingerprintMismatch,
+            IdentityError::SecurityLevelMismatch,
+            IdentityError::MetadataCorrupt {
+                detail: "invalid_json",
+            },
+            IdentityError::MetadataIo {
+                detail: "read_failed",
+            },
+            IdentityError::ProviderFailure {
+                kind: "KeyCreateFailed",
+                status: Some(0x8009_0000),
+            },
+            IdentityError::SignFailed {
+                kind: "CngSign",
+                status: None,
+            },
+            IdentityError::PublicIdentityUnavailable {
+                kind: "PublicExportFailed",
+                status: Some(1),
+            },
+            IdentityError::ProvisionCleanupIncomplete {
+                kind: "KeyDeleteFailed",
+                status: Some(1),
+            },
+            IdentityError::UnexpectedPrivateExportSuccess,
+        ];
+        for error in &samples {
+            let kind = error.kind();
+            assert!(!kind.is_empty());
+            assert!(
+                kind.chars().all(|c| c.is_ascii_uppercase() || c == '_'),
+                "identity error tokens must be ASCII machine tokens, got {kind:?}"
+            );
+        }
+        // The two "identity is not usable" answers are distinct on purpose (§20–§22).
+        assert_ne!(
+            IdentityError::NotProvisioned.kind(),
+            IdentityError::IdentityMaterialMissing.kind()
+        );
+        // P7-S4R — the four "state is not what it should be" answers never collapse:
+        // an orphaned key (key present, no record) is neither "never provisioned" nor
+        // "key material lost", and drift is neither of the mismatch answers.
+        assert_ne!(
+            IdentityError::IdentityMetadataMissing.kind(),
+            IdentityError::IdentityMaterialMissing.kind()
+        );
+        assert_ne!(
+            IdentityError::IdentityMetadataMissing.kind(),
+            IdentityError::NotProvisioned.kind()
+        );
+        assert_ne!(
+            IdentityError::SecurityLevelMismatch.kind(),
+            IdentityError::FingerprintMismatch.kind()
+        );
+        // Raw OS statuses stay structured numbers (never prose).
+        assert_eq!(
+            IdentityError::ProviderFailure {
+                kind: "k",
+                status: Some(42)
+            }
+            .status(),
+            Some(42)
+        );
+    }
+
+    // --- §35 — platform-neutrality of the FULL capability --------------------
+
+    /// A stand-in for a future `AndroidDeviceIdentityProvider`.
+    ///
+    /// It implements the whole production capability — `resolve`, `ensure_identity`,
+    /// `public_identity`, `sign` — using ONLY platform-neutral types:
+    /// no Windows backend, no provider name, no raw OS status, no Win32 handle. If this
+    /// compiles, the shared contract genuinely carries no Windows dependency (§6 / §35).
+    struct FakeProductionIdentityProvider {
+        readiness: DeviceIdentityReadiness,
+    }
+
+    impl DeviceIdentityProvider for FakeProductionIdentityProvider {
+        fn resolve(&self) -> DeviceIdentityReadiness {
+            self.readiness
+        }
+    }
+
+    impl DeviceIdentityCapability for FakeProductionIdentityProvider {
+        fn ensure_identity(
+            &self,
+            _metadata_dir: &std::path::Path,
+        ) -> Result<DevicePublicIdentity, IdentityError> {
+            // Without a platform provider an identity simply cannot be established.
+            Err(IdentityError::Unavailable {
+                reason: IdentityAvailabilityError::NoBackendAvailable,
+            })
+        }
+
+        fn public_identity(
+            &self,
+            _metadata_dir: &std::path::Path,
+        ) -> Result<DevicePublicIdentity, IdentityError> {
+            Err(IdentityError::NotProvisioned)
+        }
+
+        fn sign(
+            &self,
+            _metadata_dir: &std::path::Path,
+            _message: &[u8],
+        ) -> Result<DeviceSignature, IdentityError> {
+            Err(IdentityError::NotProvisioned)
+        }
+    }
+
+    /// §35 — compile-level proof that a non-Windows provider can implement the full
+    /// capability, and that its answers are the shared, platform-neutral ones.
+    #[test]
+    fn future_non_windows_provider_implements_the_full_capability() {
+        let provider = FakeProductionIdentityProvider {
+            readiness: DeviceIdentityReadiness::Ready {
+                security_level: IdentitySecurityLevel::HardwareBacked,
+            },
+        };
+        assert!(provider.resolve().is_ready());
+
+        let dir = std::path::Path::new("/tmp/never-used");
+        match provider.ensure_identity(dir) {
+            Err(IdentityError::Unavailable { reason }) => {
+                assert_eq!(reason.kind(), "NO_BACKEND_AVAILABLE");
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
+        assert_eq!(
+            provider.public_identity(dir).expect_err("not provisioned").kind(),
+            "NOT_PROVISIONED"
+        );
+        assert_eq!(
+            provider.sign(dir, b"message").expect_err("not provisioned").kind(),
+            "NOT_PROVISIONED"
+        );
+        // P7-S4R — no reset/rotate method exists on the V1 shared capability: the
+        // destructive boundary is a frozen architecture semantic, not a fake API.
+    }
+
+    /// §4 — the shared security classification names a PROPERTY, never a platform: the
+    /// two levels are the whole vocabulary an Android TEE / StrongBox backend needs.
+    #[test]
+    fn security_level_vocabulary_stays_property_based() {
+        // The shared classification names a SECURITY PROPERTY, so its vocabulary is
+        // exactly two property-shaped variants — an Android TEE / StrongBox backend maps
+        // onto the same two without the shared layer ever learning a platform name (§4).
+        assert_ne!(
+            IdentitySecurityLevel::HardwareBacked,
+            IdentitySecurityLevel::SoftwareIsolated
+        );
+        assert_eq!(
+            format!("{:?}", IdentitySecurityLevel::HardwareBacked),
+            "HardwareBacked"
+        );
+        assert_eq!(
+            format!("{:?}", IdentitySecurityLevel::SoftwareIsolated),
+            "SoftwareIsolated"
+        );
+        // The persisted (metadata) form is property-based as well.
+        assert_eq!(
+            serde_json::to_string(&IdentitySecurityLevel::HardwareBacked).expect("serialize"),
+            "\"hardware_backed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&IdentitySecurityLevel::SoftwareIsolated).expect("serialize"),
+            "\"software_isolated\""
         );
     }
 }

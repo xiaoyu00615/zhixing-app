@@ -13,19 +13,21 @@
 //!   TPM (§9).
 //! - The probe key is a **temporary test key** in a dedicated namespace; it is never a
 //!   production Device Identity and is always deleted (§16 / §17 / §27).
-//! - `ECDSA P-256` is used here as a **TEST / CAPABILITY PROBE ONLY** value (§10). It
-//!   is NOT the frozen identity algorithm.
+//! - The algorithm exercised here (`ECDSA P-256`) is the frozen V1 Device Identity
+//!   algorithm (P7-S4 §3), but the key this module creates is still a throwaway **test
+//!   key** in the `zhixing-test-*` namespace — never a production Device Identity.
 //! - The private-export negative test never materializes private bytes: it queries the
 //!   export and reads **only the status code** (§15). Private material is never
 //!   allocated, printed, logged or returned by any function in this file.
 
 use super::IdentityBackendError;
 use windows_sys::core::PCWSTR;
-use windows_sys::Win32::Foundation::NTE_BAD_KEYSET;
+use windows_sys::Win32::Foundation::{NTE_BAD_KEYSET, NTE_EXISTS};
 use windows_sys::Win32::Security::Cryptography::{
     NCryptCreatePersistedKey, NCryptDeleteKey, NCryptExportKey, NCryptFinalizeKey,
     NCryptFreeObject, NCryptGetProperty, NCryptOpenKey, NCryptOpenStorageProvider,
-    NCryptSetProperty, BCRYPT_ECCPRIVATE_BLOB, BCRYPT_ECCPUBLIC_BLOB, BCRYPT_ECDSA_P256_ALGORITHM,
+    NCryptSetProperty, NCryptSignHash, BCRYPT_ECCPRIVATE_BLOB, BCRYPT_ECCPUBLIC_BLOB,
+    BCRYPT_ECDSA_P256_ALGORITHM,
     MS_KEY_STORAGE_PROVIDER, NCRYPT_EXPORT_POLICY_PROPERTY, NCRYPT_KEY_HANDLE, NCRYPT_PROV_HANDLE,
 };
 
@@ -301,12 +303,12 @@ impl GateASlots {
 // ---------------------------------------------------------------------------
 
 /// NUL-terminated UTF-16 buffer for the `PCWSTR` parameters that take a runtime string.
-fn wide(value: &str) -> Vec<u16> {
+pub(crate) fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0u16)).collect()
 }
 
 /// §16 — a fresh, unique key name inside the dedicated test namespace.
-fn unique_test_key_name(purpose: &str) -> String {
+pub(crate) fn unique_test_key_name(purpose: &str) -> String {
     format!("{TEST_KEY_PREFIX}{purpose}-{}", uuid::Uuid::new_v4())
 }
 
@@ -350,7 +352,26 @@ pub(crate) fn keystore_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|error| error.into_inner())
 }
 
-fn create_persisted_key(
+/// Pure classifier for a raw `NCryptCreatePersistedKey` status (P7-S4R §12).
+///
+/// `NTE_EXISTS` is classified separately: it means a FINALIZED key with this name already
+/// exists, and the required answer is "do not overwrite — re-enter state reconciliation",
+/// not "creation failed". Kept pure so the rule is unit-testable without a real race.
+pub(crate) fn classify_create_key_status(status: i32) -> Result<(), IdentityBackendError> {
+    if status == CNG_SUCCESS {
+        Ok(())
+    } else if status as u32 == NTE_EXISTS as u32 {
+        Err(IdentityBackendError::KeyAlreadyExists {
+            status: status as u32,
+        })
+    } else {
+        Err(IdentityBackendError::KeyCreateFailed {
+            status: status as u32,
+        })
+    }
+}
+
+pub(crate) fn create_persisted_key(
     provider: &CngProviderHandle,
     key_name: &str,
     algorithm: PCWSTR,
@@ -376,11 +397,9 @@ fn create_persisted_key(
     let status = unsafe {
         NCryptCreatePersistedKey(provider.raw(), &mut handle, algorithm, name.as_ptr(), 0, 0)
     };
-    if status != CNG_SUCCESS {
-        return Err(IdentityBackendError::KeyCreateFailed {
-            status: status as u32,
-        });
-    }
+    // P7-S4R §12 — `NTE_EXISTS` is reported as its own verdict so a caller never
+    // overwrites an existing production-name key to "make creation succeed".
+    classify_create_key_status(status)?;
     Ok(handle)
 }
 
@@ -411,14 +430,14 @@ fn set_export_policy(key: NCRYPT_KEY_HANDLE, policy: u32) -> Result<(), Identity
 }
 
 /// §12 — disables private export: `NCRYPT_EXPORT_POLICY_PROPERTY = 0` ("no export permitted").
-fn set_export_policy_disabled(key: NCRYPT_KEY_HANDLE) -> Result<(), IdentityBackendError> {
+pub(crate) fn set_export_policy_disabled(key: NCRYPT_KEY_HANDLE) -> Result<(), IdentityBackendError> {
     set_export_policy(key, EXPORT_POLICY_DISABLED)
 }
 
 /// Reads a DWORD property. Failure is reported through
 /// [`IdentityBackendError::PropertySetFailed`], whose documented scope covers a failed
 /// read-back verification of a property THIS slice wrote — not only the write itself.
-fn read_dword_property(
+pub(crate) fn read_dword_property(
     key: NCRYPT_KEY_HANDLE,
     property: PCWSTR,
     label: &'static str,
@@ -446,7 +465,7 @@ fn read_dword_property(
     Ok(value)
 }
 
-fn finalize_key(key: NCRYPT_KEY_HANDLE) -> Result<(), IdentityBackendError> {
+pub(crate) fn finalize_key(key: NCRYPT_KEY_HANDLE) -> Result<(), IdentityBackendError> {
     // SAFETY: `key` is a live persisted-key handle created by this module.
     let status = unsafe { NCryptFinalizeKey(key, 0) };
     if status != CNG_SUCCESS {
@@ -457,12 +476,15 @@ fn finalize_key(key: NCRYPT_KEY_HANDLE) -> Result<(), IdentityBackendError> {
     Ok(())
 }
 
-/// Exports a PUBLIC blob and returns ONLY its length. The bytes are dropped immediately:
-/// the caller needs the capability, not the material.
-fn export_public_blob_len(
+/// Exports a PUBLIC blob and returns its bytes.
+///
+/// Gate A itself only needs the LENGTH (it proves capability, not material), while the
+/// production identity path needs the bytes to derive the canonical public identity — one
+/// export routine serves both, and neither ever touches private material.
+pub(crate) fn export_public_blob(
     key: NCRYPT_KEY_HANDLE,
     blob_type: PCWSTR,
-) -> Result<u32, IdentityBackendError> {
+) -> Result<Vec<u8>, IdentityBackendError> {
     // First call: size query only.
     let mut needed: u32 = 0;
     // SAFETY: a NULL output buffer with `cbOutput = 0` is the documented size-query form
@@ -511,7 +533,8 @@ fn export_public_blob_len(
             status: status as u32,
         });
     }
-    Ok(written)
+    buffer.truncate(written as usize);
+    Ok(buffer)
 }
 
 /// Attempts a PRIVATE blob export and returns ONLY the status code.
@@ -520,7 +543,7 @@ fn export_public_blob_len(
 /// provider were ever to permit the export, the very last thing this code should do is
 /// capture the private material (§15). A `0` status is proof enough that the key was
 /// exportable — the caller treats that as a failure.
-fn attempt_private_export_status(key: NCRYPT_KEY_HANDLE, blob_type: PCWSTR) -> u32 {
+pub(crate) fn attempt_private_export_status(key: NCRYPT_KEY_HANDLE, blob_type: PCWSTR) -> u32 {
     let mut needed: u32 = 0;
     // SAFETY: a NULL output buffer with `cbOutput = 0` is the documented size-query form,
     // and `needed` is a valid out-parameter. No caller-owned buffer is passed, so no
@@ -607,7 +630,7 @@ pub(crate) fn classify_open_key_status(status: i32) -> PersistedKeyPresence {
 
 /// Read-only presence probe. Frees the handle it opens and never deletes anything, which
 /// is what makes it usable as proof that a deletion already happened (§17).
-fn persisted_key_is_present(provider: &CngProviderHandle, key_name: &str) -> PersistedKeyPresence {
+pub(crate) fn persisted_key_is_present(provider: &CngProviderHandle, key_name: &str) -> PersistedKeyPresence {
     let name = wide(key_name);
     let mut handle: NCRYPT_KEY_HANDLE = 0;
     // SAFETY: the provider handle is live, `name` is a NUL-terminated UTF-16 buffer that
@@ -622,6 +645,159 @@ fn persisted_key_is_present(provider: &CngProviderHandle, key_name: &str) -> Per
         }
     }
     presence
+}
+
+/// A live key handle that is FREED but never DELETED (P7-S4).
+///
+/// [`PersistedTestKey`] owns the *deletion* obligation, which is exactly right for a
+/// throwaway probe key and catastrophic for a production identity key. The production
+/// path therefore gets its own RAII wrapper whose only `Drop` action is
+/// `NCryptFreeObject`: opening an identity key can never delete it.
+pub(crate) struct CngKeyHandle(NCRYPT_KEY_HANDLE);
+
+impl CngKeyHandle {
+    /// Takes ownership of a handle that was just produced by a successful create/open.
+    ///
+    /// There is no way to obtain such a handle other than a successful CNG call, so this
+    /// cannot be used to adopt an arbitrary value.
+    pub(crate) fn from_raw(handle: NCRYPT_KEY_HANDLE) -> Self {
+        Self(handle)
+    }
+
+    pub(crate) fn raw(&self) -> NCRYPT_KEY_HANDLE {
+        self.0
+    }
+}
+
+impl Drop for CngKeyHandle {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is a live key handle produced by a successful
+        // `NCryptOpenKey`, and `Drop` runs exactly once, so it is freed exactly once.
+        unsafe {
+            NCryptFreeObject(self.0);
+        }
+    }
+}
+
+/// Opens an existing persisted key WITHOUT deleting it (P7-S4).
+///
+/// `Ok(None)` means "absent" (only `NTE_BAD_KEYSET` may be read that way). A presence
+/// probe that could not determine the answer is returned as an error, because "could not
+/// prove absence" must never be flattened into "absent" (fail closed).
+pub(crate) fn open_persisted_key(
+    provider: &CngProviderHandle,
+    key_name: &str,
+) -> Result<Option<CngKeyHandle>, IdentityBackendError> {
+    let name = wide(key_name);
+    let mut handle: NCRYPT_KEY_HANDLE = 0;
+    // SAFETY: the provider handle is live, `name` is a NUL-terminated UTF-16 buffer that
+    // outlives the call, and `handle` is a valid out-parameter.
+    let status = unsafe { NCryptOpenKey(provider.raw(), &mut handle, name.as_ptr(), 0, 0) };
+    match classify_open_key_status(status) {
+        PersistedKeyPresence::Present => Ok(Some(CngKeyHandle(handle))),
+        PersistedKeyPresence::Absent => Ok(None),
+        PersistedKeyPresence::ProbeFailed { status } => {
+            Err(IdentityBackendError::KeyPresenceProbeFailed {
+                key_name: key_name.to_string(),
+                status,
+            })
+        }
+    }
+}
+
+/// Deletes a persisted key, taking ownership of its handle (P7-S4 cleanup, §17 / §40).
+///
+/// Ownership follows the rule encoded in [`classify_delete_outcome`]: a successful
+/// `NCryptDeleteKey` CONSUMES the handle, so `Drop` must not run afterwards (the handle is
+/// forgotten first); a failed delete leaves the handle owned, so it is freed here to avoid
+/// a leak. The raw status travels with the error so a failed cleanup can never be reported
+/// as a successful one.
+pub(crate) fn delete_persisted_key(
+    key: CngKeyHandle,
+    key_name: &str,
+) -> Result<(), IdentityBackendError> {
+    let handle = key.raw();
+    // The delete consumes the handle; suppress the `Drop` free.
+    std::mem::forget(key);
+    // SAFETY: `handle` is a live persisted-key handle owned by this call.
+    let status = unsafe { NCryptDeleteKey(handle, 0) };
+    if status != CNG_SUCCESS {
+        // SAFETY: the delete failed, so the key and its still-owned handle remain.
+        unsafe {
+            NCryptFreeObject(handle);
+        }
+        return Err(IdentityBackendError::CleanupFailed {
+            key_name: key_name.to_string(),
+            status: status as u32,
+        });
+    }
+    Ok(())
+}
+
+/// Signs an ALREADY-COMPUTED SHA-256 digest with a persisted key (§28).
+///
+/// For ECDSA the padding info must be NULL and the input must be the digest, which is why
+/// the production provider hashes the UNHASHED message EXACTLY ONCE before calling this.
+/// The returned bytes are the provider's NATIVE format (P-1363 on Windows) and are
+/// classified by the caller before any conversion — nothing here assumes a format.
+pub(crate) fn sign_hash(
+    key: NCRYPT_KEY_HANDLE,
+    digest: &[u8],
+) -> Result<Vec<u8>, IdentityBackendError> {
+    if digest.len() != 32 {
+        // A non-SHA-256 digest can never produce a valid ECDSA-NISTP256 signature; refuse
+        // it here rather than letting the provider return a misleading status.
+        return Err(IdentityBackendError::SignFailed { status: 0 });
+    }
+
+    // Step 1: size query. Not every provider supports it, so a failure here is not fatal —
+    // the deterministic fallback below is a generous fixed buffer (a P-256 signature is 64
+    // bytes native / at most 72 DER; 128 can never truncate).
+    let mut needed: u32 = 0;
+    // SAFETY: a NULL signature buffer with `cbSignature = 0` is the documented size-query
+    // form; `digest` is a live 32-byte buffer and `needed` a valid out-parameter.
+    let size_status = unsafe {
+        NCryptSignHash(
+            key,
+            std::ptr::null(),
+            digest.as_ptr(),
+            digest.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+            0,
+        )
+    };
+    let capacity = if size_status == CNG_SUCCESS && needed > 0 {
+        needed as usize
+    } else {
+        128
+    };
+
+    // Step 2: the real signature.
+    let mut buffer = vec![0u8; capacity];
+    let mut written: u32 = 0;
+    // SAFETY: `buffer` has `capacity` bytes, `digest` is a live 32-byte buffer, and
+    // `written` is a valid out-parameter.
+    let status = unsafe {
+        NCryptSignHash(
+            key,
+            std::ptr::null(),
+            digest.as_ptr(),
+            digest.len() as u32,
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            &mut written,
+            0,
+        )
+    };
+    if status != CNG_SUCCESS {
+        return Err(IdentityBackendError::SignFailed {
+            status: status as u32,
+        });
+    }
+    buffer.truncate(written as usize);
+    Ok(buffer)
 }
 
 // ---------------------------------------------------------------------------
@@ -741,7 +917,7 @@ fn gate_a_steps(
     report.finalized = true;
 
     // 5) §13 — the PUBLIC blob must still be obtainable, and non-empty.
-    report.public_export_bytes = export_public_blob_len(handle, BCRYPT_ECCPUBLIC_BLOB)?;
+    report.public_export_bytes = export_public_blob(handle, BCRYPT_ECCPUBLIC_BLOB)?.len() as u32;
 
     // 6) §14 — the PRIVATE blob must NOT be obtainable. "public identity is readable"
     //    must not imply "private material is exportable": this is the core of Gate A.
@@ -1107,9 +1283,9 @@ mod tests {
         finalize_key(handle).expect("finalizing the control test key must succeed");
 
         // PUBLIC identity remains readable on an exportable key (§14).
-        let public_bytes = export_public_blob_len(handle, BCRYPT_ECCPUBLIC_BLOB)
+        let public_bytes = export_public_blob(handle, BCRYPT_ECCPUBLIC_BLOB)
             .expect("public export must succeed on the exportable control key");
-        assert!(public_bytes > 0, "public blob must be non-empty");
+        assert!(!public_bytes.is_empty(), "public blob must be non-empty");
 
         // The PRIVATE blob size query is now permitted; only the size is read, never the bytes.
         let private_size = query_private_export_required_size(handle, BCRYPT_ECCPRIVATE_BLOB)
@@ -1134,8 +1310,9 @@ mod tests {
 
         eprintln!(
             "GATE_A_CONTROL export_policy=0x{export_policy:08X} readback=0x{readback:08X} \
-             public_export_bytes={public_bytes} private_size_query=SUCCESS private_required_size={private_size} \
-             private_bytes_allocated=false"
+             public_export_bytes={public_bytes_len} private_size_query=SUCCESS private_required_size={private_size} \
+             private_bytes_allocated=false",
+            public_bytes_len = public_bytes.len()
         );
     }
 
@@ -1278,6 +1455,25 @@ mod tests {
                 assert_eq!(reported, status as u32);
             }
             other => panic!("unexpected OpenKey status must be ProbeFailed, got {other:?}"),
+        }
+    }
+
+    /// P7-S4R §12 — a duplicate FINALIZED key name is its own verdict, so the caller can
+    /// re-enter state reconciliation instead of overwriting an existing key.
+    #[test]
+    fn classify_create_key_status_nte_exists_is_a_distinct_verdict() {
+        assert!(classify_create_key_status(0).is_ok());
+        match classify_create_key_status(NTE_EXISTS as i32) {
+            Err(IdentityBackendError::KeyAlreadyExists { status }) => {
+                assert_eq!(status, NTE_EXISTS as u32);
+            }
+            other => panic!("NTE_EXISTS must classify as KeyAlreadyExists, got {other:?}"),
+        }
+        match classify_create_key_status(NTE_INVALID_HANDLE as i32) {
+            Err(IdentityBackendError::KeyCreateFailed { status }) => {
+                assert_eq!(status, NTE_INVALID_HANDLE as u32);
+            }
+            other => panic!("any other failure must classify as KeyCreateFailed, got {other:?}"),
         }
     }
 
