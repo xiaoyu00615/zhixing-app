@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "知行",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "identifier": "app.zhixing.desktop",
   "build": {
     "frontendDist": "../dist",
